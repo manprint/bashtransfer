@@ -1,0 +1,229 @@
+# Bashtransfer — Implementation state
+
+Read first at every session. Updated 2026-10-27 by agent-1 (claude-haiku-5-5, planning).
+Plan ID: 001. Revision: 1. Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
+Plan baseline: nessun commit (HEAD non nato su `main`); pre-existing changes: `Specifiche.md` non tracciato, di proprietà dell'utente, non è output del piano.
+Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito dell'utente: solo Haiku 5.5, nessun Sonnet né Opus). Active execution style: handoff.
+State writer: nessuno ancora (piano non in esecuzione); ownership: released.
+
+## 0. Resume and completion protocol
+
+1. Leggi questo file. Identifica readiness, scope attivo, ruolo, unità/tentativo, step, checkpoint, branch e baseline. Una nuova sessione riprende solo dopo che il precedente state writer ha rilasciato la proprietà. Un worker delegato resta nell'unità OPEN assegnata e non possiede stato né commit.
+2. Ispeziona `git status` e diff staged/working e postcondizioni del checkpoint (HEAD può non esistere: baseline senza commit). Preserva modifiche non tue, inclusi hunk in file condivisi. Non riconciliare un'unità prima di aver verificato il diff reale. Un'unità OPEN riprende dal primo step non verificato, anche se il checkpoint è vecchio.
+3. Leggi la fase/unità puntata e i contratti locali. Controlla le righe delle sub-phase prerequisite e gli artefatti. Localizza i simboli, non fidarti dei numeri di riga. Un contratto cambiato o un design mancante va all'agente 1 (supervisore). Dati esterni: nessuna ricerca web senza autorizzazione esplicita (CLAUDE.md utente).
+4. Apri prima di modificare: tipo, ID, tentativo, OPEN, base dell'unità, path di proprietà, step S1; marca sub-phase e fase IN_PROGRESS. Checkpoint in §6 prima di handoff, risorse lunghe o rischiose, blocchi, o pausa probabile. Step ordinari e test passati non richiedono scritture di stato.
+5. Test focalizzati a fine sub-phase, gate completo a P<N>, confermando che i test previsti sono stati eseguiti (conteggio non zero). Un gate futuro non è pass. Un gate richiesto mancante, bloccato, a zero test o fallito impedisce DONE.
+6. Chiudi l'unità: documentazione, aggiornamento ledger in §4, progresso in §11, prossima unità eleggibile. Commit solo se la policy lo richiede (vedi §3). Riferimento commit: `unit:<id>:<tentativo>` con trailer `PEV-Plan`, `PEV-Unit`, `PEV-Attempt`, `PEV-Result: complete`. Se commit disabilitati: `uncommitted`, nessun stage né commit.
+7. Interruzione prima del commit: riferimento non risolto = chiusura pendente; riconcilia prima di nuovo lavoro. Se già committato: risolvi il riferimento, nessun doppio commit.
+8. Dopo le sub-phase: apri P<N> per gate completi e revisione del supervisore. Registra DONE della fase.
+9. Escalation: un worker chiede al supervisore decisioni mancanti o dopo due tentativi falliti sullo stesso problema. Il supervisore può rivedere step tecnici senza cambiare requisiti; registra revisione in §8. Mai indebolire accettazione. Nuove scelte di prodotto, scope o autorità esterna → utente.
+10. Su handoff: salva azione esatta successiva, modifiche pendenti, evidenze, rilascio proprietà.
+
+## 1. Current unit and scope
+
+- Active scope: plan 001 intero, fasi 0–4 (richiesta utente: "Fai tutte le fasi in autonomia")
+- Scope result: RUNNING
+- Type: none
+- ID / attempt: none
+- Status: none
+- Intent: none
+- Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
+- File / unit heading: none
+- Current step: none
+- Next action: sub-phase 0.1 (probe R1), poi 0.2, ... secondo ordine di handoff in §2.
+- Next eligible plan unit: 0.1 (`phase_01.md`)
+- Unit base: none; branch: main (nessun commit); owned changes: none
+- Repo state: nessun commit; `Specifiche.md` non tracciato; `docs/plans/001_plan-Bashtransfer/` non tracciato (creato in planning, nessun commit richiesto in planning).
+
+## 2. Feature context and readiness
+
+Readiness: READY dopo ok esplicito dell'utente per l'esecuzione. Revisione 1, autore agent-1 (claude-haiku-5-5). Cold review (self-review, agente fresco Haiku 5.5) eseguita e correzioni applicate: vedi §7.
+Ordine di handoff: 0.1, 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, P2, 3.1, P3, 4.1, 4.2, 4.3, P4.
+Eleggibile ora: solo 0.1. Dipendenze: 0.2 da 0.1 (R1 branch A); 1.1 da 0.2; 1.2 da 1.1; 2.1 e 2.2 da 1.2; 3.1 da 1.2; 4.1 da P2 (o 2.1 SKIPPED) e P3; 4.2 da 4.1 e da R2 S1; 4.3 da 4.1, 4.2 e 2.1.
+Blocchi aperti: B-R1 e B-R3 (verifica locale in 0.1 e 0.2); B-R2 residuo (`client_body_timeout`, 4.2 S1). Nessuna decisione utente aperta.
+Blocco P0 finché 0.1 non registra R1 CONFIRMED con branch A; branch B = escalation utente.
+
+Goal: relay curl/wget per file e cartelle, senza persistenza, in Go, con docker compose e nginx. Esclusioni in `overview.md` § Goal. Scenario di riferimento RS-1 in `overview.md`.
+
+Current decisions: D1–D14 in `overview.md`; D15 (timeout inattività, aggiunta da 2.2 entro i requisiti approvati).
+Questions: Q1 risolta dall'utente — auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug.
+Research evidence: `overview.md` § Research and evidence — R1 UNVERIFIED (probe 0.1), R2 CONFIRMED in larga parte (nginx.org, rete autorizzata; residuo `client_body_timeout`), R3 UNVERIFIED (verifica locale in 0.2).
+Required unverified external claims: R1 (locale), R3 (locale), R2 (residuo `client_body_timeout`, 4.2 S1). Blocker: §9 B-R1, B-R2, B-R3.
+Required supervisor reviews cannot be silently replaced by weaker self-review: la revisione di agent-1 è self-review dello stesso modello (Haiku 5.5); non va registrata come revisione forte.
+
+## 3. Environment, settings, and gate registry
+
+- Full autonomous: true (override esplicito utente, invocazione `001 ... full-autonomous:true --wip-commit`)
+- WIP commits: on (override esplicito utente)
+- Completion policy: full autonomy true → commit locale per ogni sub-phase completata e per ogni chiusura P<N>; WIP on → commit di interruzione con `PEV-Result: wip`. Nessun push, nessun deploy, nessun branch remoto. Autorizzazioni di rete: solo nginx.org (docs) e pull di immagini Docker pinnate.
+- Commit identity: `GIT_AUTHOR_NAME=fabio.pierri`, `GIT_AUTHOR_EMAIL=fabio.pierri@synclab.it` passati per comando (nessuna modifica a git config). Trailer di attribuzione: `Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>`.
+- Scope/roster survive handoff. Explicit invocation overrides stored settings.
+- Execution style: handoff (sessioni successive). Nessun dispatch automatico al supervisore: il supervisore è un agente dello stesso modello nella stessa configurazione; la richiesta di review si registra in §7 come self-review.
+- Setup: Go (versione da 0.2; nessuna dipendenza esterna); curl locale (versione da 0.1); Docker + immagini base (4.1, rete); nginx (4.2, rete). Directory di scratch fuori dal repository per probe e binari temporanei. Porte locali libere scelte e registrate. Pulizia: terminare processi di prova e rimuovere solo directory create dallo script.
+- Supervisor access: agent-1 (claude-haiku-5-5), sessione separata o stesso agente con ruolo di revisore; nessun modello più forte disponibile per il progetto.
+
+| Gate | Stage / active from | Exact command and cwd | Required assertions/discovery | Setup |
+|------|---------------------|-----------------------|-------------------------------|-------|
+| G-BASE | baseline, prima di 0.2 | `git status --short` (cwd radice repo); `go version` | snapshot: `Specifiche.md` e `docs/plans/` non tracciati; versione Go registrata | Go installato |
+| G-U0.2 | sub-phase 0.2 | `go vet ./...` (radice repo) | exit 0; `go list ./...` non vuoto | `go.mod` da 0.2 |
+| G-R1 | sub-phase 0.1 | probe in directory di scratch fuori repo (`probe_server.py` su `127.0.0.1`) + verifica log | log con `PUT_START`, `BODY_END`, risposta prima di `BODY_END` (branch A) | curl locale, porta libera |
+| G-U1.1 | sub-phase 1.1 | `go test ./internal/config ./internal/slug ./internal/relay -run 'TestLoad|TestGenerate|TestRegistry' -v -count=1 -race` (radice) | 12 test: 3 config, 3 slug, 6 registry; nessuno saltato | nessuno |
+| G-U1.2 | sub-phase 1.2 | `go test ./internal/relay ./internal/server -v -count=1 -race` (radice) | copy: 3 test; server: upload commands, round trip (4 sottotest), 404, 410, abort, cleanup, 405 | nessuno |
+| G-E2E1 | sub-phase 1.3 | `bash scripts/e2e.sh` (radice) | output `E2E OK`; sha256 identico; 410; 404 | curl, porta libera, go build |
+| G-U2.1 | sub-phase 2.1 | `go test ./internal/server -run 'TestBasicAuth|TestUploadRequiresAuth' -v -count=1 -race` | 6 test | nessuno (auth solo PUT) |
+| G-U2.2 | sub-phase 2.2 | `go test ./internal/server ./internal/config ./internal/relay -v -count=1 -race` | sanitize (tabella), idle timeout, headers, config idle | nessuno |
+| G-E2E2 | fine P2 | `bash scripts/e2e.sh` con env auth | nome con spazi; upload con auth riesce, senza auth 401, download senza auth riesce | nessuno |
+| G-P1 | P1 | `go test -race -count=1 ./...` (radice) + G-E2E1 | conteggio non zero; nessun fallimento | nessuno |
+| G-P2 | P2 | `go test -race -count=1 ./...` + G-E2E2 | conteggio non zero | nessuno |
+| G-BENCH | sub-phase 3.1 | `bash scripts/bench.sh` (radice) | 5 campioni per benchmark; mediana relay ≥ 0.90 × baseline (D13) | macchina stabile, nessun altro carico |
+| G-U3.1 | sub-phase 3.1 | `go test ./internal/server -run TestBenchHarnessSmoke -v -count=1 -race` | 1 test; 1 MiB ricevuto esatti | nessuno |
+| G-P3 | P3 | `go test -race -count=1 ./...` | conteggio non zero | nessuno |
+| G-D1 | sub-phase 4.1 | `docker compose -f compose.yaml config` (radice); `docker build -t bashtransfer:test .` | config exit 0, nessun `ports:` su `app`; build pass **o** blocked (rete) | Docker; immagini base locali o rete autorizzata |
+| G-E2E-FINAL | sub-phase 4.2 (R2 residuo `client_body_timeout`) | RS-1 via compose + nginx: `bash scripts/e2e.sh` puntato a porta nginx; upload 256 MiB senza troncamento | sha256 identico; 410 | 4.1 + 4.2 + rete |
+| G-FINAL | ultimo P4 | `go test -race -count=1 ./...`; G-E2E-FINAL; G-BENCH già PASS in P3 | conteggio non zero; RS-1 completo | tutti i precedenti |
+
+Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` non conta come pass.
+
+## 4. Work ledger
+
+| Type | ID / attempt | Plan revision | Agent | Changes | Evidence/review | Commit |
+|------|--------------|---------------|-------|---------|-----------------|--------|
+| sub-phase | 0.1 / 1 | 1 | agent-2 (claude-haiku-5-5), state writer sessione corrente | overview R1; STATE; cartella piano (non tracciata prima, inclusa per provenienza) | G-R1 pass branch A; self-review §7 | unit:0.1:1 (risolto da trailer) |
+| plan | 001 / 1 | 1 | agent-1 (claude-haiku-5-5) | cartella piano: overview, phase_01..phase_05, STATE | nessuna esecuzione; nessuna revisione di codice | uncommitted (planning non committa) |
+| plan | 001 / 1 (cold review) | 1 | agent-1 (claude-haiku-5-5) | correzioni a–l in phase_02, phase_04, phase_05, STATE; Q1 e rete registrate | cold review self (Haiku fresco, nessun contesto di pianificazione) | uncommitted |
+
+Le righe sono append-only. Commit reference: vedi §0.6.
+
+## 5. Files and ownership
+
+| Path/hunks | Existing changes to preserve | Unit changes | Owning unit |
+|------------|------------------------------|--------------|-------------|
+| `Specifiche.md` | non tracciato, di proprietà utente, non modificare | nessuna | nessuno (utente) |
+| `docs/plans/001_plan-Bashtransfer/**` | creato in planning | solo aggiornamenti di stato e di R-evidenze da unità | planning (001) |
+| `go.mod`, `.gitignore`, `cmd/bashtransfer/main.go` (placeholder) | nessuno | NEW | 0.2 |
+| `internal/config/**` | — | NEW | 1.1 (estesa in 2.2) |
+| `internal/slug/**` | — | NEW | 1.1 |
+| `internal/relay/**` | — | NEW | 1.1 (registry), 1.2 (copy), 2.2 (deadline) |
+| `internal/server/**` | — | NEW | 1.2, 2.1 (auth), 2.2, 3.1 (bench) |
+| `cmd/bashtransfer/main.go` | placeholder di 0.2 | WRITE | 1.3 (main), 2.1 (auth wiring) |
+| `scripts/e2e.sh`, `scripts/bench.sh` | — | NEW | 1.3, 3.1 |
+| `Dockerfile`, `.dockerignore`, `compose.yaml` | — | NEW | 4.1 (4.2 aggiunge nginx) |
+| `deploy/nginx/bashtransfer.conf` | — | NEW | 4.2 |
+| `README.md` | — | NEW | 4.3 |
+
+## 6. In-flight checkpoint
+
+none — nessuna unità aperta. Planning non ha scritto checkpoint di esecuzione.
+Research checkpoint: N/A — ricerca web non eseguita (rete non autorizzata); R1/R3 da eseguire in 0.1/0.2; R2 pendente di autorizzazione.
+
+## 7. Verification and reviews
+
+| Gate/test | Command | Result | Test count/named evidence | Tested revision/diff | When |
+|-----------|---------|--------|--------------------------|---------------------|------|
+| G-R1 (0.1) | probe `curl -N -T` su `127.0.0.1`, server di probe in scratch fuori repo | pass (branch A) | S3: riga `COMANDI-DI-PROVA` entro 2 ms dalla risposta; `BODY_END` +3 s, 8388608/8388608 byte. S4: path `/probe-name.zip`, `/payload.bin` (basename). Prima passata con risposta `Content-Length` scartata (body troncato) | overview R1, working tree pre-commit | 2026-10-27 |
+
+| Review | Reviewer | Plan revision / reviewed change | Invariants/assertions checked | Verdict |
+|--------|----------|---------------------------------|------------------------------|---------|
+| Review 0.1 (self-review, stesso modello) | agent-1 (claude-haiku-5-5), sessione corrente | rev 1 / overview R1 + log probe | esito R1 branch A; path con nome; vincolo D4 (risposta aperta fino a fine relay) | PASS, self-review; non revisione forte |
+
+Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass soddisfa un gate richiesto.
+
+| Review | Reviewer | Plan revision / reviewed change | Invariants/assertions checked | Verdict |
+|--------|----------|---------------------------------|------------------------------|---------|
+| Cold review piano (self-review, agente fresco Haiku 5.5, nessun contesto di pianificazione; non è revisione forte) | agent-1 (claude-haiku-5-5) | rev 1 / overview, phase_01..05, STATE | step mancanti in 1.2; regola base URL; placeholder D11; conteggio test server 7; timing review (prima di `handler.go`); ownership; meccanica dei test di abort; corpi 503/401; baseline senza HEAD; readiness e ordine di handoff | findings a–l applicati; nessuna nuova decisione |
+| Verifica di esecuzione R1 / R3 / R2 residuo | — | rev 1 | R1 (0.1), R3 (0.2), `client_body_timeout` (4.2 S1) | pending |
+
+## 8. Technical revisions and deviations
+
+| Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
+|----------|------------------------|---------------------------------|------------|------------------------|
+| — | — | — | — | — |
+
+Revisioni previste ma non ancora fatte (non registrate come approvate):
+- D4/D8: correzione di contratto in `phase_02.md` 1.2 già applicata in planning (abort della connessione del mittente su scadenza o errore di copia). Non è una revisione di decisione.
+- D15: aggiunta del timeout di inattività in 2.2; da approvare da agent-1 quando 2.2 è eseguita.
+
+## 9. Blockers
+
+| ID | Affected units | Evidence | Resolution owner | Exact next action |
+|----|----------------|----------|------------------|-------------------|
+| B-R1 | 0.1 (esito), 1.2, 1.3 | R1 UNVERIFIED: comportamento di curl non provato in questa sandbox | agent-2 con revisione agent-1 | eseguire probe 0.1 in directory di scratch; registrare branch A/B/C in overview |
+| B-R3 | 0.2, 1.2 | R3 UNVERIFIED: presenza di `EnableFullDuplex` nella toolchain | agent-2 | `go doc net/http.ResponseController.EnableFullDuplex` in 0.2; se assente, escalation |
+| B-Q1 | RISOLTO | Decisione utente: auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug | utente | nessuna |
+| B-R2 | PARZIALE: 4.2 (S1), G-E2E-FINAL, G-FINAL | direttive confermate da nginx.org (rete autorizzata dall'utente); residuo `client_body_timeout` non letto | agent-2 | 4.2 S1: leggere `client_body_timeout` da nginx.org (core module) e registrarlo in `overview.md` R2 |
+| B-NET | 4.1 (build Docker), 4.2 | pull delle immagini base pinnate: rete autorizzata dall'utente per Docker; esito del pull non ancora verificato | agent-2 | 4.1 S1 `docker build`; se il pull fallisce → G-D1 build `blocked` con log, non pass |
+
+## 10. Do-not-repeat
+
+none
+
+## 11. Progress board
+
+### Sub-phases
+| ID | Phase file | Depends on | Status | Attempt | Evidence / reason |
+|----|------------|------------|--------|---------|-------------------|
+| 0.1 | phase_01.md | none | DONE | 1 | G-R1 pass branch A (curl 8.18.0); self-review §7 |
+| 0.2 | phase_01.md | 0.1 (R1 branch A) | TODO | 1 | — |
+| 1.1 | phase_02.md | 0.2 | TODO | 1 | — |
+| 1.2 | phase_02.md | 1.1 | TODO | 1 | — |
+| 1.3 | phase_02.md | 1.2 | TODO | 1 | — |
+| 2.1 | phase_03.md | 1.2 | TODO | 1 | — |
+| 2.2 | phase_03.md | 1.2 | TODO | 1 | — |
+| 3.1 | phase_04.md | 1.2 | TODO | 1 | — |
+| 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | TODO | 1 | build Docker: B-NET |
+| 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | TODO | 1 | B-R2 parziale |
+| 4.3 | phase_05.md | 4.1; 4.2 chiuso o SKIPPED; 2.1 DONE o SKIPPED | TODO | 1 | — |
+
+README obligation per phase: P0 → N/A (nessun comportamento distribuito; verificato in chiusura P0); P1 → pendente su 4.3; P2 → pendente su 4.3 (auth, limiti); P3 → numeri di prestazione in 4.3 solo da §7; P4 → 4.3 completo.
+
+### Phases
+| ID | File | Closure unit | Status | Review / commit reference |
+|----|------|--------------|--------|---------------------------|
+| 0 | phase_01.md | P0 | TODO | — |
+| 1 | phase_02.md | P1 | TODO | — |
+| 2 | phase_03.md | P2 | TODO | — |
+| 3 | phase_04.md | P3 | TODO | — |
+| 4 | phase_05.md | P4 | TODO | B-R2 parziale, B-NET |
+
+Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
+
+### Tests
+| ID/name | Owning unit | Gate | Status | Evidence |
+|---------|-------------|------|--------|----------|
+| TestLoadDefaults, TestLoadAuthPairRequired, TestLoadRejectsBadNumbers | 1.1 | G-U1.1 | TODO | — |
+| TestGenerateLength, TestGenerateAlphabet, TestGenerateUnique | 1.1 | G-U1.1 | TODO | — |
+| TestRegistryClaimOnce, TestRegistryFinishOnce, TestRegistryWaitTimeout, TestRegistryCapacity, TestRegistrySlugCollision, TestRegistryAbortKeepsFirst | 1.1 | G-U1.1 | TODO | — |
+| TestCopyFlushesEachWrite, TestCopyRoundTripBytes, TestCopyAllocsBounded | 1.2 | G-U1.2 | TODO | — |
+| TestUploadReturnsCommandsBeforeBody, TestRelayRoundTripSHA, TestGetUnknown404, TestGetSecondClaim410, TestSenderAbortFailsReceiver, TestReceiverAbortCleansSession, TestUploadMethodNotAllowed | 1.2 | G-U1.2 | TODO | — |
+| scripts/e2e.sh (E2E OK) | 1.3 | G-E2E1 | TODO | — |
+| TestBasicAuth*, TestUploadRequiresAuth | 2.1 | G-U2.1 | TODO | — |
+| TestSanitizeName, TestUploadIdleTimeout, TestDownloadHeaders, TestConfigIdleTimeout | 2.2 | G-U2.2 | TODO | — |
+| BenchmarkRelayLoopback, BenchmarkBaselineRelay, TestBenchHarnessSmoke | 3.1 | G-BENCH, G-U3.1 | TODO | — |
+| compose config (app senza ports) | 4.1 | G-D1 | TODO | — |
+| docker build | 4.1 | G-D1 | TODO | B-NET (rete autorizzata) |
+| RS-1 via nginx | 4.2 | G-E2E-FINAL | TODO | B-R2 parziale |
+
+### Documentation
+| Document/sections | Owning unit | Status | Evidence |
+|-------------------|-------------|--------|----------|
+| README.md (intero) | 4.3 | TODO | — |
+| overview.md (R1, R3 evidence) | 0.1, 0.2 | TODO | — |
+| deploy/nginx (commenti) | 4.2 | TODO | B-R2 parziale |
+
+### Audits
+| Report | Verdict | Current unresolved findings | Evidence |
+|--------|---------|-----------------------------|----------|
+| — | — | — | — |
+
+Audit finding details/statuses live in verify/index.md; phase progress lives here.
+
+## 12. Suspended implementation (only while auditing unfinished work)
+
+Snapshot state: none.
+Reason/audit ID: none.
+Previous current-unit record: none.
+Previous checkpoint: none.
+Previous plan revision / state writer: none.
+Pending completion reference: none.
+Evidence/review references: none.
+Restoration: N/A.
