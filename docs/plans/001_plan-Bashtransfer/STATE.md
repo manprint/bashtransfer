@@ -1,7 +1,7 @@
 # Bashtransfer — Implementation state
 
-Read first at every session. Updated 2026-10-27 by agent-1 (claude-haiku-5-5, planning).
-Plan ID: 001. Revision: 6 (rev 2: RS-2 da Specifiche, D16, R4, 0.3; rev 3: D17 tombstone 410; rev 4–5: scostamenti 1.2 e fix Expect; rev 6: scostamenti 2.1/2.2). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
+Read first at every session. Updated 2026-10-27 by agent-1 (claude-haiku-5-5), execute verify 001 (V001-C1..C3).
+Plan ID: 001. Revision: 8 (rev 2: RS-2 da Specifiche, D16, R4, 0.3; rev 3: D17 tombstone 410; rev 4–5: scostamenti 1.2 e fix Expect; rev 6: scostamenti 2.1/2.2; rev 7: fase 4; rev 8: B-NGX, stream TLS). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
 Plan baseline: nessun commit (HEAD non nato su `main`); pre-existing changes: `Specifiche.md` non tracciato, di proprietà dell'utente, non è output del piano.
 Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito dell'utente: solo Haiku 5.5, nessun Sonnet né Opus). Active execution style: handoff.
 State writer: nessuno ancora (piano non in esecuzione); ownership: released.
@@ -22,7 +22,7 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 ## 1. Current unit and scope
 
 - Active scope: plan 001 intero, fasi 0–4 (richiesta utente: "Fai tutte le fasi in autonomia")
-- Scope result: BLOCKED by audit V001 (FAIL: V001-F1 benchmark D13 non riproducibile, V001-F2 riferimenti di completamento). Vedi `verify/verify_001_2026-10-27.md`
+- Scope result: COMPLETE dopo correzioni V001 (C1 P3 attempt 2, C2, C3). Audit V001 FAIL storico; F1 FIXED, F2 e F3 ACCEPTED (decisione utente). Vedi `verify/verify_001_2026-10-27.md`
 - Type: none
 - ID / attempt: none
 - Status: none
@@ -31,9 +31,9 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - File / unit heading: none
 - Current step: none
 - Next action: nessuna. Decisioni per l'utente: push (non autorizzato), certificato reale per il deploy, verifica auth via nginx.
-- Next eligible plan unit: nessuna (4.2 BLOCKED; 4.3 scritta, chiusura dipende da 4.2)
-- Unit base: `e2ccd94` (wip 4.1+4.2); branch `plan/001-bashtransfer`; owned changes: STATE.md, overview.md, README.md (4.3), commit di chiusura pendente
-- Repo state: HEAD `e2ccd94`; `Specifiche.md` non tracciato e intatto; nessun push; stack compose fermato e rete di test rimossa.
+- Next eligible plan unit: nessuna (tutte le unità e fasi DONE; V001-C1..C3 chiuse)
+- Unit base: `be994da` (V001-C2/C3); branch `plan/001-bashtransfer`; owned changes: README.md (C1 §Prestazioni), STATE.md, verify/*; commit di chiusura `V001-C1` pendente da risolvere con trailer (§4)
+- Repo state: HEAD `be994da` prima del commit V001-C1; `Specifiche.md` non tracciato e intatto; nessun push; stack compose fermato e rete di test rimossa.
 
 ## 2. Feature context and readiness
 
@@ -108,7 +108,9 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | reconciliation | V001-C2 / 1 | 7 | agent-1 (claude-haiku-5-5), state writer | riferimenti completamento: 4.1 e 4.2 → `70c85be`; 2.1 → `d64bffb`; P4 → `70c85be` con ambiguità con `ae101a1` registrata (default, nessuna riscrittura di commit) | `git log` trailer check; V001-F2, V001-F3 restano OPEN fino a decisione utente | unit:V001-C2:1 (commit state, vedi sotto) |
 | sub-phase | 4.1 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | Dockerfile, .dockerignore, compose.yaml (app, nginx), deploy/nginx/bashtransfer.conf | G-D1 PASS; self-review §7 | unit:4.2:1 wip (`e2ccd94`, con 4.2) |
 | sub-phase | 4.2 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | deploy/nginx/bashtransfer.conf, servizio nginx, scripts/e2e.sh (modalità esterna) | G-S2 PASS; G-E2E-FINAL FAIL (B-NGX) | unit:4.2:1 wip, `PEV-Result: blocked` (`e2ccd94`) |
-| sub-phase | 4.3 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | README.md (italiano) | cross-check variabili con config.go; sezione nginx non verificata | non ancora committato (vedi commit P4 blocked) |
+| sub-phase | 4.3 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | README.md (italiano) | cross-check variabili con config.go; sezione nginx non verificata | in `70c85be` (chiusura P4) |
+| correction | V001-C1 / 1 | 8+C1 | sessione V001 (claude-haiku-5-5) | README §Prestazioni (mediane 256 KiB 0.99, 1 MiB 0.98); STATE §7–§9 | G-BENCH V001-C1 pass per regola di mediana; G-P3 attempt 2: `go test -race -count=1 -v ./...` 36 PASS / 0 FAIL / 0 SKIP | unit:V001-C1:1 (risolto da trailer) |
+| phase closure | P3 / 2 | 8+C1 | sessione V001 (claude-haiku-5-5), self-review | P3 riaperta da V001-F1; chiusa in V001-C1 (§8) | G-P3 attempt 2 pass; G-BENCH V001-C1 pass | unit:V001-C1:1 (stesso commit, §8) |
 
 Le righe sono append-only. Commit reference: vedi §0.6.
 
@@ -152,7 +154,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | G-BASE | `git status --short`; `go version` | pass | snapshot: `Specifiche.md` non tracciato, `docs/plans/` non tracciato → committato in rev 2; go1.27.3 | repo, rev 2 | 2026-10-27 |
 | G-U0.2 (0.2) | `go vet ./...`; `go list ./...` | pass (exit 0; lista = `bashtransfer/cmd/bashtransfer`) | 0 test (N/A scheletro) | go.mod, main.go, .gitignore | 2026-10-27 |
 | Review 0.2 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 2 / go.mod `go 1.21` | R3: firma presente; `api/go1.21.txt` riga 356; scelta minima 1.21 | PASS, self-review; non revisione forte |
-| Verifica di esecuzione R2 residuo | — | rev 2 | `client_body_timeout` (4.2 S1) | pending |
+| Verifica di esecuzione R2 residuo | — | rev 2 | `client_body_timeout` (4.2 S1) | superseded: chiuso da rev 7/8 (G-E2E-FINAL PASS via stream; vedi §8) |
 | G-R4 (0.3) | probe `curl -N -T` su `127.0.0.1:18090` con `probe_server.py` in scratch `r4/`; `payload.bin` 8 MiB da `r1/`; stdin con `printf x; sleep 3; head -c 8388608` | pass | A: `PUT_START path=/payload.bin CL=8388608`, `BODY_END 8388608`. B: `PUT_START path=/mydir.tgz TE=chunked`, riga a +3 ms, EOF stdin +3 s, `BODY_END 8388609`. C: `path=/`, `BODY_END 1024`. Listener chiuso | overview R4, working tree pre-commit | 2026-10-27 |
 | G-U1.1 (1.1) | `go test ./internal/config -run TestLoad`; `go test ./internal/slug`; `go test ./internal/relay -run TestRegistry -race` | pass | 3 config (+5 sottotest), 3 slug, 6 registry; nessuno saltato | rev 3, working tree pre-commit | 2026-10-27 |
 | Review 1.1 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 3 / registry.go Finish/Abort/Claim/expire + tombstone | I-2 (claim unico), I-3 (Finish/expire una volta; close una volta via once/idempotenza), I-5 (collisione + tombstone non riassegnato); nessun lock annidato (Session.Abort/Err usano reg.mu, Finish non lo richiama) | PASS, self-review; non revisione forte |
@@ -162,6 +164,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | G-E2E2 (fine P2) | `bash scripts/e2e.sh` | pass (`E2E OK`) | RS-1 e RS-2 invariati; PUT senza credenziali 401; password errata 401; upload autorizzato `strano nome.zip` con comandi `curl -o`/`wget -O` corretti; download pubblico con auth; sha256 invariati | rev 6, `d64bffb` | 2026-10-27 |
 | G-P2 (P2) | `go test -race -count=1 -v ./...` (conteggio) + G-E2E2 | pass | 35 PASS, 0 FAIL, 0 SKIP | rev 6, `d64bffb` | 2026-10-27 |
 | G-U3.1 (3.1) | `go test ./internal/server -run 'TestBenchHarnessSmoke' -v -count=1 -race` | pass | 1 test; 1 MiB esatti per lato | rev 6, `2d91a0d` | 2026-10-27 |
+| G-BENCH V001-C1 (4 sessioni, D13 criterio su mediana delle sessioni) | `scripts/bench.sh` × 4 sessioni, stesso codice (nessuna modifica a `internal`/`cmd` dopo `2d91a0d`). Rapporti relay/baseline per sessione (S1 run originale; S2 rerun V001; S3, S4 questa correzione): 64 KiB 1.023 / 1.115 / 1.078 / 1.209 (mediana 1.097); 256 KiB 0.956 / 0.896 / 1.022 / 1.078 (mediana **0.989**, 3 su 4 ≥ 0.90); 1 MiB 0.991 / 1.013 / 0.978 / 0.887 (mediana 0.9845, 3 su 4 ≥ 0.90). Regola applicata (decisione utente, opzione A): PASS se la mediana delle sessioni a 256 KiB è ≥ 0.90. Relay in MB/s assoluti: 256 KiB il più alto in tutte e quattro le sessioni. Default 256 KiB confermato. Variabilità per sessione ±10–20%: il rapporto a singola sessione non è decisivo | rev 8+C1, codice invariato | 2026-10-27 |
 | G-BENCH (3.1) | `scripts/bench.sh` (nproc 8, go1.27.3, Intel Xeon; 256 MiB per op, -benchtime 3x -count 5, senza -race) | pass | Mediane MB/s (relay / baseline): 64 KiB 5337.68 / 5219.48 = **1.02**; 256 KiB 6548.81 / 6853.35 = **0.956**; 1 MiB 6033.41 / 6086.60 = **0.991**. Criterio D13 ≥ 0.90: PASS in tutti e tre. Default 256 KiB: relay più alto (6548.81 vs 6033.41 e 5337.68, differenza 8.5% sul 1 MiB, nessuna revisione) | rev 6, `2d91a0d`; output grezzo in scratchpad `bench-run1.txt` | 2026-10-27 |
 | G-P3 (P3) | `go test -race -count=1 -v ./...` (conteggio) | pass | 36 PASS, 0 FAIL, 0 SKIP | rev 6, `2d91a0d` | 2026-10-27 |
 | G-D1 (4.1) | `docker build -t bashtransfer:local .`; `docker compose -f compose.yaml config`; `docker compose up -d app` + `wget -qO- http://app:8080/` dalla rete interna | pass (build 11 s; config senza `ports:` per app; usage text ricevuto) | immagini base pinnate per digest; utente non root (`nonroot:nonroot`) | rev 7, `e2ccd94` | 2026-10-27 |
@@ -181,6 +184,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 
 | Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
 |----------|------------------------|---------------------------------|------------|------------------------|
+| 8+C1 | D13 (rapporto relay/baseline ≥ 0.90 su mediana di 5 campioni): rerun V001 a 256 KiB = 0.896, con run originale 0.956 | Misura su 4 sessioni con stesso codice; criterio applicato alla mediana delle sessioni a 256 KiB (0.989 ≥ 0.90), decisione utente opzione A (V001-C1). Cambia il metodo statistico, non la soglia: a singola sessione il rapporto può scendere a 0.896, dichiarato in README §Prestazioni. Default 256 KiB confermato da MB/s assoluti. Deviazione di processo: chiusura P3 attempt 2 nello stesso commit di V001-C1 (nessun commit di chiusura separato; unica modifica di stato di questa chiusura) | utente (opzione A, 2026-10-27); esecuzione V001 | README §Prestazioni; §7 G-BENCH V001-C1; §4; §9 B-V001-F1 |
 | 6 | Due scostamenti di esecuzione in 2.1/2.2 (nessuna decisione D1–D17 cambiata): (a) `SanitizeName` divide solo su `/` (il `\` viene rimosso come carattere vietato, quindi il risultato del contratto non cambia; la tabella di test resta `a"b\c.zip` → `abc.zip`); (b) 2.1 e 2.2 sono nello stesso commit `d64bffb` invece di due commit separati, perché `handler.go` e `handler_test.go` condividono le modifiche e la separazione per hunk non era verificabile senza rischio | agent-1 (self-review, Haiku 5.5), in esecuzione di 2.2 | name.go, name_test.go; ledger §4 riga 2.1+2.2; nessun test cambiato |
 | 8 | B-NGX risolto (nessuna decisione D1–D17 cambiata, ma D12/D14 e R2 aggiornati): il proxy HTTP di nginx non può inoltrare il relay (D4: comandi prima del body; test a coppie). Scelta: `stream` TLS su 443 + redirect `http` 80→443; `BASHT_PUBLIC_URL` obbligatorio in compose (niente header HTTP aggiunti); `client_body_timeout` non più usato (rev 7 è superato per il blocco http). Test e2e esterno verifica che i comandi usino la base di test | agent-1 (decisione supervisore, Haiku 5.5; utente ha autorizzato Sonnet solo come advisor: consultato, vedi §7); revisione self | overview R2/rev 8, phase_05 4.2, README (nginx, limiti, verifica), compose.yaml, deploy/nginx/nginx.conf, scripts/e2e.sh (controllo base) |
 | 7 | Fase 4 (rev 7): (a) `client_body_timeout 3600s` impostato nel server 443 (default 60s, letto da nginx.org) per non troncare mittenti fermi prima di `BASHT_IDLE_TIMEOUT`; (b) `BASHT_E2E_BASE` e `BASHT_E2E_MB` aggiunti a `scripts/e2e.sh` per il test esterno; (c) 4.3 README scritta con precondizione 4.2 non soddisfatta: contenuti non dipendenti da nginx, sezione nginx dichiarata non verificata; (d) porte test 18080/18443 solo come override fuori repo per la diagnosi; (e) Dockerfile e compose pinnati per tag e digest; `deploy/` escluso dal contesto Docker oltre alla lista del piano | agent-1 (self-review, Haiku 5.5) | overview R2; phase_05 4.2 e 4.3; README; nessun cambio D1–D17 |
@@ -206,8 +210,8 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | B-NET | RISOLTO (rev 7) | pull di `golang:1.27.3-bookworm`, `gcr.io/distroless/static-debian12:nonroot`, `nginx:1.27-alpine` riusciti (digest in Dockerfile e compose) | agent-2 | nessuna |
 | B-NGX | RISOLTO (rev 8): proxy HTTP di nginx interrompe il body quando l'upstream risponde prima (D4). Coppia di test: upstream early → stallo 3.9 MB + EOF; upstream late → 8 MiB OK. Soluzione: `stream` TLS su 443 | — | — |
 | B-NGX-old | (storico) | Trasferimento attraverso nginx si blocca dopo circa 0.1–0.8 MB (RS-1 e RS-2, 8 MiB e 256 MiB, poi 8 MiB anche su 18443). Riprodotto con: stack compose; nginx con configurazione di produzione; configurazione minimale con solo `proxy_pass`; upstream minimo Go (risposta prima o dopo la lettura del body); nginx host-network con binario locale. Il binario diretto (senza nginx) passa 8 MiB in 3 ms. Ipotesi non provate: intercettazione del sandbox sulle porte 80/443 (la configurazione minima su porta 18080 ha inoltrato 1 MiB completo, ma il test con 8 MiB su 18080 non è stato concluso). Esclusi con esperimento: `Expect: 100-continue`, versione HTTP/1.0 upstream, `Connection` keep-alive, `proxy_buffer_size` 64k, TLS (stesso stallo in HTTP), `proxy_buffering on` (rompe lo streaming). Socket queue non rilevate (`ss` senza output). Esperimenti in scratchpad | utente (decisione) + agent-2 | (a) su un host senza intercettazione, o con nginx su porte non standard, eseguire `BASHT_E2E_BASE=https://<host> BASHT_E2E_MB=256 bash scripts/e2e.sh`; (b) se (a) passa, registrare G-E2E-FINAL e chiudere 4.2/P4; se non passa, il problema è nel percorso nginx: prossimo passo è tcpdump/ss in-container, non ancora fatto |
-| B-V001-F1 | P3 (riapre), README §Prestazioni | Rerun `scripts/bench.sh` 2026-10-27: 256 KiB relay/baseline = 5763.08/6433.27 = 0.896 < 0.90; sessione precedente 0.956. Codice invariato da `2d91a0d`. | utente o agent-1 (criterio o metodo) | C1: 3 sessioni, decisione in §8, poi aggiornare P3 |
-| B-V001-F2 | riferimenti 4.1, 4.2, P4, 2.1 | `P4/1/complete` su `70c85be` e `ae101a1`; nessun commit `PEV-Unit: 4.1`; 4.2 completo assente. C2 applicata: riferimenti registrati; ambiguità non risolta in git | utente (accettare la registrazione come ACCEPTED, o autorizzare amend locale di `ae101a1` con trailer `PEV-Unit: state`) | decisione utente; poi aggiornare V001-F2 nel register |
+| B-V001-F1 | P3 (riapre), README §Prestazioni | Rerun `scripts/bench.sh` 2026-10-27: 256 KiB relay/baseline = 5763.08/6433.27 = 0.896 < 0.90; sessione precedente 0.956. Codice invariato da `2d91a0d`. | utente (decisione) | RISOLTO: 4 sessioni in §7, decisione in §8; P3 attempt 2 |
+| B-V001-F2 | riferimenti 4.1, 4.2, P4, 2.1 | `P4/1/complete` su `70c85be` e `ae101a1`; nessun commit `PEV-Unit: 4.1`; 4.2 completo assente. C2 applicata: riferimenti registrati; ambiguità non risolta in git | utente (ACCEPTED) | RISOLTO: accettato 2026-10-27, riferimento `70c85be`; `ae101a1` invariato |
 | B-SERENA | non bloccante | MCP `serena` non connesso (CONNECTION_CLOSED) in questa sessione; ricerca semantica fatta con tokensave | utente | riavviare o riconfigurare serena |
 | B-SUBAGENT | non bloccante | `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-5-5` in `~/.claude/settings.json`: non verificato in una nuova sessione | utente | aprire una nuova sessione e controllare il modello dei subagent |
 
@@ -231,12 +235,12 @@ none
 | 1.1 | phase_02.md | 0.2 | DONE | 1 | G-U1.1 pass: 3 config, 3 slug, 6 registry (`-race`); D17 tombstone rev 3; self-review §7 |
 | 1.2 | phase_02.md | 1.1 | DONE | 1 | G-U1.2 pass (-race, 5 ripetizioni stabili): 3 copy + 9 server; scostamenti rev 4 |
 | 1.3 | phase_02.md | 1.2 | DONE | 1 | G-E2E1 PASS (`E2E OK`); fix Expect (rev 5) |
-| 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race). Riferimento completamento (V001-C2): `d64bffb`, trailer `PEV-Unit: 2.2` (2.1 non ha trailer proprio; deviazione rev 6). Ambiguità registrata, non risolta |
+| 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race). Riferimento completamento (V001-C2): `d64bffb`, trailer `PEV-Unit: 2.2` (2.1 non ha trailer proprio; deviazione rev 6). Accettato dall'utente (V001-F3). |
 | 2.2 | phase_03.md | 1.2 | DONE | 1 | G-U2.2 PASS (sanitize tabella, idle timeout, headers, config idle); G-E2E2 PASS; commit `d64bffb` |
 | 3.1 | phase_04.md | 1.2 | DONE | 1 | G-U3.1 PASS (smoke -race); G-BENCH: mediana relay/baseline 64 KiB 1.02, 256 KiB 0.956, 1 MiB 0.991 (criterio ≥ 0.90 PASS); default 256 KiB confermato; commit `2d91a0d` |
 | 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | DONE | 1 | Riferimento completamento (V001-C2): `70c85be` (chiusura P4; nessun commit con `PEV-Unit: 4.1`). `e2ccd94` è WIP con trailer `PEV-Unit: 4.2` blocked. | build `bashtransfer:local` pass (11 s); `compose config` pass senza `ports:` per app; `GET /` da rete interna pass; commit `e2ccd94` (wip) |
 | 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | DONE | 2 | S1 R2 chiuso (`client_body_timeout` 60s default → 3600s); S2 `nginx -t` pass; trasferimento attraverso nginx NON verificato: B-NGX; commit `e2ccd94` (wip, `PEV-Result: blocked`) |
-| 4.3 | phase_05.md | 4.1; 4.2 chiuso o SKIPPED; 2.1 DONE o SKIPPED | WRITTEN | 1 | README.md scritto (rev 7: precondizione 4.2 non soddisfatta; sezione nginx dichiarata non verificata); S2 cross-check su variabili e comandi; da rivedere dopo B-NGX |
+| 4.3 | phase_05.md | 4.1; 4.2 | DONE | 1 | README.md (chiusura P4, `70c85be`); cross-check variabili e comandi; C3 nome bare-host; C1 §Prestazioni |
 
 README obligation per phase: P0 → N/A (nessun comportamento distribuito; verificato in chiusura P0); P1 → pendente su 4.3; P2 → pendente su 4.3 (auth, limiti); P3 → numeri di prestazione in 4.3 solo da §7; P4 → 4.3 completo.
 
@@ -246,8 +250,8 @@ README obligation per phase: P0 → N/A (nessun comportamento distribuito; verif
 | 0 | phase_01.md | P0 | DONE | P0 unit:P0:1 (review self-review §7); R1, R3, R4 CONFIRMED; G-BASE, G-U0.2, G-R1, G-R4 pass |
 | 1 | phase_02.md | P1 | DONE | G-P1 PASS: `go test -race -count=1 ./...` 34 PASS/0 FAIL/0 SKIP + G-E2E1 PASS; README pendente su 4.3 (B-DISC, limiti); self-review §7 |
 | 2 | phase_03.md | P2 | DONE | G-P2 PASS: `go test -race -count=1 ./...` 35 PASS/0 FAIL/0 SKIP + G-E2E2 PASS (`E2E OK` con auth e nome con spazi); README pendente su 4.3 (auth, limiti); self-review §7; commit `unit:P2:1` |
-| 3 | phase_04.md | P3 | BLOCKED (V001-F1, correzione C1) | G-BENCH PASS su una sessione; rerun V001 FAIL a 256 KiB (0.896). Originale: G-BENCH PASS (criterio D13 su 5 campioni, nessuno SKIP); G-P3 PASS: `go test -race -count=1 ./...` 36 PASS/0 FAIL/0 SKIP; commit `unit:P3:1` (solo STATE) |
-| 4 | phase_05.md | P4 | DONE | G-D1, G-S2, G-E2E-FINAL PASS (256 MiB via compose stream 443); G-FINAL: vedi §7. Riferimento (V001-C2): `70c85be`. Ambiguità: `ae101a1` (state-only) ha gli stessi quattro trailer; scelta registrata come default (non riscritta). Decisione utente pendente |
+| 3 | phase_04.md | P3 | DONE (attempt 2, dopo V001-C1) | G-BENCH V001-C1 PASS per regola mediana a 256 KiB (0.989, 4 sessioni); G-P3 attempt 2: `go test -race -count=1 -v ./...` 36 PASS/0 FAIL/0 SKIP; e2e locale `E2E OK`. Attempt 1 storico: G-BENCH su una sessione; commit `unit:P3:1` (solo STATE) |
+| 4 | phase_05.md | P4 | DONE | G-D1, G-S2, G-E2E-FINAL PASS (256 MiB via compose stream 443); G-FINAL: vedi §7. Riferimento (V001-C2): `70c85be`. Ambiguità: `ae101a1` (state-only) ha gli stessi quattro trailer; scelta registrata come default (non riscritta). Accettata dall'utente (V001-F2). |
 
 Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
 
@@ -261,24 +265,24 @@ Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
 | TestUploadReturnsCommandsBeforeBody, TestRelayRoundTripSHA, TestGetUnknown404, TestGetSecondClaim410, TestSenderAbortFailsReceiver, TestReceiverAbortCleansSession, TestUploadMethodNotAllowed, TestUploadUnknownLength, TestUploadNameFromPath | 1.2 | G-U1.2 | PASS | `go test ./internal/server -v -race` (9 top-level; 4 sottotest sui size) |
 | scripts/e2e.sh (E2E OK) | 1.3 | G-E2E1 | PASS | `bash scripts/e2e.sh` → `E2E OK` (RS-1 sha256, 410, 404, RS-2 mydir.tgz sha256) |
 | TestUploadExpectContinue | 1.2 (aggiunto dopo e2e) | G-U1.2 | PASS | `go test ./internal/server -run TestUploadExpectContinue -race` |
-| TestBasicAuth*, TestUploadRequiresAuth | 2.1 | G-U2.1 | TODO | — |
-| TestSanitizeName, TestUploadIdleTimeout, TestDownloadHeaders, TestConfigIdleTimeout | 2.2 | G-U2.2 | TODO | — |
-| BenchmarkRelayLoopback, BenchmarkBaselineRelay, TestBenchHarnessSmoke | 3.1 | G-BENCH, G-U3.1 | TODO | — |
-| compose config (app senza ports) | 4.1 | G-D1 | TODO | — |
-| docker build | 4.1 | G-D1 | TODO | B-NET (rete autorizzata) |
-| RS-1 via nginx | 4.2 | G-E2E-FINAL | TODO | B-R2 parziale |
+| TestBasicAuth*, TestUploadRequiresAuth | 2.1 | G-U2.1 | PASS | `go test ./internal/server -run 'TestBasicAuth|TestUploadRequiresAuth' -v -count=1 -race` (6 test) |
+| TestSanitizeName, TestUploadIdleTimeout, TestDownloadHeaders, TestConfigIdleTimeout | 2.2 | G-U2.2 | PASS | `go test ./internal/server ./internal/config ./internal/relay -v -count=1 -race` |
+| BenchmarkRelayLoopback, BenchmarkBaselineRelay, TestBenchHarnessSmoke | 3.1 | G-BENCH, G-U3.1 | PASS | `scripts/bench.sh` (V001-C1, 4 sessioni); `TestBenchHarnessSmoke` PASS |
+| compose config (app senza ports) | 4.1 | G-D1 | PASS | `docker compose -f compose.yaml config` (rev 7/8) |
+| docker build | 4.1 | G-D1 | PASS | `docker build` 11 s (B-NET risolto) |
+| RS-1 e RS-2 via nginx | 4.2 | G-E2E-FINAL | PASS | `BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_MB=256 bash scripts/e2e.sh` (stream 443; B-R2 e B-NGX risolti) |
 
 ### Documentation
 | Document/sections | Owning unit | Status | Evidence |
 |-------------------|-------------|--------|----------|
-| README.md (intero) | 4.3 | TODO | — |
-| overview.md (R1, R3 evidence) | 0.1, 0.2 | TODO | — |
-| deploy/nginx (commenti) | 4.2 | TODO | B-R2 parziale |
+| README.md (intero) | 4.3 | DONE | C3 (scenario 1), C1 (§Prestazioni); self-review |
+| overview.md (R1, R3, R4 evidence) | 0.1, 0.2, 0.3 | DONE | R1, R3, R4 CONFIRMED |
+| deploy/nginx/nginx.conf | 4.2 | DONE | rev 8 (stream); `nginx -t` PASS (G-S2) |
 
 ### Audits
 | Report | Verdict | Current unresolved findings | Evidence |
 |--------|---------|-----------------------------|----------|
-| — | — | — | — |
+| V001 | FAIL (storico); F1 FIXED, F2 e F3 ACCEPTED, F4 e F5 FIXED | nessuno | verify/index.md |
 
 Audit finding details/statuses live in verify/index.md; phase progress lives here.
 

@@ -52,7 +52,7 @@ Tutte le variabili sono opzionali. Un valore vuoto equivale a non impostarlo.
 | `BASHT_WAIT_TIMEOUT` | `1h` | Quanto il mittente può attendere un ricevente prima che lo slug scada. |
 | `BASHT_IDLE_TIMEOUT` | `2m` | Interruzione del relay se il mittente non invia byte per questo tempo (minimo `1s`). |
 | `BASHT_MAX_SESSIONS` | `1000` | Numero massimo di slug attivi contemporaneamente. |
-| `BASHT_BUF_SIZE` | `262144` | Dimensione del buffer di copia, tra 4096 e 4194304 byte. Il default 256 KiB è quello misurato più veloce. |
+| `BASHT_BUF_SIZE` | `262144` | Dimensione del buffer di copia, tra 4096 e 4194304 byte. Il default 256 KiB è il buffer con il throughput assoluto più alto del relay in tutte e quattro le sessioni. |
 
 ## Autenticazione
 
@@ -103,7 +103,7 @@ Senza nginx il server parla solo HTTP semplice: non esegue TLS.
 
 ## Prestazioni
 
-Misurate in loopback con `scripts/bench.sh` (8 CPU, Intel Xeon, go1.27.3, trasferimenti da 256 MiB, mediana di 5 campioni). Rapporto relay su baseline a due hop equivalenti: 1.02 con buffer 64 KiB, 0.956 con 256 KiB, 0.991 con 1 MiB. Su una rete reale i valori dipendono dalla rete e non sono stati misurati.
+Misurate in loopback con `scripts/bench.sh` (8 CPU, Intel Xeon, go1.27.3, trasferimenti da 256 MiB, mediana di 5 campioni per sessione). Quattro sessioni con lo stesso codice. Rapporto relay su baseline a due hop equivalenti, mediana delle quattro sessioni: 1.10 con buffer 64 KiB, 0.99 con 256 KiB, 0.98 con 1 MiB. La variabilità tra sessioni è grande: i singoli rapporti vanno da 0.89 a 1.21. La soglia D13 (0.90) è rispettata dalla mediana a 256 KiB, ma una sessione singola è scesa a 0.896. Su una rete reale i valori dipendono dalla rete e non sono stati misurati.
 
 ## Stato della verifica
 
