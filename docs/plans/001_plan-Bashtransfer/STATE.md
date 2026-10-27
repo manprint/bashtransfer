@@ -1,7 +1,7 @@
 # Bashtransfer — Implementation state
 
 Read first at every session. Updated 2026-10-27 by agent-1 (claude-haiku-5-5, planning).
-Plan ID: 001. Revision: 3 (rev 2: RS-2 da Specifiche, D16, R4, 0.3; rev 3: D17 tombstone 410). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
+Plan ID: 001. Revision: 6 (rev 2: RS-2 da Specifiche, D16, R4, 0.3; rev 3: D17 tombstone 410; rev 4–5: scostamenti 1.2 e fix Expect; rev 6: scostamenti 2.1/2.2). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
 Plan baseline: nessun commit (HEAD non nato su `main`); pre-existing changes: `Specifiche.md` non tracciato, di proprietà dell'utente, non è output del piano.
 Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito dell'utente: solo Haiku 5.5, nessun Sonnet né Opus). Active execution style: handoff.
 State writer: nessuno ancora (piano non in esecuzione); ownership: released.
@@ -30,10 +30,10 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: commit 1.3 + P1; poi sub-phase 2.1 (auth Basic su PUT) e 2.2 (limiti, idle timeout D15) in `phase_03.md`.
-- Next eligible plan unit: 2.1 (`phase_03.md`)
-- Unit base: none; branch: main (nessun commit); owned changes: none
-- Repo state: nessun commit; `Specifiche.md` non tracciato; `docs/plans/001_plan-Bashtransfer/` non tracciato (creato in planning, nessun commit richiesto in planning).
+- Next action: commit chiusura P2 (solo STATE); poi fase 3: 3.1 benchmark (`phase_04.md`).
+- Next eligible plan unit: 3.1 (`phase_04.md`)
+- Unit base: `d64bffb` (2.1+2.2); branch `plan/001-bashtransfer`; owned changes: STATE.md
+- Repo state: HEAD `d64bffb`; `Specifiche.md` non tracciato e intatto; nessun push.
 
 ## 2. Feature context and readiness
 
@@ -101,6 +101,8 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | sub-phase | 0.2 / 1 | 2 | agent-2 (claude-haiku-5-5), state writer sessione corrente | go.mod, cmd/bashtransfer/main.go (placeholder), .gitignore; overview R3 | G-BASE, G-U0.2 pass; R3 CONFIRMED; self-review §7 | unit:0.2:1 |
 | plan | 001 / 2 (revisione RS-2) | 2 | agent-1 (claude-haiku-5-5) | overview D16, R4, RS-2; phase_01 0.3; phase_02 upload stdin e test; phase_05 RS-2 e README; STATE | specifica verificata contro piano; self-review (Haiku, stesso modello) | uncommitted → committato come plan rev 2 prima di 0.2 |
 | plan | 001 / 1 (cold review) | 1 | agent-1 (claude-haiku-5-5) | correzioni a–l in phase_02, phase_04, phase_05, STATE; Q1 e rete registrate | cold review self (Haiku fresco, nessun contesto di pianificazione) | uncommitted |
+| sub-phase | 2.1 + 2.2 / 1 | 6 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/server/{auth,name}.go(+test), handler.go (Authorize, IdleTimeout, SanitizeName, 401), handler_test.go, internal/relay/copy.go (NewIdleReader), internal/config (IdleTimeout), cmd main.go, scripts/e2e.sh (auth, nome con spazi) | G-U2.1 PASS, G-U2.2 PASS, G-E2E2 PASS; self-review §7 | unit:2.2:1 (`d64bffb`, commit unico, rev 6) |
+| phase closure | P2 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 2 completa; I-1..I-5 invariati; D9, D15, D5 coperti | G-P2 PASS (35 PASS) | unit:P2:1 (commit solo STATE) |
 
 Le righe sono append-only. Commit reference: vedi §0.6.
 
@@ -149,11 +151,17 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | G-U1.1 (1.1) | `go test ./internal/config -run TestLoad`; `go test ./internal/slug`; `go test ./internal/relay -run TestRegistry -race` | pass | 3 config (+5 sottotest), 3 slug, 6 registry; nessuno saltato | rev 3, working tree pre-commit | 2026-10-27 |
 | Review 1.1 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 3 / registry.go Finish/Abort/Claim/expire + tombstone | I-2 (claim unico), I-3 (Finish/expire una volta; close una volta via once/idempotenza), I-5 (collisione + tombstone non riassegnato); nessun lock annidato (Session.Abort/Err usano reg.mu, Finish non lo richiama) | PASS, self-review; non revisione forte |
 | Review 0.3 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 2 / overview R4 + log server | esito A/B/C; D16 valido; limite D5 per caso C documentato | PASS, self-review; non revisione forte |
+| G-U2.1 (2.1) | `go test ./internal/server -run 'TestBasicAuth|TestUploadRequiresAuth' -v -count=1 -race` | pass | 6 test: 4 auth di base, 1 costo costante (comportamentale), 1 PUT senza credenziali → 401 senza sessione; con credenziali → comandi | rev 6, `d64bffb` | 2026-10-27 |
+| G-U2.2 (2.2) | `go test ./internal/server ./internal/config ./internal/relay -v -count=1 -race`; `go test -race -count=3 -run 'Idle|Headers|SanitizeName|Auth' ./internal/server` | pass | sanitize (tabella 8 casi + 2 lunghezze); TestUploadIdleTimeout; TestDownloadHeaders; TestConfigIdleTimeout; nessuno saltato | rev 6, `d64bffb` | 2026-10-27 |
+| G-E2E2 (fine P2) | `bash scripts/e2e.sh` | pass (`E2E OK`) | RS-1 e RS-2 invariati; PUT senza credenziali 401; password errata 401; upload autorizzato `strano nome.zip` con comandi `curl -o`/`wget -O` corretti; download pubblico con auth; sha256 invariati | rev 6, `d64bffb` | 2026-10-27 |
+| G-P2 (P2) | `go test -race -count=1 -v ./...` (conteggio) + G-E2E2 | pass | 35 PASS, 0 FAIL, 0 SKIP | rev 6, `d64bffb` | 2026-10-27 |
+| Review 2.1+2.2 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 6 / auth.go, name.go, handler.go Options e 401 | I-5 (nessuna directory dal nome: `SanitizeName` taglia a `/`); D9 (solo PUT protetto, GET pubblico); D15 (idle deadline prima di ogni Read, `ErrIdle`); costo costante del confronto verificato in diff, non solo a comportamento; `WWW-Authenticate` su 401 | PASS, self-review; non revisione forte |
 
 ## 8. Technical revisions and deviations
 
 | Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
 |----------|------------------------|---------------------------------|------------|------------------------|
+| 6 | Due scostamenti di esecuzione in 2.1/2.2 (nessuna decisione D1–D17 cambiata): (a) `SanitizeName` divide solo su `/` (il `\` viene rimosso come carattere vietato, quindi il risultato del contratto non cambia; la tabella di test resta `a"b\c.zip` → `abc.zip`); (b) 2.1 e 2.2 sono nello stesso commit `d64bffb` invece di due commit separati, perché `handler.go` e `handler_test.go` condividono le modifiche e la separazione per hunk non era verificabile senza rischio | agent-1 (self-review, Haiku 5.5), in esecuzione di 2.2 | name.go, name_test.go; ledger §4 riga 2.1+2.2; nessun test cambiato |
 | 5 | Correzione tecnica trovata da e2e in 1.3 (nessuna decisione cambiata): con `Expect: 100-continue` (curl per body > 1 MiB) il `WriteHeader(200)` prima della lettura del body fa chiudere il body Go (`ErrBodyReadAfterClose`, `Connection: close`, reset del mittente, download a 0 byte). Fix: `100 Continue` esplicito prima dei comandi quando `Expect` è presente e `ContentLength != 0` (`expectsContinue`). Test `TestUploadExpectContinue` | agent-1 (self-review), trovato da `scripts/e2e.sh` | handler.go; test server 10 top-level; D4 invariato |
 | 4 | Scostamenti di 1.2 registrati dopo implementazione (nessuna decisione D1–D17 cambiata): (a) `Allow: GET, PUT` su `/` e `/<seg>` invece di `Allow: PUT`, perché `GET /` è la pagina d'uso; (b) il mittente in attesa senza body letto non è rilevato come caduto da `r.Context()` (il server Go avvia la lettura in background solo a fine body); l'unica chiusura è la scadenza D7 (`BASHT_WAIT_TIMEOUT`), dichiarata come limite in 4.3; (c) nome dal path non sanitizzato fino a 2.2 (quoting di `"` e `\` non ancora gestito); (d) la revisione pre-implementazione di `handler.go` richiesta dalla fase non è stata eseguita prima della scrittura: eseguita come self-review dopo la scrittura, con test di abort e lifecycle; limite di self-review dichiarato | agent-1 (self-review, Haiku 5.5), dopo implementazione di 1.2 | phase_02 1.2 (contratto `Allow`, `Context` branch); 4.3 limiti; 2.2 sanitize; test invariati |
 | 3 | D6/RS-1 passo 4 richiedono `410` per slug concluso; `Finish` che rimuove dalla mappa dava `404`. Nuovo D17: tombstone 24h (costante), slug terminali (concluso, reclamato, scaduto) → `410`; oltre 24h → `404`. Nuovi errori `ErrGone`; test `TestRegistryWaitTimeout` e `TestRegistryFinishOnce` aspettano `ErrGone`. Nessun cambio di D1–D16 | agent-1 (self-review, Haiku 5.5), trovato in preparazione di 1.1 | overview D17; phase_02 1.1 (Claim/Finish/tombstone) e 1.2 (mapping 410); e2e passo 6 invariato |
@@ -191,8 +199,8 @@ none
 | 1.1 | phase_02.md | 0.2 | DONE | 1 | G-U1.1 pass: 3 config, 3 slug, 6 registry (`-race`); D17 tombstone rev 3; self-review §7 |
 | 1.2 | phase_02.md | 1.1 | DONE | 1 | G-U1.2 pass (-race, 5 ripetizioni stabili): 3 copy + 9 server; scostamenti rev 4 |
 | 1.3 | phase_02.md | 1.2 | DONE | 1 | G-E2E1 PASS (`E2E OK`); fix Expect (rev 5) |
-| 2.1 | phase_03.md | 1.2 | TODO | 1 | — |
-| 2.2 | phase_03.md | 1.2 | TODO | 1 | — |
+| 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race); committato insieme a 2.2 in `d64bffb` (deviazione rev 6) |
+| 2.2 | phase_03.md | 1.2 | DONE | 1 | G-U2.2 PASS (sanitize tabella, idle timeout, headers, config idle); G-E2E2 PASS; commit `d64bffb` |
 | 3.1 | phase_04.md | 1.2 | TODO | 1 | — |
 | 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | TODO | 1 | build Docker: B-NET |
 | 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | TODO | 1 | B-R2 parziale |
@@ -205,8 +213,7 @@ README obligation per phase: P0 → N/A (nessun comportamento distribuito; verif
 |----|------|--------------|--------|---------------------------|
 | 0 | phase_01.md | P0 | DONE | P0 unit:P0:1 (review self-review §7); R1, R3, R4 CONFIRMED; G-BASE, G-U0.2, G-R1, G-R4 pass |
 | 1 | phase_02.md | P1 | DONE | G-P1 PASS: `go test -race -count=1 ./...` 34 PASS/0 FAIL/0 SKIP + G-E2E1 PASS; README pendente su 4.3 (B-DISC, limiti); self-review §7 |
-| 1 | phase_02.md | P1 | TODO | — |
-| 2 | phase_03.md | P2 | TODO | — |
+| 2 | phase_03.md | P2 | DONE | G-P2 PASS: `go test -race -count=1 ./...` 35 PASS/0 FAIL/0 SKIP + G-E2E2 PASS (`E2E OK` con auth e nome con spazi); README pendente su 4.3 (auth, limiti); self-review §7; commit `unit:P2:1` |
 | 3 | phase_04.md | P3 | TODO | — |
 | 4 | phase_05.md | P4 | TODO | B-R2 parziale, B-NET |
 
