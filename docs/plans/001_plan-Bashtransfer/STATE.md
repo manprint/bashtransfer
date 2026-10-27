@@ -1,7 +1,7 @@
 # Bashtransfer — Implementation state
 
 Read first at every session. Updated 2026-10-27 by agent-1 (claude-haiku-5-5, planning).
-Plan ID: 001. Revision: 1. Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
+Plan ID: 001. Revision: 2 (RS-2 da Specifiche, D16, R4, sub-phase 0.3). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
 Plan baseline: nessun commit (HEAD non nato su `main`); pre-existing changes: `Specifiche.md` non tracciato, di proprietà dell'utente, non è output del piano.
 Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito dell'utente: solo Haiku 5.5, nessun Sonnet né Opus). Active execution style: handoff.
 State writer: nessuno ancora (piano non in esecuzione); ownership: released.
@@ -30,25 +30,25 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: sub-phase 0.1 (probe R1), poi 0.2, ... secondo ordine di handoff in §2.
-- Next eligible plan unit: 0.1 (`phase_01.md`)
+- Next action: sub-phase 0.2 (go.mod, main placeholder, .gitignore, go vet, R3), poi 0.3 (probe R4), poi P0; secondo ordine di handoff in §2.
+- Next eligible plan unit: 0.2 (`phase_01.md`)
 - Unit base: none; branch: main (nessun commit); owned changes: none
 - Repo state: nessun commit; `Specifiche.md` non tracciato; `docs/plans/001_plan-Bashtransfer/` non tracciato (creato in planning, nessun commit richiesto in planning).
 
 ## 2. Feature context and readiness
 
 Readiness: READY dopo ok esplicito dell'utente per l'esecuzione. Revisione 1, autore agent-1 (claude-haiku-5-5). Cold review (self-review, agente fresco Haiku 5.5) eseguita e correzioni applicate: vedi §7.
-Ordine di handoff: 0.1, 0.2, 1.1, 1.2, 1.3, 2.1, 2.2, P2, 3.1, P3, 4.1, 4.2, 4.3, P4.
-Eleggibile ora: solo 0.1. Dipendenze: 0.2 da 0.1 (R1 branch A); 1.1 da 0.2; 1.2 da 1.1; 2.1 e 2.2 da 1.2; 3.1 da 1.2; 4.1 da P2 (o 2.1 SKIPPED) e P3; 4.2 da 4.1 e da R2 S1; 4.3 da 4.1, 4.2 e 2.1.
-Blocchi aperti: B-R1 e B-R3 (verifica locale in 0.1 e 0.2); B-R2 residuo (`client_body_timeout`, 4.2 S1). Nessuna decisione utente aperta.
+Ordine di handoff: 0.1, 0.2, 0.3, 1.1, 1.2, 1.3, 2.1, 2.2, P2, 3.1, P3, 4.1, 4.2, 4.3, P4.
+Eleggibile ora: 0.2 (0.1 DONE). Dipendenze: 0.2 da 0.1 (R1 branch A); 0.3 da 0.1 (R1 branch A) e indipendente da 0.2; 1.1 da 0.2 e 0.3 (R4 branch A/B: vedi overview R4); 1.2 da 1.1 e R4 CONFIRMED; 1.2 da 1.1; 2.1 e 2.2 da 1.2; 3.1 da 1.2; 4.1 da P2 (o 2.1 SKIPPED) e P3; 4.2 da 4.1 e da R2 S1; 4.3 da 4.1, 4.2 e 2.1.
+Blocchi aperti: B-R1 e B-R3 (verifica locale in 0.1 e 0.2); B-R4 (verifica locale in 0.3; branch B su caso A senza nome o caso B = escalation utente); B-R2 residuo (`client_body_timeout`, 4.2 S1). Nessuna decisione utente aperta.
 Blocco P0 finché 0.1 non registra R1 CONFIRMED con branch A; branch B = escalation utente.
 
 Goal: relay curl/wget per file e cartelle, senza persistenza, in Go, con docker compose e nginx. Esclusioni in `overview.md` § Goal. Scenario di riferimento RS-1 in `overview.md`.
 
-Current decisions: D1–D14 in `overview.md`; D15 (timeout inattività, aggiunta da 2.2 entro i requisiti approvati).
+Current decisions: D1–D14 in `overview.md`; D15 (timeout inattività, aggiunta da 2.2 entro i requisiti approvati); D16 (upload da stdin con lunghezza ignota, RS-2, rev 2).
 Questions: Q1 risolta dall'utente — auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug.
 Research evidence: `overview.md` § Research and evidence — R1 UNVERIFIED (probe 0.1), R2 CONFIRMED in larga parte (nginx.org, rete autorizzata; residuo `client_body_timeout`), R3 UNVERIFIED (verifica locale in 0.2).
-Required unverified external claims: R1 (locale), R3 (locale), R2 (residuo `client_body_timeout`, 4.2 S1). Blocker: §9 B-R1, B-R2, B-R3.
+Required unverified external claims: R1 (locale), R3 (locale), R4 (locale, 0.3), R2 (residuo `client_body_timeout`, 4.2 S1). Blocker: §9 B-R1, B-R2, B-R3.
 Required supervisor reviews cannot be silently replaced by weaker self-review: la revisione di agent-1 è self-review dello stesso modello (Haiku 5.5); non va registrata come revisione forte.
 
 ## 3. Environment, settings, and gate registry
@@ -67,6 +67,7 @@ Required supervisor reviews cannot be silently replaced by weaker self-review: l
 | G-BASE | baseline, prima di 0.2 | `git status --short` (cwd radice repo); `go version` | snapshot: `Specifiche.md` e `docs/plans/` non tracciati; versione Go registrata | Go installato |
 | G-U0.2 | sub-phase 0.2 | `go vet ./...` (radice repo) | exit 0; `go list ./...` non vuoto | `go.mod` da 0.2 |
 | G-R1 | sub-phase 0.1 | probe in directory di scratch fuori repo (`probe_server.py` su `127.0.0.1`) + verifica log | log con `PUT_START`, `BODY_END`, risposta prima di `BODY_END` (branch A) | curl locale, porta libera |
+| G-R4 | sub-phase 0.3 | probe in directory di scratch fuori repo (`scratch/r4`, `127.0.0.1`) + verifica log | caso A: path con nome `/<basename>`; caso B: riga di risposta prima di EOF di stdin, `Transfer-Encoding: chunked`, nessun `Content-Length`; caso C: path registrato | curl locale, porta libera |
 | G-U1.1 | sub-phase 1.1 | `go test ./internal/config ./internal/slug ./internal/relay -run 'TestLoad|TestGenerate|TestRegistry' -v -count=1 -race` (radice) | 12 test: 3 config, 3 slug, 6 registry; nessuno saltato | nessuno |
 | G-U1.2 | sub-phase 1.2 | `go test ./internal/relay ./internal/server -v -count=1 -race` (radice) | copy: 3 test; server: upload commands, round trip (4 sottotest), 404, 410, abort, cleanup, 405 | nessuno |
 | G-E2E1 | sub-phase 1.3 | `bash scripts/e2e.sh` (radice) | output `E2E OK`; sha256 identico; 410; 404 | curl, porta libera, go build |
@@ -90,6 +91,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 |------|--------------|---------------|-------|---------|-----------------|--------|
 | sub-phase | 0.1 / 1 | 1 | agent-2 (claude-haiku-5-5), state writer sessione corrente | overview R1; STATE; cartella piano (non tracciata prima, inclusa per provenienza) | G-R1 pass branch A; self-review §7 | unit:0.1:1 (risolto da trailer) |
 | plan | 001 / 1 | 1 | agent-1 (claude-haiku-5-5) | cartella piano: overview, phase_01..phase_05, STATE | nessuna esecuzione; nessuna revisione di codice | uncommitted (planning non committa) |
+| plan | 001 / 2 (revisione RS-2) | 2 | agent-1 (claude-haiku-5-5) | overview D16, R4, RS-2; phase_01 0.3; phase_02 upload stdin e test; phase_05 RS-2 e README; STATE | specifica verificata contro piano; self-review (Haiku, stesso modello) | uncommitted → committato come plan rev 2 prima di 0.2 |
 | plan | 001 / 1 (cold review) | 1 | agent-1 (claude-haiku-5-5) | correzioni a–l in phase_02, phase_04, phase_05, STATE; Q1 e rete registrate | cold review self (Haiku fresco, nessun contesto di pianificazione) | uncommitted |
 
 Le righe sono append-only. Commit reference: vedi §0.6.
@@ -137,7 +139,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 
 | Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
 |----------|------------------------|---------------------------------|------------|------------------------|
-| — | — | — | — | — |
+| 2 | Specifica di riferimento: solo RS-1 (upload da file con URL senza spec di stdin) | Aggiunto RS-2 da `Specifiche.md` (scenario 2 streaming da `tar`): D16 upload chunked con lunghezza ignota; R4 (curl senza `/` finale e da stdin) con sub-phase 0.3 prima di 1.2; test e e2e RS-2 in 1.2/1.3; RS-2 attraverso nginx in 4.2/G-FINAL; README con due scenari. Nessuna decisione di D1–D15 cambiata. Motivo: la specifica utente è più estesa del piano rev 1 | agent-1 (self-review, Haiku 5.5); utente ha chiesto "verifica ed adegua il piano" | overview, phase_01 (0.3), phase_02 (1.2 test/e2e), phase_05 (4.2 e 4.3); 0.2 non toccato; 0.1 invariato |
 
 Revisioni previste ma non ancora fatte (non registrate come approvate):
 - D4/D8: correzione di contratto in `phase_02.md` 1.2 già applicata in planning (abort della connessione del mittente su scadenza o errore di copia). Non è una revisione di decisione.
@@ -148,6 +150,7 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | ID | Affected units | Evidence | Resolution owner | Exact next action |
 |----|----------------|----------|------------------|-------------------|
 | B-R1 | 0.1 (esito), 1.2, 1.3 | R1 UNVERIFIED: comportamento di curl non provato in questa sandbox | agent-2 con revisione agent-1 | eseguire probe 0.1 in directory di scratch; registrare branch A/B/C in overview |
+| B-R4 | 0.3 (esito), 1.2, 1.3, 4.2 (RS-2 attraverso nginx) | R4 UNVERIFIED: curl senza `/` finale e da stdin (RS-2, `tar \| curl -T -`) non provato | agent-2 con revisione agent-1; escalation utente se branch B | eseguire probe 0.3 in scratch; registrare casi A/B/C in overview R4 |
 | B-R3 | 0.2, 1.2 | R3 UNVERIFIED: presenza di `EnableFullDuplex` nella toolchain | agent-2 | `go doc net/http.ResponseController.EnableFullDuplex` in 0.2; se assente, escalation |
 | B-Q1 | RISOLTO | Decisione utente: auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug | utente | nessuna |
 | B-R2 | PARZIALE: 4.2 (S1), G-E2E-FINAL, G-FINAL | direttive confermate da nginx.org (rete autorizzata dall'utente); residuo `client_body_timeout` non letto | agent-2 | 4.2 S1: leggere `client_body_timeout` da nginx.org (core module) e registrarlo in `overview.md` R2 |
@@ -164,6 +167,7 @@ none
 |----|------------|------------|--------|---------|-------------------|
 | 0.1 | phase_01.md | none | DONE | 1 | G-R1 pass branch A (curl 8.18.0); self-review §7 |
 | 0.2 | phase_01.md | 0.1 (R1 branch A) | TODO | 1 | — |
+| 0.3 | phase_01.md | 0.1 (R1 branch A) | TODO | 1 | — |
 | 1.1 | phase_02.md | 0.2 | TODO | 1 | — |
 | 1.2 | phase_02.md | 1.1 | TODO | 1 | — |
 | 1.3 | phase_02.md | 1.2 | TODO | 1 | — |
@@ -179,7 +183,7 @@ README obligation per phase: P0 → N/A (nessun comportamento distribuito; verif
 ### Phases
 | ID | File | Closure unit | Status | Review / commit reference |
 |----|------|--------------|--------|---------------------------|
-| 0 | phase_01.md | P0 | TODO | — |
+| 0 | phase_01.md | P0 | TODO | — (0.3 aggiunta in rev 2) |
 | 1 | phase_02.md | P1 | TODO | — |
 | 2 | phase_03.md | P2 | TODO | — |
 | 3 | phase_04.md | P3 | TODO | — |

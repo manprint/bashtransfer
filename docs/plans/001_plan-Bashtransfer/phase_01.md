@@ -9,7 +9,7 @@ Read STATE.md §0–1 first for scope, ownership, recovery, checks and commit ru
 Open before edits; checkpoint at a recovery boundary; close with evidence. Il probe di 0.1 non scrive nel repository: solo `overview.md` (sezione R1) viene aggiornata. Nessun commit (planning e piano non committano).
 
 ## Local design context
-Plan revision: 1.
+Plan revision: 2 (0.3 e R4 aggiunti per RS-2; vedi STATE §8).
 - D4: il server risponde al `PUT` con i comandi prima di leggere il body. Vale solo se curl mostra la risposta durante l'upload (R1-A).
 - D5: nome file da path `PUT /<name>`; se curl non invia il nome, default `download` e escalation (R1-C).
 - R1: curl upload behaviour. Esito da registrare in overview.md dopo 0.1. Branch B (risposta visibile solo a fine upload) = STOP e escalation all'utente.
@@ -67,10 +67,33 @@ Plan revision: 1.
 - **e2e tests:** N/A — nessun comportamento osservabile.
 - **Done:** `go.mod`, `cmd/bashtransfer/main.go`, `.gitignore` presenti; G-BASE pass registrato in STATE §7 con versione Go; R3 CONFIRMED (fonte locale `go doc`, versione toolchain); review agent-1 in STATE §7; unità chiusa in STATE §4 con `uncommitted`.
 
+### 0.3 Probe R4: upload senza `/` finale e da stdin (RS-1, RS-2)
+- **Model:** agent-2 (claude-haiku-5-5)
+- **Assignment:** eseguire il probe e registrare R4 in overview. Review agent-1 prima della scelta del branch (self-review, vedi §7 STATE).
+- **Files:**
+  - READ: `Specifiche.md` (scenari 1 e 2).
+  - WRITE: `docs/plans/001_plan-Bashtransfer/overview.md` (riga R4 e `### R4`).
+  - NEW (fuori dal repository): `scratch/r4/` nella scratch directory di sessione, con un server di probe che decodifica il body chunked (righe di dimensione hex, dati, chunk 0) e riusa la risposta chunked di `scratch/r1/probe_server2.py`.
+- **Change:**
+  Preconditions: 0.1 chiuso (DONE).
+  Contract: probe solo su `127.0.0.1`; nessuna modifica al repository.
+  Steps:
+  1. S1 — avviare il server di probe su porta libera; per ogni `PUT` loggare path, header `Content-Length` e `Transfer-Encoding`, `PUT_START`, `RESPONSE_CHUNK_SENT`, dopo 3 s leggere il body fino alla lunghezza dichiarata o al chunk 0 (`BODY_END bytes=<n>`); expected: server in ascolto.
+  2. S2 — caso A: `curl -N -T payload.bin http://127.0.0.1:<porta>` (URL senza `/`, payload 8 MiB da scratch/r1); expected: path nel log registrato.
+  3. S3 — caso B: `(printf x; sleep 3; head -c 8388608 /dev/urandom) | curl -N -T - http://127.0.0.1:<porta>/mydir.tgz > out.txt`, con marcatura temporale della riga di risposta; expected: riga di risposta a `PUT_START` + 2 s (prima della fine di stdin), `Transfer-Encoding: chunked`, nessun `Content-Length`, `BODY_END bytes` pari ai byte inviati.
+  4. S4 — caso C: `head -c 1024 /dev/urandom | curl -N -T - http://127.0.0.1:<porta>`; expected: path registrato (atteso `/` senza nome).
+  5. S5 — chiudere il server (nessun listener residuo); aggiornare R4 con evidenza e branch secondo la regola in overview R4.
+  Recovery boundary: prima di S2 (PID e porta registrati in STATE §6).
+  Failure handling: caso A senza nome o caso B bloccato fino a EOF → STOP, `Scope result: BLOCKED`, escalation all'utente con log. Non cambiare D4/D5/D16 da soli. Errore di curl nel caso B dovuto a stdin → ripetere una volta, poi escalation.
+  Nota operativa: come in 0.1, `curl` nel Bash è bloccato dall'hook; eseguire tramite strumento di esecuzione sandbox, traffico su `127.0.0.1`.
+- **Unit tests:** N/A — probe. Discovery: log con almeno 3 `PUT_START`.
+- **e2e tests:** N/A — il probe è l'osservazione stessa.
+- **Done:** overview R4 con evidenza e branch; server terminato; self-review in STATE §7; unità chiusa in STATE §4 con commit.
+
 ## Phase gates and closure
 - Required gates: G-BASE (registrato in STATE §3), G-U0.2 = `go vet ./...` (exit 0).
-- Assertions: R1 e R3 non più UNVERIFIED; branch R1 scelto e registrato.
+- Assertions: R1, R3 e R4 non più UNVERIFIED; branch R1 e R4 scelti e registrati.
 - README obligation: nessun comportamento distribuito in questa fase; README non ancora creato; verificato come N/A con motivazione in STATE §11 "Documentation".
 - Every sub-phase DONE or SKIPPED with justification. Esegui il gate di fase ora.
 - Supervisor agent-1 (claude-haiku-5-5) reviews: evidenze R1 e R3, branch scelto. Review registrata come self-review dello stesso modello.
-- Chiusura P0: unità `P0` in STATE §4, fase DONE in STATE §11 solo se R1 CONFIRMED con branch A e R3 CONFIRMED. Con branch B o R3 assente: fase BLOCKED.
+- Chiusura P0: unità `P0` in STATE §4, fase DONE in STATE §11 solo se R1 e R4 CONFIRMED con branch A e R3 CONFIRMED. Con branch B, R4 bloccante o R3 assente: fase BLOCKED.

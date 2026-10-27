@@ -13,6 +13,13 @@ Scenario di riferimento (RS-1):
 3. Ricevente: esegue `curl -o "myfile.zip" "<base>/<slug>"`. Il trasferimento parte; il file ricevuto ha sha256 uguale a quello inviato.
 4. Un secondo download con lo stesso slug ottiene `410 Gone`.
 
+Scenario di riferimento (RS-2, streaming da pipe; aggiunto in revisione 2 da Specifiche):
+1. Mittente: `sudo tar -cpzf - mydir | curl -T - https://bashtransfer.mydomain.it/mydir.tgz`. Il body arriva da stdin con lunghezza ignota (`Transfer-Encoding: chunked`); il server non lo salva su disco.
+2. Il server risponde subito con i comandi curl e wget per `mydir.tgz` (nome dal path) e il mittente resta in attesa mentre tar produce output.
+3. Ricevente: `curl -o "mydir.tgz" "<base>/<slug>"`; sha256 del file ricevuto uguale al tar prodotto.
+
+Forma esatta di RS-1 (da Specifiche): URL senza `/` finale (`https://bashtransfer.mydomain.it`). Verificata in R4 (0.3).
+
 Esclusioni (fuori scope):
 - Gestione certificati TLS (demandata a nginx).
 - Persistenza dei file su disco o in database.
@@ -41,6 +48,7 @@ Vincoli: sandbox senza accesso di rete esterno (CLAUDE.md utente); Docker e ngin
 | D12 | Il server parla HTTP semplice; TLS è di nginx. Il server usa `X-Forwarded-Proto` e `Host` solo per costruire la base URL dei comandi, quando `BASHT_PUBLIC_URL` non è impostato. | Supervisor | — |
 | D13 | Performance: buffer da `sync.Pool` di 256 KiB, `io.CopyBuffer`, flush per blocco, nessuna compressione, nessuna allocazione per chunk. Criterio di accettazione: throughput del relay ≥ 90% del baseline `io.CopyBuffer` diretto con stesso buffer, misurato su loopback con lo stesso host. | Supervisor | — |
 | D14 | Deploy: Dockerfile multi-stage, runtime `distroless/static:nonroot`, tag di immagine fissati. `compose.yaml` con `nginx` e `app` su rete interna; `app` non pubblica porte sull'host. | Supervisor | — |
+| D16 | Upload da stdin (RS-2): `PUT` con `Transfer-Encoding: chunked` e lunghezza ignota (`ContentLength == -1`), stesso protocollo di D4–D6, nome dal path (`PUT /mydir.tgz`). Nessun limite di dimensione lato server; la durata è limitata solo dall'inattività (D15). Vincolo: il blocco comandi arriva prima della fine di stdin (R4 caso B). | Utente (Specifiche, scenario 2), supervisor | — |
 
 Config (D10) in forma completa: `BASHT_LISTEN` (default `:8080`), `BASHT_PUBLIC_URL` (default: derivata dalla richiesta), `BASHT_AUTH_USER`, `BASHT_AUTH_PASSWORD`, `BASHT_WAIT_TIMEOUT` (default `1h`), `BASHT_MAX_SESSIONS` (default `1000`), `BASHT_BUF_SIZE` (default `262144`, valore minimo 4096).
 
@@ -79,7 +87,7 @@ Package layout (tutti NEW, dettagli in phase file):
 
 | Surface | Exact name/type | Default | Errors/conflicts | Compatibility |
 |---------|-----------------|---------|------------------|---------------|
-| HTTP upload | `PUT /` e `PUT /<name>`, body stream, `Content-Length` opzionale | — | `401` auth, `503` limite sessioni o collisioni slug, `405` altri metodi su path di upload | nuovo |
+| HTTP upload | `PUT /` e `PUT /<name>`, body stream, `Content-Length` opzionale; da stdin senza lunghezza = `Transfer-Encoding: chunked` (D16) | — | `401` auth, `503` limite sessioni o collisioni slug, `405` altri metodi su path di upload | nuovo |
 | HTTP risposta upload | `200 text/plain`, due righe: `curl -o "<name>" "<base>/<slug>"` e `wget -O "<name>" "<base>/<slug>"` | — | — | nuovo; formato a righe fisse per script |
 | HTTP download | `GET /<slug>` | — | `404` slug ignoto, `410` già reclamato, concluso o scaduto (D7) | nuovo |
 | HTTP root | `GET /` testo d'uso | — | — | nuovo |
@@ -92,7 +100,7 @@ Errori standard: corpi di errore in testo semplice con una riga; nessun dettagli
 
 | Logical phase | File | Sub-phase IDs | Depends on | Assignment |
 |---------------|------|---------------|------------|------------|
-| 0 | [phase_01.md](phase_01.md) | 0.1, 0.2 | none | agent-2 (probe, skeleton); agent-1 review |
+| 0 | [phase_01.md](phase_01.md) | 0.1, 0.2, 0.3 | none | agent-2 (probe, skeleton); agent-1 review |
 | 1 | [phase_02.md](phase_02.md) | 1.1, 1.2, 1.3 | 0 (0.1 per R1, 0.2 per R3) | agent-2; review agent-1 |
 | 2 | [phase_03.md](phase_03.md) | 2.1, 2.2 | 1 | agent-2; review agent-1 |
 | 3 | [phase_04.md](phase_04.md) | 3.1 | 1 | agent-2; review agent-1 |
@@ -120,6 +128,7 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 | R1 | `curl -T <file> https://host/` (URL senza nome file): (a) il server riceve il nome nel path? (b) curl stampa la risposta del server prima della fine dell'upload? Required. | CONFIRMED (branch A) — probe locale 0.1, curl 8.18.0 | D4, D5; 0.1, 1.2, 1.3 |
 | R2 | Direttive nginx per upload/download in streaming senza buffering e body illimitato (`proxy_request_buffering off`, `proxy_buffering off`, `client_max_body_size 0`, timeout di lettura/scrittura lunghi, `proxy_http_version 1.1`). Required per 4.2. | CONFIRMED per le direttive di buffering, body e versione HTTP; client_body_timeout non ancora verificato (vedi ### R2). Timeout di proxy da portare ≥ BASHT_WAIT_TIMEOUT. | D12, D14; 4.2 sbloccata, con parametri timeout |
 | R3 | `http.ResponseController.EnableFullDuplex` disponibile dalla versione Go minima; comportamento sul body durante la scrittura della risposta. Required per D4. | UNVERIFIED nel piano; verifica locale in 0.2 con `go doc net/http.ResponseController` sulla toolchain installata. Se non disponibile, D4 richiede revisione (vedi phase_01). | D1, D4; 0.2, 1.2 |
+| R4 | Due casi di curl: (a) `curl -T file https://host` senza `/` finale (forma di RS-1) produce path con nome del file? (b) `tar ... \| curl -T - https://host/x.tgz` stampa il blocco comandi prima della fine di stdin? Required per RS-1 e RS-2 (D16). | UNVERIFIED — probe locale in 0.3 | D4, D5, D16; 0.3, 1.2, 1.3 |
 
 ### R1 — curl upload behaviour
 - Sources: local `curl --help all`/`man curl` (versione installata) e probe locale.
@@ -148,11 +157,19 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 - Supervisor inference (non garanzia della fonte): durante l'attesa del ricevente l'app non legge il body e non emette byte dopo i comandi. Quindi nginx vede un upstream fermo: `proxy_send_timeout` chiude la connessione verso l'app dopo 60s di blocco in scrittura, e `proxy_read_timeout` la chiude dopo 60s senza byte di risposta. Entrambi devono essere ≥ `BASHT_WAIT_TIMEOUT` (default 1h = 3600s). Per il relay in corso, il silenzio del mittente è limitato da `BASHT_IDLE_TIMEOUT` (D15), che deve essere < `proxy_read_timeout`.
 - Local check: non eseguito. Verifica di sintassi con `nginx -t` in container o locale in 4.2 (immagine pinnata, rete autorizzata).
 - Decision impact: 4.2 sbloccata. Parametri nginx: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` e `proxy_send_timeout` = 3600s (≥ default `BASHT_WAIT_TIMEOUT`); `proxy_read_timeout` > `BASHT_IDLE_TIMEOUT`. Scelta reversibile; alternativa (timeout più corti) rifiutata perché rompe D7.
-- Unresolved/replacement: `client_body_timeout` (default 60s, tra due letture successive del body dal client) non ancora letto: da verificare in 4.2 con la stessa fonte prima di dichiarare la configurazione corretta. Resta aperto un punto: se nginx non legge il body mentre l'app attende, `client_body_timeout` può scattare sul mittente; da verificare con test e2e lento (upload che attende > 60s prima del download).
+- Unresolved/replacement: inoltro del body chunked del client (RS-2) con `proxy_request_buffering off` da verificare nella stessa fonte. `client_body_timeout` (default 60s, tra due letture successive del body dal client) non ancora letto: da verificare in 4.2 con la stessa fonte prima di dichiarare la configurazione corretta. Resta aperto un punto: se nginx non legge il body mentre l'app attende, `client_body_timeout` può scattare sul mittente; da verificare con test e2e lento (upload che attende > 60s prima del download).
 
 ### R3 — Go full duplex
 - Sources richieste: `go doc net/http.ResponseController` e `go doc net/http.ResponseController.EnableFullDuplex` sulla toolchain installata (fonte locale, versione esatta registrata).
 - Decision impact: se il metodo non esiste nella toolchain minima accettata, D4 va rivisto dal supervisore prima di 1.2. Non è una ricerca web.
+
+### R4 — curl upload senza `/` finale e da stdin
+- Sources: probe locale con curl installato (versione registrata in 0.3), fuori dal repo.
+- Applicability: curl della sandbox; il comportamento del mittente reale può variare.
+- Documented fact: nessuno ancora.
+- Local check: pending in 0.3. Casi: (A) `curl -N -T payload.bin http://127.0.0.1:<porta>` (URL senza `/`): path ricevuto. (B) `(printf x; sleep 3; head -c 8388608 /dev/urandom) | curl -N -T - http://127.0.0.1:<porta>/mydir.tgz`: riga di risposta visibile prima della fine di stdin; header `Transfer-Encoding: chunked`, nessun `Content-Length`. (C) `head -c 1024 /dev/urandom | curl -N -T - http://127.0.0.1:<porta>`: path ricevuto (atteso senza nome).
+- Decision impact: (A) con path `/<basename>` → RS-1 invariato. (A) con path `/` senza nome → D5 darebbe `download`, il comando non sarebbe `curl -o "myfile.zip"` come in Specifiche: **STOP, escalation all'utente**. (B) risposta visibile prima dell'EOF → D16 valido. (B) risposta solo a EOF di stdin → il ricevente non può partire prima della fine di tar: **STOP, escalation** (RS-2 non realizzabile come specificato). (C) è atteso senza nome: documentato come limitazione, non bloccante per RS-2 che usa sempre `mydir.tgz` nel path.
+- Unresolved/replacement: nessuno dopo 0.3.
 
 ## Invariants
 
@@ -181,7 +198,7 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 - Unit (per sub-phase): solo i test del pacchetto modificato, con nome e conteggio atteso in STATE §3.
 - Phase closure P<N>: `go test -race -count=1 ./...` con conteggio test non zero e i test e2e della fase (`scripts/e2e.sh`).
 - Benchmark in 3.1 e P3: `scripts/bench.sh` su loopback; verdetto secondo D13.
-- Final (G-FINAL, ultima fase): RS-1 eseguito su istanza locale tramite `compose.yaml` e nginx, dopo autorizzazione rete per pull delle immagini (4.1–4.2).
+- Final (G-FINAL, ultima fase): RS-1 e RS-2 eseguiti su istanza locale tramite `compose.yaml` e nginx, dopo autorizzazione rete per pull delle immagini (4.1–4.2).
 
 I comandi esatti sono in STATE.md §3 (registro gate), non ripetuti nelle fasi.
 
@@ -191,7 +208,7 @@ Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito 
 
 | Unit(s) | Implementer | Required supervisor review |
 |---------|-------------|----------------------------|
-| 0.1, 0.2 | agent-2 (claude-haiku-5-5) | agent-1 (claude-haiku-5-5), dopo 0.1: verifica dell'esito R1 e branch scelto |
+| 0.1, 0.2, 0.3 | agent-2 (claude-haiku-5-5) | agent-1 (claude-haiku-5-5), dopo 0.1: verifica dell'esito R1 e branch scelto |
 | 1.1, 1.2, 1.3 | agent-2 | agent-1, revisione ad alto rischio prima di scrivere `handler.go` (concorrenza e lifecycle) e chiusura P1 |
 | 2.1, 2.2 | agent-2 | agent-1 su 2.1 (contratto auth) e P2 |
 | 3.1 | agent-2 | agent-1 su criterio D13 e P3 |

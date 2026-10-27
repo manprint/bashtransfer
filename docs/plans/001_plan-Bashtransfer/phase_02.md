@@ -9,7 +9,7 @@ Read STATE.md §0–1 first for scope, ownership, recovery, checks and commit ru
 Open before edits; checkpoint at a recovery boundary; close with evidence. Il worker (agent-2, implementazione) esegue l'unità OPEN; la sessione esecutrice è l'unico scrittore di STATE.md; design mancante o test in conflitto → agent-1 (supervisore).
 
 ## Local design context
-Plan revision: 1.
+Plan revision: 2 (upload da stdin D16; test e e2e RS-2; prerequisito R4 da 0.3).
 - D1: Go, `net/http`, nessuna dipendenza esterna.
 - D2: relay in memoria, un solo ricevente per slug, nessun file su disco.
 - D3: slug 10 caratteri da alfabeto 62, `crypto/rand`, rejection sampling con soglia 248 (= 62·4): byte `b` accettato solo se `b < 248`, carattere = `alphabet[b % 62]`. Collisione con sessione viva: fino a 5 tentativi, poi errore `ErrSlugCollision` (→ 503).
@@ -78,6 +78,7 @@ Abort protocol (vincolante per 1.1 e 1.2):
   3. S3 — `handler.go` ramo upload (`PUT`): auth hook, full duplex, `Create`, blocco comandi, select su `Attached`/`Expired`/contesto; expected: `TestUploadReturnsCommandsBeforeBody`, `TestUploadMethodNotAllowed` pass. Recovery boundary: checkpoint dopo S3.
   4. S4 — `handler.go` ramo download (`GET`): `Claim`, attesa `Finished`, abort; expected: `TestGetUnknown404`, `TestGetSecondClaim410`, `TestRelayRoundTripSHA` pass.
   5. S5 — test di abort `TestSenderAbortFailsReceiver`, `TestReceiverAbortCleansSession` (meccanica sotto); expected: pass entro i tempi indicati. Recovery boundary: checkpoint dopo S5.
+  Upload da stdin (D16, RS-2): `Transfer-Encoding: chunked`, `r.ContentLength == -1` ammesso; nessun limite di dimensione; durata limitata solo da D15; nome dal path.
   Contract upload (`PUT /` e `PUT /<name>`; altri path → 404; altri metodi → 405 con `Allow: PUT`):
   - Se `Authorize` non nil e restituisce false → 401 con corpo `unauthorized` (`WWW-Authenticate` aggiunto in 2.1; la logica di 2.1 riusa questo punto).
   - `rc := http.NewResponseController(w)`; `rc.EnableFullDuplex()` errore → 500 (non dovrebbe accadere, R3 verificato).
@@ -110,7 +111,9 @@ Abort protocol (vincolante per 1.1 e 1.2):
     - `TestSenderAbortFailsReceiver`: meccanica: connessione TCP raw (`net.Dial`) verso il server di test; invio di `PUT /x.bin HTTP/1.1` con `Content-Length: 16777216`; lettura della risposta con i comandi; avvio di `GET /<slug>` in goroutine; scrittura di 1 MiB e chiusura della connessione. Oracolo: il ricevente riceve meno di 16 MiB **e** `io.ReadAll` restituisce errore non `nil` (`io.ErrUnexpectedEOF` o errore di rete), mai `nil` (I-4).
     - `TestReceiverAbortCleansSession`: meccanica: il mittente scrive da `io.Pipe` in blocchi da 64 KiB finché una scrittura fallisce; il ricevente legge 1 MiB poi annulla il contesto della propria richiesta. Oracolo: entro 5 s la scrittura del mittente fallisce (o la richiesta PUT termina con errore) e `reg.Len()==0` (I-3). Il registry è creato dal test e passato a `server.New`.
     - `TestUploadMethodNotAllowed`: `POST /` → 405 con `Allow: PUT`.
-    - Comando: `go test ./internal/relay ./internal/server -v -count=1 -race`; discovery: 3 test copy + 7 test server (sottotest sui sizes dentro `TestRelayRoundTripSHA`).
+    - `TestUploadUnknownLength`: `PUT /mydir.tgz` con `Transfer-Encoding: chunked` da `io.Pipe` (lunghezza ignota), 1 MiB poi 16 MiB; sha256 del download = sha256 dell'upload; il ricevente non riceve `Content-Length`.
+    - `TestUploadNameFromPath`: `PUT /mydir.tgz` → blocco comandi contiene `curl -o "mydir.tgz"` e `wget -O "mydir.tgz"`.
+    - Comando: `go test ./internal/relay ./internal/server -v -count=1 -race`; discovery: 3 test copy + 9 test server (sottotest sui sizes dentro `TestRelayRoundTripSHA`).
 - **e2e tests:** N/A in questa unità (coperto da `scripts/e2e.sh` in 1.3). La copertura dei test di handler è completa per il contratto HTTP.
 - **Done:** tutti i test listati eseguiti e passati con `-race`, nessun test saltato (`-v` mostra `PASS` per ciascuno); revisione agent-1 pre-implementazione e post-diff registrate in STATE §7; I-1..I-4 coperti; unità chiusa in STATE §4 con `uncommitted`.
 
@@ -129,6 +132,7 @@ Abort protocol (vincolante per 1.1 e 1.2):
   3. avvia il binario su porta libera di `127.0.0.1` (`BASHT_LISTEN=127.0.0.1:<porta>`), attende che `GET /` risponda;
   4. avvia upload in background con stdout su file: `curl -sS -T payload.bin http://127.0.0.1:<porta>/e2e.bin > upload.out &`; attende la prima riga, estrae lo slug con regex `[0-9A-Za-z]{10}`;
   5. scarica con `curl -sS -o received.bin http://127.0.0.1:<porta>/<slug>`; confronta sha256;
+  5b. RS-2: `cat payload.bin | curl -sS -T - http://127.0.0.1:<porta>/mydir.tgz > upload2.out &` (lunghezza ignota); slug da `upload2.out`; comando di download con `-o "mydir.tgz"`; expected: nome `mydir.tgz` nel blocco comandi, sha256 identico;
   6. secondo download stesso slug → HTTP 410 (`curl -s -o /dev/null -w '%{http_code}'`);
   7. slug sconosciuto → 404;
   8. termina il binario e l'upload, pulisce directory temporanea (solo quella creata dallo script).
