@@ -30,8 +30,8 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: sub-phase 0.2 (go.mod, main placeholder, .gitignore, go vet, R3), poi 0.3 (probe R4), poi P0; secondo ordine di handoff in §2.
-- Next eligible plan unit: 0.2 (`phase_01.md`)
+- Next action: sub-phase 0.3 (probe R4 in scratch, poi commit 0.2 già fatto → commit 0.3), poi P0; secondo ordine di handoff in §2.
+- Next eligible plan unit: 0.3 (`phase_01.md`)
 - Unit base: none; branch: main (nessun commit); owned changes: none
 - Repo state: nessun commit; `Specifiche.md` non tracciato; `docs/plans/001_plan-Bashtransfer/` non tracciato (creato in planning, nessun commit richiesto in planning).
 
@@ -91,6 +91,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 |------|--------------|---------------|-------|---------|-----------------|--------|
 | sub-phase | 0.1 / 1 | 1 | agent-2 (claude-haiku-5-5), state writer sessione corrente | overview R1; STATE; cartella piano (non tracciata prima, inclusa per provenienza) | G-R1 pass branch A; self-review §7 | unit:0.1:1 (risolto da trailer) |
 | plan | 001 / 1 | 1 | agent-1 (claude-haiku-5-5) | cartella piano: overview, phase_01..phase_05, STATE | nessuna esecuzione; nessuna revisione di codice | uncommitted (planning non committa) |
+| sub-phase | 0.2 / 1 | 2 | agent-2 (claude-haiku-5-5), state writer sessione corrente | go.mod, cmd/bashtransfer/main.go (placeholder), .gitignore; overview R3 | G-BASE, G-U0.2 pass; R3 CONFIRMED; self-review §7 | unit:0.2:1 |
 | plan | 001 / 2 (revisione RS-2) | 2 | agent-1 (claude-haiku-5-5) | overview D16, R4, RS-2; phase_01 0.3; phase_02 upload stdin e test; phase_05 RS-2 e README; STATE | specifica verificata contro piano; self-review (Haiku, stesso modello) | uncommitted → committato come plan rev 2 prima di 0.2 |
 | plan | 001 / 1 (cold review) | 1 | agent-1 (claude-haiku-5-5) | correzioni a–l in phase_02, phase_04, phase_05, STATE; Q1 e rete registrate | cold review self (Haiku fresco, nessun contesto di pianificazione) | uncommitted |
 
@@ -133,7 +134,11 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | Review | Reviewer | Plan revision / reviewed change | Invariants/assertions checked | Verdict |
 |--------|----------|---------------------------------|------------------------------|---------|
 | Cold review piano (self-review, agente fresco Haiku 5.5, nessun contesto di pianificazione; non è revisione forte) | agent-1 (claude-haiku-5-5) | rev 1 / overview, phase_01..05, STATE | step mancanti in 1.2; regola base URL; placeholder D11; conteggio test server 7; timing review (prima di `handler.go`); ownership; meccanica dei test di abort; corpi 503/401; baseline senza HEAD; readiness e ordine di handoff | findings a–l applicati; nessuna nuova decisione |
-| Verifica di esecuzione R1 / R3 / R2 residuo | — | rev 1 | R1 (0.1), R3 (0.2), `client_body_timeout` (4.2 S1) | pending |
+| G-BASE | `git status --short`; `go version` | pass | snapshot: `Specifiche.md` non tracciato, `docs/plans/` non tracciato → committato in rev 2; go1.27.3 | repo, rev 2 | 2026-10-27 |
+| G-U0.2 (0.2) | `go vet ./...`; `go list ./...` | pass (exit 0; lista = `bashtransfer/cmd/bashtransfer`) | 0 test (N/A scheletro) | go.mod, main.go, .gitignore | 2026-10-27 |
+| Review 0.2 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 2 / go.mod `go 1.21` | R3: firma presente; `api/go1.21.txt` riga 356; scelta minima 1.21 | PASS, self-review; non revisione forte |
+| Verifica di esecuzione R2 residuo | — | rev 2 | `client_body_timeout` (4.2 S1) | pending |
+| Verifica di esecuzione R4 | — | rev 2 | casi A/B/C (0.3) | pending |
 
 ## 8. Technical revisions and deviations
 
@@ -151,7 +156,7 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 |----|----------------|----------|------------------|-------------------|
 | B-R1 | 0.1 (esito), 1.2, 1.3 | R1 UNVERIFIED: comportamento di curl non provato in questa sandbox | agent-2 con revisione agent-1 | eseguire probe 0.1 in directory di scratch; registrare branch A/B/C in overview |
 | B-R4 | 0.3 (esito), 1.2, 1.3, 4.2 (RS-2 attraverso nginx) | R4 UNVERIFIED: curl senza `/` finale e da stdin (RS-2, `tar \| curl -T -`) non provato | agent-2 con revisione agent-1; escalation utente se branch B | eseguire probe 0.3 in scratch; registrare casi A/B/C in overview R4 |
-| B-R3 | 0.2, 1.2 | R3 UNVERIFIED: presenza di `EnableFullDuplex` nella toolchain | agent-2 | `go doc net/http.ResponseController.EnableFullDuplex` in 0.2; se assente, escalation |
+| B-R3 | RISOLTO in 0.2 | `go doc` su go1.27.3 + `$GOROOT/api/go1.21.txt`: metodo presente dalla go1.21; `go.mod` = `go 1.21` | agent-2 | nessuna |
 | B-Q1 | RISOLTO | Decisione utente: auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug | utente | nessuna |
 | B-R2 | PARZIALE: 4.2 (S1), G-E2E-FINAL, G-FINAL | direttive confermate da nginx.org (rete autorizzata dall'utente); residuo `client_body_timeout` non letto | agent-2 | 4.2 S1: leggere `client_body_timeout` da nginx.org (core module) e registrarlo in `overview.md` R2 |
 | B-NET | 4.1 (build Docker), 4.2 | pull delle immagini base pinnate: rete autorizzata dall'utente per Docker; esito del pull non ancora verificato | agent-2 | 4.1 S1 `docker build`; se il pull fallisce → G-D1 build `blocked` con log, non pass |
@@ -166,8 +171,8 @@ none
 | ID | Phase file | Depends on | Status | Attempt | Evidence / reason |
 |----|------------|------------|--------|---------|-------------------|
 | 0.1 | phase_01.md | none | DONE | 1 | G-R1 pass branch A (curl 8.18.0); self-review §7 |
-| 0.2 | phase_01.md | 0.1 (R1 branch A) | TODO | 1 | — |
-| 0.3 | phase_01.md | 0.1 (R1 branch A) | TODO | 1 | — |
+| 0.2 | phase_01.md | 0.1 (R1 branch A) | DONE | 1 | G-BASE + G-U0.2 pass (go1.27.3, vet exit 0, list non vuoto); R3 CONFIRMED |
+| 0.3 | phase_01.md | 0.1 (R1 branch A) | IN_PROGRESS | 1 | probe R4 in corso (scratch/r4) |
 | 1.1 | phase_02.md | 0.2 | TODO | 1 | — |
 | 1.2 | phase_02.md | 1.1 | TODO | 1 | — |
 | 1.3 | phase_02.md | 1.2 | TODO | 1 | — |

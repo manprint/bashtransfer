@@ -127,7 +127,7 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 |----|---------------------------------|----------------|------------------------------------|
 | R1 | `curl -T <file> https://host/` (URL senza nome file): (a) il server riceve il nome nel path? (b) curl stampa la risposta del server prima della fine dell'upload? Required. | CONFIRMED (branch A) — probe locale 0.1, curl 8.18.0 | D4, D5; 0.1, 1.2, 1.3 |
 | R2 | Direttive nginx per upload/download in streaming senza buffering e body illimitato (`proxy_request_buffering off`, `proxy_buffering off`, `client_max_body_size 0`, timeout di lettura/scrittura lunghi, `proxy_http_version 1.1`). Required per 4.2. | CONFIRMED per le direttive di buffering, body e versione HTTP; client_body_timeout non ancora verificato (vedi ### R2). Timeout di proxy da portare ≥ BASHT_WAIT_TIMEOUT. | D12, D14; 4.2 sbloccata, con parametri timeout |
-| R3 | `http.ResponseController.EnableFullDuplex` disponibile dalla versione Go minima; comportamento sul body durante la scrittura della risposta. Required per D4. | UNVERIFIED nel piano; verifica locale in 0.2 con `go doc net/http.ResponseController` sulla toolchain installata. Se non disponibile, D4 richiede revisione (vedi phase_01). | D1, D4; 0.2, 1.2 |
+| R3 | `http.ResponseController.EnableFullDuplex` disponibile dalla versione Go minima; comportamento sul body durante la scrittura della risposta. Required per D4. | CONFIRMED — fonte locale: `go doc` su go1.27.3; introduzione in go1.21 (`$GOROOT/api/go1.21.txt`). `go.mod`: `go 1.21`. | D1, D4; 0.2, 1.2 |
 | R4 | Due casi di curl: (a) `curl -T file https://host` senza `/` finale (forma di RS-1) produce path con nome del file? (b) `tar ... \| curl -T - https://host/x.tgz` stampa il blocco comandi prima della fine di stdin? Required per RS-1 e RS-2 (D16). | UNVERIFIED — probe locale in 0.3 | D4, D5, D16; 0.3, 1.2, 1.3 |
 
 ### R1 — curl upload behaviour
@@ -160,8 +160,9 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 - Unresolved/replacement: inoltro del body chunked del client (RS-2) con `proxy_request_buffering off` da verificare nella stessa fonte. `client_body_timeout` (default 60s, tra due letture successive del body dal client) non ancora letto: da verificare in 4.2 con la stessa fonte prima di dichiarare la configurazione corretta. Resta aperto un punto: se nginx non legge il body mentre l'app attende, `client_body_timeout` può scattare sul mittente; da verificare con test e2e lento (upload che attende > 60s prima del download).
 
 ### R3 — Go full duplex
-- Sources richieste: `go doc net/http.ResponseController` e `go doc net/http.ResponseController.EnableFullDuplex` sulla toolchain installata (fonte locale, versione esatta registrata).
-- Decision impact: se il metodo non esiste nella toolchain minima accettata, D4 va rivisto dal supervisore prima di 1.2. Non è una ricerca web.
+- Sources: `go doc net/http.ResponseController.EnableFullDuplex` sulla toolchain installata; `$GOROOT/api/go1.21.txt` riga 356 (`pkg net/http, method (*ResponseController) EnableFullDuplex() error #57786`). Fonte locale, nessuna ricerca web.
+- Local check (0.2, 2026-10-27): `go version` = `go1.27.3 linux/amd64`; `go doc` stampa la firma `func (c *ResponseController) EnableFullDuplex() error` e la descrizione (HTTP/1: lettura del body interleaved con la scrittura della risposta). `go vet ./...` exit 0; `go list ./...` = `bashtransfer/cmd/bashtransfer`.
+- Decision impact: il metodo esiste dalla go1.21; `go.mod` dichiara `go 1.21` (minimo). D4 valido. La builder image in 4.1 usa una toolchain ≥ 1.21 (la scelta pinnata va registrata in 4.1). Non è una ricerca web.
 
 ### R4 — curl upload senza `/` finale e da stdin
 - Sources: probe locale con curl installato (versione registrata in 0.3), fuori dal repo.
