@@ -30,8 +30,8 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: sub-phase 0.3 (probe R4 in scratch, poi commit 0.2 già fatto → commit 0.3), poi P0; secondo ordine di handoff in §2.
-- Next eligible plan unit: 0.3 (`phase_01.md`)
+- Next action: chiusura P0 (commit), poi 1.1 (config/slug/registry); secondo ordine di handoff in §2.
+- Next eligible plan unit: P0 closure, poi 1.1 (`phase_02.md`)
 - Unit base: none; branch: main (nessun commit); owned changes: none
 - Repo state: nessun commit; `Specifiche.md` non tracciato; `docs/plans/001_plan-Bashtransfer/` non tracciato (creato in planning, nessun commit richiesto in planning).
 
@@ -91,6 +91,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 |------|--------------|---------------|-------|---------|-----------------|--------|
 | sub-phase | 0.1 / 1 | 1 | agent-2 (claude-haiku-5-5), state writer sessione corrente | overview R1; STATE; cartella piano (non tracciata prima, inclusa per provenienza) | G-R1 pass branch A; self-review §7 | unit:0.1:1 (risolto da trailer) |
 | plan | 001 / 1 | 1 | agent-1 (claude-haiku-5-5) | cartella piano: overview, phase_01..phase_05, STATE | nessuna esecuzione; nessuna revisione di codice | uncommitted (planning non committa) |
+| sub-phase | 0.3 / 1 | 2 | agent-2 (claude-haiku-5-5), state writer sessione corrente | probe in scratch (nessun file repo); overview R4; phase_05 limite README | G-R4 pass; self-review §7 | unit:0.3:1 |
 | sub-phase | 0.2 / 1 | 2 | agent-2 (claude-haiku-5-5), state writer sessione corrente | go.mod, cmd/bashtransfer/main.go (placeholder), .gitignore; overview R3 | G-BASE, G-U0.2 pass; R3 CONFIRMED; self-review §7 | unit:0.2:1 |
 | plan | 001 / 2 (revisione RS-2) | 2 | agent-1 (claude-haiku-5-5) | overview D16, R4, RS-2; phase_01 0.3; phase_02 upload stdin e test; phase_05 RS-2 e README; STATE | specifica verificata contro piano; self-review (Haiku, stesso modello) | uncommitted → committato come plan rev 2 prima di 0.2 |
 | plan | 001 / 1 (cold review) | 1 | agent-1 (claude-haiku-5-5) | correzioni a–l in phase_02, phase_04, phase_05, STATE; Q1 e rete registrate | cold review self (Haiku fresco, nessun contesto di pianificazione) | uncommitted |
@@ -138,7 +139,8 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | G-U0.2 (0.2) | `go vet ./...`; `go list ./...` | pass (exit 0; lista = `bashtransfer/cmd/bashtransfer`) | 0 test (N/A scheletro) | go.mod, main.go, .gitignore | 2026-10-27 |
 | Review 0.2 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 2 / go.mod `go 1.21` | R3: firma presente; `api/go1.21.txt` riga 356; scelta minima 1.21 | PASS, self-review; non revisione forte |
 | Verifica di esecuzione R2 residuo | — | rev 2 | `client_body_timeout` (4.2 S1) | pending |
-| Verifica di esecuzione R4 | — | rev 2 | casi A/B/C (0.3) | pending |
+| G-R4 (0.3) | probe `curl -N -T` su `127.0.0.1:18090` con `probe_server.py` in scratch `r4/`; `payload.bin` 8 MiB da `r1/`; stdin con `printf x; sleep 3; head -c 8388608` | pass | A: `PUT_START path=/payload.bin CL=8388608`, `BODY_END 8388608`. B: `PUT_START path=/mydir.tgz TE=chunked`, riga a +3 ms, EOF stdin +3 s, `BODY_END 8388609`. C: `path=/`, `BODY_END 1024`. Listener chiuso | overview R4, working tree pre-commit | 2026-10-27 |
+| Review 0.3 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 2 / overview R4 + log server | esito A/B/C; D16 valido; limite D5 per caso C documentato | PASS, self-review; non revisione forte |
 
 ## 8. Technical revisions and deviations
 
@@ -155,7 +157,7 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | ID | Affected units | Evidence | Resolution owner | Exact next action |
 |----|----------------|----------|------------------|-------------------|
 | B-R1 | 0.1 (esito), 1.2, 1.3 | R1 UNVERIFIED: comportamento di curl non provato in questa sandbox | agent-2 con revisione agent-1 | eseguire probe 0.1 in directory di scratch; registrare branch A/B/C in overview |
-| B-R4 | 0.3 (esito), 1.2, 1.3, 4.2 (RS-2 attraverso nginx) | R4 UNVERIFIED: curl senza `/` finale e da stdin (RS-2, `tar \| curl -T -`) non provato | agent-2 con revisione agent-1; escalation utente se branch B | eseguire probe 0.3 in scratch; registrare casi A/B/C in overview R4 |
+| B-R4 | RISOLTO in 0.3 | R4 CONFIRMED: (A) path `/payload.bin` senza slash; (B) riga visibile +3 ms, EOF stdin +3 s; (C) senza nome → `download` (limitazione in 4.3) | agent-2 | nessuna |
 | B-R3 | RISOLTO in 0.2 | `go doc` su go1.27.3 + `$GOROOT/api/go1.21.txt`: metodo presente dalla go1.21; `go.mod` = `go 1.21` | agent-2 | nessuna |
 | B-Q1 | RISOLTO | Decisione utente: auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug | utente | nessuna |
 | B-R2 | PARZIALE: 4.2 (S1), G-E2E-FINAL, G-FINAL | direttive confermate da nginx.org (rete autorizzata dall'utente); residuo `client_body_timeout` non letto | agent-2 | 4.2 S1: leggere `client_body_timeout` da nginx.org (core module) e registrarlo in `overview.md` R2 |
@@ -172,7 +174,7 @@ none
 |----|------------|------------|--------|---------|-------------------|
 | 0.1 | phase_01.md | none | DONE | 1 | G-R1 pass branch A (curl 8.18.0); self-review §7 |
 | 0.2 | phase_01.md | 0.1 (R1 branch A) | DONE | 1 | G-BASE + G-U0.2 pass (go1.27.3, vet exit 0, list non vuoto); R3 CONFIRMED |
-| 0.3 | phase_01.md | 0.1 (R1 branch A) | IN_PROGRESS | 1 | probe R4 in corso (scratch/r4) |
+| 0.3 | phase_01.md | 0.1 (R1 branch A) | DONE | 1 | G-R4 pass: A path con nome; B riga prima di EOF; C limite `download` (overview R4) |
 | 1.1 | phase_02.md | 0.2 | TODO | 1 | — |
 | 1.2 | phase_02.md | 1.1 | TODO | 1 | — |
 | 1.3 | phase_02.md | 1.2 | TODO | 1 | — |

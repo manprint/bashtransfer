@@ -128,7 +128,7 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 | R1 | `curl -T <file> https://host/` (URL senza nome file): (a) il server riceve il nome nel path? (b) curl stampa la risposta del server prima della fine dell'upload? Required. | CONFIRMED (branch A) — probe locale 0.1, curl 8.18.0 | D4, D5; 0.1, 1.2, 1.3 |
 | R2 | Direttive nginx per upload/download in streaming senza buffering e body illimitato (`proxy_request_buffering off`, `proxy_buffering off`, `client_max_body_size 0`, timeout di lettura/scrittura lunghi, `proxy_http_version 1.1`). Required per 4.2. | CONFIRMED per le direttive di buffering, body e versione HTTP; client_body_timeout non ancora verificato (vedi ### R2). Timeout di proxy da portare ≥ BASHT_WAIT_TIMEOUT. | D12, D14; 4.2 sbloccata, con parametri timeout |
 | R3 | `http.ResponseController.EnableFullDuplex` disponibile dalla versione Go minima; comportamento sul body durante la scrittura della risposta. Required per D4. | CONFIRMED — fonte locale: `go doc` su go1.27.3; introduzione in go1.21 (`$GOROOT/api/go1.21.txt`). `go.mod`: `go 1.21`. | D1, D4; 0.2, 1.2 |
-| R4 | Due casi di curl: (a) `curl -T file https://host` senza `/` finale (forma di RS-1) produce path con nome del file? (b) `tar ... \| curl -T - https://host/x.tgz` stampa il blocco comandi prima della fine di stdin? Required per RS-1 e RS-2 (D16). | UNVERIFIED — probe locale in 0.3 | D4, D5, D16; 0.3, 1.2, 1.3 |
+| R4 | Due casi di curl: (a) `curl -T file https://host` senza `/` finale (forma di RS-1) produce path con nome del file? (b) `tar ... \| curl -T - https://host/x.tgz` stampa il blocco comandi prima della fine di stdin? Required per RS-1 e RS-2 (D16). | CONFIRMED — probe locale 0.3, curl 8.18.0: (a) path `/payload.bin` (branch A: nome preservato); (b) riga di risposta 3 ms dopo `PUT_START`, EOF stdin +3 s (branch B-OK); (c) stdin senza nome → path `/` (limitazione D5, non bloccante) | D4, D5, D16; 0.3, 1.2, 1.3 |
 
 ### R1 — curl upload behaviour
 - Sources: local `curl --help all`/`man curl` (versione installata) e probe locale.
@@ -168,9 +168,13 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
 - Sources: probe locale con curl installato (versione registrata in 0.3), fuori dal repo.
 - Applicability: curl della sandbox; il comportamento del mittente reale può variare.
 - Documented fact: nessuno ancora.
-- Local check: pending in 0.3. Casi: (A) `curl -N -T payload.bin http://127.0.0.1:<porta>` (URL senza `/`): path ricevuto. (B) `(printf x; sleep 3; head -c 8388608 /dev/urandom) | curl -N -T - http://127.0.0.1:<porta>/mydir.tgz`: riga di risposta visibile prima della fine di stdin; header `Transfer-Encoding: chunked`, nessun `Content-Length`. (C) `head -c 1024 /dev/urandom | curl -N -T - http://127.0.0.1:<porta>`: path ricevuto (atteso senza nome).
-- Decision impact: (A) con path `/<basename>` → RS-1 invariato. (A) con path `/` senza nome → D5 darebbe `download`, il comando non sarebbe `curl -o "myfile.zip"` come in Specifiche: **STOP, escalation all'utente**. (B) risposta visibile prima dell'EOF → D16 valido. (B) risposta solo a EOF di stdin → il ricevente non può partire prima della fine di tar: **STOP, escalation** (RS-2 non realizzabile come specificato). (C) è atteso senza nome: documentato come limitazione, non bloccante per RS-2 che usa sempre `mydir.tgz` nel path.
-- Unresolved/replacement: nessuno dopo 0.3.
+- Local check (0.3, curl 8.18.0, 2026-10-27; server di probe in scratch `r4/probe_server.py` su `127.0.0.1:18090`, chiuso dopo il probe, nessun listener residuo; log in `scratchpad/r4/server.log`):
+  - (A) `curl -N -T r1/payload.bin http://127.0.0.1:18090` (URL senza `/`, 8388608 byte, `CL=8388608`): `PUT_START path=/payload.bin`; `BODY_END bytes=8388608`. Il nome è nel path anche senza slash finale.
+  - (B) `{ printf x; sleep 3; head -c 8388608 /dev/urandom; } | curl -N -T - http://127.0.0.1:18090/mydir.tgz`: `PUT_START path=/mydir.tgz CL=- TE=chunked` a .714694; riga `COMANDI-DI-PROVA` visibile a .717428 (+3 ms); EOF stdin a .731 (+3 s dopo la riga); `BODY_END bytes=8388609` (1 byte `x` + 8388608). Nessun `Content-Length`.
+  - (C) `head -c 1024 /dev/urandom | curl -N -T - http://127.0.0.1:18090`: `PUT_START path=/` (nessun nome). Risposta visibile; `BODY_END bytes=1024`.
+  - Osservazione: curl invia `Expect: 100-continue` in tutti i casi; il server non risponde 100 e curl procede comunque (nessun blocco osservato).
+- Decision impact: (A) path con basename → RS-1 invariato, D5 valido. (B) risposta visibile prima dell'EOF → D16 valido, nessun escalation. (C) stdin senza nome: D5 usa `download`; per RS-2 il nome è sempre nel path (`/mydir.tgz`), quindi non bloccante. Limitazione da documentare in 4.3: `tar ... | curl -T - https://host` senza nome produce `download`.
+- Esito: **branch A/B-OK/C-limit** → R4 CONFIRMED, nessuna escalation. Unresolved/replacement: nessuno.
 
 ## Invariants
 
