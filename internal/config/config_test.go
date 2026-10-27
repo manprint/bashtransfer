@@ -42,6 +42,19 @@ func TestLoadAuthPairRequired(t *testing.T) {
 	}
 }
 
+func TestConfigIdleTimeout(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || cfg.IdleTimeout != 2*time.Minute {
+		t.Fatalf("default idle: %v %v", cfg.IdleTimeout, err)
+	}
+	for _, v := range []string{"0s", "500ms"} {
+		_, err := Load(env(map[string]string{"BASHT_IDLE_TIMEOUT": v}))
+		if err == nil || !strings.Contains(err.Error(), "BASHT_IDLE_TIMEOUT") {
+			t.Errorf("BASHT_IDLE_TIMEOUT=%s: errore %v, atteso errore con nome variabile", v, err)
+		}
+	}
+}
+
 func TestLoadRejectsBadNumbers(t *testing.T) {
 	cases := []struct {
 		name string

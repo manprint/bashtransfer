@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	minBufSize = 4096
-	maxBufSize = 4194304
+	minBufSize  = 4096
+	maxBufSize  = 4194304
+	minIdleTime = time.Second
 )
 
 // Config è la configurazione validata del server.
@@ -19,6 +20,7 @@ type Config struct {
 	AuthUser     string
 	AuthPassword string
 	WaitTimeout  time.Duration
+	IdleTimeout  time.Duration
 	MaxSessions  int
 	BufSize      int
 }
@@ -30,6 +32,7 @@ func Load(getenv func(string) string) (Config, error) {
 		Listen:      withDefault(getenv("BASHT_LISTEN"), ":8080"),
 		PublicURL:   getenv("BASHT_PUBLIC_URL"),
 		WaitTimeout: time.Hour,
+		IdleTimeout: 2 * time.Minute,
 		MaxSessions: 1000,
 		BufSize:     262144,
 	}
@@ -46,6 +49,14 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("BASHT_WAIT_TIMEOUT non valida: %q", v)
 		}
 		cfg.WaitTimeout = d
+	}
+
+	if v := getenv("BASHT_IDLE_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < minIdleTime {
+			return Config{}, fmt.Errorf("BASHT_IDLE_TIMEOUT non valida (minimo %s): %q", minIdleTime, v)
+		}
+		cfg.IdleTimeout = d
 	}
 
 	if v := getenv("BASHT_MAX_SESSIONS"); v != "" {

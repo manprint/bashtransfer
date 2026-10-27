@@ -4,8 +4,10 @@ package server
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"bashtransfer/internal/relay"
 	"bashtransfer/internal/slug"
@@ -15,8 +17,10 @@ import (
 type Options struct {
 	// PublicURL, se non vuoto, è la base dei comandi generati (D12).
 	PublicURL string
-	// Authorize, se non nil, decide se un PUT è autorizzato (D9, collegato in 2.1).
+	// Authorize, se non nil, decide se un PUT è autorizzato (D9).
 	Authorize func(*http.Request) bool
+	// IdleTimeout, se > 0, interrompe il relay se il mittente è fermo così a lungo (D15).
+	IdleTimeout time.Duration
 }
 
 type handler struct {
@@ -63,15 +67,6 @@ func singleSegment(p string) (string, bool) {
 	return seg, true
 }
 
-// nameFromSegment usa il segmento del path come nome file; default "download" (D5).
-// La sanitizzazione completa è in 2.2.
-func nameFromSegment(seg string) string {
-	if seg == "" {
-		return "download"
-	}
-	return seg
-}
-
 // baseURL costruisce la base dei comandi (D12).
 func (h *handler) baseURL(r *http.Request) string {
 	if h.opts.PublicURL != "" {
@@ -97,6 +92,7 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 // upload apre la sessione, scrive subito i comandi e legge il body solo quando il ricevente si aggancia.
 func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	if h.opts.Authorize != nil && !h.opts.Authorize(r) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="bashtransfer"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -105,7 +101,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	name := nameFromSegment(seg)
+	name := SanitizeName(seg)
 	s, err := h.reg.Create(name, r.ContentLength)
 	if err != nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -135,7 +131,11 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	case rcv := <-s.Attached():
 		rr := rcv.(*responseReceiver)
 		rr.start(name, s.Length)
-		n, err := h.copier.Copy(rr, r.Body)
+		var body io.Reader = r.Body
+		if h.opts.IdleTimeout > 0 {
+			body = relay.NewIdleReader(r.Body, h.opts.IdleTimeout, rc.SetReadDeadline)
+		}
+		n, err := h.copier.Copy(rr, body)
 		if err == nil && s.Length >= 0 && n != s.Length {
 			err = relay.ErrLengthMismatch
 		}

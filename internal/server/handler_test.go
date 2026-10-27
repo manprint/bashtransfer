@@ -70,6 +70,12 @@ func openUpload(t *testing.T, ctx context.Context, url string, body io.Reader) *
 	if err != nil {
 		t.Fatal(err)
 	}
+	return openUploadRequest(t, ctx, req)
+}
+
+// openUploadRequest invia req e legge i due comandi della prima risposta.
+func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *upload {
+	t.Helper()
 	resp := within(t, 5*time.Second, "risposta PUT", func() *http.Response {
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -440,5 +446,105 @@ func TestUploadNameFromPath(t *testing.T) {
 	}
 	if !strings.HasPrefix(u.wgetLine, `wget -O "mydir.tgz" "`) {
 		t.Errorf("riga wget: %q", u.wgetLine)
+	}
+}
+
+// TestUploadIdleTimeout: il mittente scrive 1 KiB di 1 MiB dichiarato e si ferma.
+// Con IdleTimeout il relay deve interrompere il ricevente e liberare la sessione (D15).
+func TestUploadIdleTimeout(t *testing.T) {
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 200 * time.Millisecond}))
+	t.Cleanup(srv.Close)
+
+	addr := srv.Listener.Addr().String()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	const total = 1 << 20
+	fmt.Fprintf(conn, "PUT /idle.bin HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n", addr, total)
+
+	br := bufio.NewReader(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	slug := ""
+	for slug == "" {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("lettura comandi: %v", err)
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "curl -o") {
+			slug = slugOf(line)
+		}
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	recv := make(chan error, 1)
+	go func() {
+		resp, err := http.Get(srv.URL + "/" + slug)
+		if err != nil {
+			recv <- err
+			return
+		}
+		defer resp.Body.Close()
+		n, err := io.Copy(io.Discard, resp.Body)
+		if err == nil && n < total {
+			err = fmt.Errorf("ricevuti %d byte senza errore", n)
+		}
+		recv <- err
+	}()
+
+	if _, err := conn.Write(make([]byte, 1<<10)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-recv:
+		if err == nil {
+			t.Fatal("il ricevente non ha visto errore dopo l'inattività")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("il ricevente non termina dopo IdleTimeout")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for reg.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d dopo IdleTimeout, attese 0", reg.Len())
+	}
+}
+
+// TestDownloadHeaders: lunghezza nota → Content-Length; sconosciuta → nessun Content-Length.
+// Content-Disposition riporta il nome usato nei comandi.
+func TestDownloadHeaders(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	data := []byte("strano contenuto")
+	u := openUpload(t, ctx, srv.URL+"/strano%20nome.zip", bytes.NewReader(data))
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	_, _ = io.Copy(io.Discard, dl.Body)
+	dl.Body.Close()
+	u.finish(t)
+	if got := dl.Header.Get("Content-Length"); got != fmt.Sprint(len(data)) {
+		t.Errorf("Content-Length %q, atteso %d", got, len(data))
+	}
+	if got := dl.Header.Get("Content-Disposition"); got != `attachment; filename="strano nome.zip"` {
+		t.Errorf("Content-Disposition %q", got)
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write(data)
+		_ = pw.Close()
+	}()
+	u2 := openUpload(t, ctx, srv.URL+"/chunk.bin", pr)
+	dl2 := get(t, ctx, srv.URL+"/"+u2.slug)
+	_, _ = io.Copy(io.Discard, dl2.Body)
+	dl2.Body.Close()
+	u2.finish(t)
+	if got := dl2.Header.Get("Content-Length"); got != "" {
+		t.Errorf("Content-Length %q con lunghezza sconosciuta, atteso assente", got)
 	}
 }

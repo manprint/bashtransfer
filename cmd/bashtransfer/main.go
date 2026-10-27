@@ -35,7 +35,11 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	reg := relay.NewRegistry(cfg.MaxSessions, cfg.WaitTimeout)
-	handler := server.New(reg, relay.NewCopier(cfg.BufSize), server.Options{PublicURL: cfg.PublicURL})
+	opts := server.Options{PublicURL: cfg.PublicURL, IdleTimeout: cfg.IdleTimeout}
+	if cfg.AuthUser != "" {
+		opts.Authorize = server.BasicAuth(cfg.AuthUser, cfg.AuthPassword)
+	}
+	handler := server.New(reg, relay.NewCopier(cfg.BufSize), opts)
 	// Nessun ReadTimeout né WriteTimeout: bloccherebbero il relay in streaming.
 	srv := &http.Server{
 		Addr:              cfg.Listen,

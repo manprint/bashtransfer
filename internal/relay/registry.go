@@ -19,6 +19,7 @@ var (
 	ErrSenderGone     = errors.New("sender gone")
 	ErrReceiverGone   = errors.New("receiver gone")
 	ErrLengthMismatch = errors.New("length mismatch")
+	ErrIdle           = errors.New("sender idle")
 )
 
 const (
