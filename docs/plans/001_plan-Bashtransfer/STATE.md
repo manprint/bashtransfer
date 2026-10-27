@@ -1,7 +1,7 @@
 # Bashtransfer — Implementation state
 
 Read first at every session. Updated 2026-10-27 by agent-1 (claude-haiku-5-5, planning).
-Plan ID: 001. Revision: 2 (RS-2 da Specifiche, D16, R4, sub-phase 0.3). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
+Plan ID: 001. Revision: 3 (rev 2: RS-2 da Specifiche, D16, R4, 0.3; rev 3: D17 tombstone 410). Repo root: /mnt/fabio/dati/Git/SperimentazioniAI/bashtransfer.
 Plan baseline: nessun commit (HEAD non nato su `main`); pre-existing changes: `Specifiche.md` non tracciato, di proprietà dell'utente, non è output del piano.
 Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito dell'utente: solo Haiku 5.5, nessun Sonnet né Opus). Active execution style: handoff.
 State writer: nessuno ancora (piano non in esecuzione); ownership: released.
@@ -147,6 +147,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 
 | Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
 |----------|------------------------|---------------------------------|------------|------------------------|
+| 3 | D6/RS-1 passo 4 richiedono `410` per slug concluso; `Finish` che rimuove dalla mappa dava `404`. Nuovo D17: tombstone 24h (costante), slug terminali (concluso, reclamato, scaduto) → `410`; oltre 24h → `404`. Nuovi errori `ErrGone`; test `TestRegistryWaitTimeout` e `TestRegistryFinishOnce` aspettano `ErrGone`. Nessun cambio di D1–D16 | agent-1 (self-review, Haiku 5.5), trovato in preparazione di 1.1 | overview D17; phase_02 1.1 (Claim/Finish/tombstone) e 1.2 (mapping 410); e2e passo 6 invariato |
 | 2 | Specifica di riferimento: solo RS-1 (upload da file con URL senza spec di stdin) | Aggiunto RS-2 da `Specifiche.md` (scenario 2 streaming da `tar`): D16 upload chunked con lunghezza ignota; R4 (curl senza `/` finale e da stdin) con sub-phase 0.3 prima di 1.2; test e e2e RS-2 in 1.2/1.3; RS-2 attraverso nginx in 4.2/G-FINAL; README con due scenari. Nessuna decisione di D1–D15 cambiata. Motivo: la specifica utente è più estesa del piano rev 1 | agent-1 (self-review, Haiku 5.5); utente ha chiesto "verifica ed adegua il piano" | overview, phase_01 (0.3), phase_02 (1.2 test/e2e), phase_05 (4.2 e 4.3); 0.2 non toccato; 0.1 invariato |
 
 Revisioni previste ma non ancora fatte (non registrate come approvate):

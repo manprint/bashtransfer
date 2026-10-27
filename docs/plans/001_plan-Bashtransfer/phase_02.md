@@ -9,7 +9,7 @@ Read STATE.md §0–1 first for scope, ownership, recovery, checks and commit ru
 Open before edits; checkpoint at a recovery boundary; close with evidence. Il worker (agent-2, implementazione) esegue l'unità OPEN; la sessione esecutrice è l'unico scrittore di STATE.md; design mancante o test in conflitto → agent-1 (supervisore).
 
 ## Local design context
-Plan revision: 2 (upload da stdin D16; test e e2e RS-2; prerequisito R4 da 0.3).
+Plan revision: 3 (D17: tombstone 24h, slug terminali → 410; correzione di 1.1 `Claim`/`Finish`/test e di 1.2 mapping 410; vedi STATE §8). Revisione 2: upload da stdin D16, test e e2e RS-2, prerequisito R4 da 0.3.
 - D1: Go, `net/http`, nessuna dipendenza esterna.
 - D2: relay in memoria, un solo ricevente per slug, nessun file su disco.
 - D3: slug 10 caratteri da alfabeto 62, `crypto/rand`, rejection sampling con soglia 248 (= 62·4): byte `b` accettato solo se `b < 248`, carattere = `alphabet[b % 62]`. Collisione con sessione viva: fino a 5 tentativi, poi errore `ErrSlugCollision` (→ 503).
@@ -45,9 +45,11 @@ Abort protocol (vincolante per 1.1 e 1.2):
   - `type Receiver interface{ io.Writer; Flush() }`, dichiarata in `registry.go`, usata da 1.2.
   - `func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry` con campo interno `gen func() (string, error)` (default `slug.New`, sostituibile nei test).
   - `Create(name string, length int64) (*Session, error)`: `ErrCapacity` se mappa piena (D11), `ErrSlugCollision` dopo 5 tentativi; avvia `time.AfterFunc(waitTimeout, expire)`.
-  - `Claim(slug string, rcv Receiver) (*Session, error)`: `ErrNotFound` se slug non in mappa; `ErrClaimed` se già claimed; altrimenti marca claimed, ferma il timer, invia `rcv` su `Attached()` (canale buffered 1, mai bloccante).
-  - `expire(s)`: se ancora in attesa (non claimed) rimuove dalla mappa e chiude `Expired()`; idempotente.
-  - `Finish(s)`: come da abort protocol.
+  - `Claim(slug string, rcv Receiver) (*Session, error)`: slug vivo e già claimed → `ErrClaimed`; slug vivo non claimed → marca claimed, ferma il timer, invia `rcv` su `Attached()` (canale buffered 1, mai bloccante); slug non in mappa ma in tombstone (D17) → `ErrGone`; altrimenti `ErrNotFound`.
+  - Tombstone (D17): `gone map[string]struct{}` più coda FIFO `[]struct{slug string; at time.Time}`; `bury(slug)` aggiunge alla mappa e alla coda; `prune(now)` (chiamata all'inizio di `Create` e `Claim`) rimuove le voci più vecchie di `tombstoneTTL = 24h` dalla testa della coda. `Create` tratta uno slug in tombstone come occupato (non lo assegna).
+  - `expire(s)`: se la sessione è ancora in mappa e non claimed → rimuove, `bury`, chiude `Expired()`; altrimenti no-op (idempotente).
+  - `Finish(s)`: come da abort protocol; se in mappa → rimuove, `bury`, ferma il timer; chiude `Finished()` con `sync.Once`.
+  - Sentinelle: `ErrNotFound`, `ErrClaimed`, `ErrGone`, `ErrCapacity`, `ErrSlugCollision`, `ErrSenderGone`, `ErrReceiverGone`, `ErrLengthMismatch` in `registry.go`.
   - `Len() int` per i test (numero sessioni in mappa).
   Steps:
   1. S1 — `config.Load` con validazione; expected: test di default e di errori passano.
@@ -58,7 +60,7 @@ Abort protocol (vincolante per 1.1 e 1.2):
 - **Unit tests:**
   - `internal/config`: `TestLoadDefaults` (nessuna variabile → valori default D10), `TestLoadAuthPairRequired` (solo user → errore con nome variabile; solo password → errore), `TestLoadRejectsBadNumbers` (table test: timeout `abc`, `0s`; sessions `0`; buf `1024`, `8388609`). Comando: `go test ./internal/config -run 'TestLoad' -v -count=1`; discovery atteso: 3 test.
   - `internal/slug`: `TestGenerateLength` (len 10), `TestGenerateAlphabet` (ogni carattere nell'alfabeto, 1000 campioni), `TestGenerateUnique` (20000 campioni, nessun duplicato). Comando: `go test ./internal/slug -v -count=1`; discovery 3.
-  - `internal/relay`: `TestRegistryClaimOnce` (due goroutine chiamano `Claim` con due receiver fittizi: esattamente una `nil` error, l'altra `ErrClaimed`; I-2), `TestRegistryFinishOnce` (`Finish` due volte, nessun panic, `Len()==0`, `Finished()` chiuso; I-3), `TestRegistryWaitTimeout` (waitTimeout 50 ms, `Expired()` chiuso entro 2 s, poi `Claim` → `ErrNotFound`; I-3), `TestRegistryCapacity` (max 2: terzo `Create` → `ErrCapacity`; dopo `Finish` di uno, `Create` riesce), `TestRegistrySlugCollision` (gen fittizio che restituisce sempre lo stesso slug: secondo `Create` ottiene `ErrSlugCollision` dopo 5 tentativi; I-5), `TestRegistryAbortKeepsFirst` (due `Abort` → `Err()` è il primo). Comando: `go test ./internal/relay -run 'TestRegistry' -v -count=1 -race`; discovery 6.
+  - `internal/relay`: `TestRegistryClaimOnce` (due goroutine chiamano `Claim` con due receiver fittizi: esattamente una `nil` error, l'altra `ErrClaimed`; I-2), `TestRegistryFinishOnce` (`Finish` due volte, nessun panic, `Len()==0`, `Finished()` chiuso, poi `Claim` sullo stesso slug → `ErrGone`; I-3), `TestRegistryWaitTimeout` (waitTimeout 50 ms, `Expired()` chiuso entro 2 s, poi `Claim` → `ErrGone`; I-3), `TestRegistryCapacity` (max 2: terzo `Create` → `ErrCapacity`; dopo `Finish` di uno, `Create` riesce), `TestRegistrySlugCollision` (gen fittizio che restituisce sempre lo stesso slug: secondo `Create` ottiene `ErrSlugCollision` dopo 5 tentativi; I-5), `TestRegistryAbortKeepsFirst` (due `Abort` → `Err()` è il primo). Comando: `go test ./internal/relay -run 'TestRegistry' -v -count=1 -race`; discovery 6.
 - **e2e tests:** N/A — nessun comportamento HTTP in questa unità.
 - **Done:** file NEW presenti; discovery attesa raggiunta (3 + 3 + 6 test); `go vet ./...` exit 0; G-U1.1 pass in STATE §7 con conteggio e revisione; review agent-1 su `Finish`/`Abort` in STATE §7; unità chiusa in STATE §4 con `uncommitted`.
 
@@ -80,6 +82,7 @@ Abort protocol (vincolante per 1.1 e 1.2):
   5. S5 — test di abort `TestSenderAbortFailsReceiver`, `TestReceiverAbortCleansSession` (meccanica sotto); expected: pass entro i tempi indicati. Recovery boundary: checkpoint dopo S5.
   Upload da stdin (D16, RS-2): `Transfer-Encoding: chunked`, `r.ContentLength == -1` ammesso; nessun limite di dimensione; durata limitata solo da D15; nome dal path.
   Contract upload (`PUT /` e `PUT /<name>`; altri path → 404; altri metodi → 405 con `Allow: PUT`):
+  - (Download, vedi sotto: `ErrClaimed` e `ErrGone` → 410.)
   - Se `Authorize` non nil e restituisce false → 401 con corpo `unauthorized` (`WWW-Authenticate` aggiunto in 2.1; la logica di 2.1 riusa questo punto).
   - `rc := http.NewResponseController(w)`; `rc.EnableFullDuplex()` errore → 500 (non dovrebbe accadere, R3 verificato).
   - `length := r.ContentLength` (-1 se ignota; 0 accettato). `s, err := reg.Create(name, length)`: `ErrCapacity`/`ErrSlugCollision` → 503 con corpo `service unavailable`, nessuna sessione.
@@ -91,7 +94,7 @@ Abort protocol (vincolante per 1.1 e 1.2):
     - `<-r.Context().Done()`: mittente caduto; ritorno (`ok` false → `Abort(ErrSenderGone)`).
   - Lo slug e il ricevente tornano conclusi nella goroutine del mittente tramite `defer` (abort protocol).
   Contract download (`GET /<slug>`; path diverso da un segmento → 404; slug non valido per alfabeto/lunghezza → 404):
-  - `rcv := &receiver{w: w}`; `s, err := reg.Claim(slug, rcv)`: `ErrNotFound` → 404; `ErrClaimed` → 410.
+  - `rcv := &receiver{w: w}`; `s, err := reg.Claim(slug, rcv)`: `ErrNotFound` → 404; `ErrClaimed` o `ErrGone` → 410.
   - attendere `<-s.Finished()`; alla cancellazione di `r.Context()` chiamare `s.Abort(ErrReceiverGone)` e continuare ad attendere `Finished()`.
   - Dopo `Finished()`: se `s.Err() != nil`: se `rcv.started` → `panic(http.ErrAbortHandler)` (D8); altrimenti `503` con testo `transfer aborted`.
   - Se `s.Err() == nil`: ritorno normale (Go chiude il body chunked correttamente).
