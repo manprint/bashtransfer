@@ -22,7 +22,7 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 ## 1. Current unit and scope
 
 - Active scope: plan 001 intero, fasi 0–4 (richiesta utente: "Fai tutte le fasi in autonomia")
-- Scope result: RUNNING
+- Scope result: BLOCKED (fase 4 non chiusa: 4.2 BLOCKED, B-NGX; G-E2E-FINAL e G-FINAL non eseguibili, mai COMPLETE)
 - Type: none
 - ID / attempt: none
 - Status: none
@@ -30,10 +30,10 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: commit chiusura P3 (solo STATE); poi fase 4: 4.1 Dockerfile e compose (`phase_05.md`).
-- Next eligible plan unit: 4.1 (`phase_05.md`)
-- Unit base: `2d91a0d` (3.1); branch `plan/001-bashtransfer`; owned changes: STATE.md
-- Repo state: HEAD `2d91a0d`; `Specifiche.md` non tracciato e intatto; nessun push.
+- Next action: decisione utente su B-NGX (vedi §9): verificare il percorso nginx su un host senza intercettazione delle porte 80/443, oppure accettare che il trasferimento attraverso nginx resti non verificato e chiudere P4 come BLOCKED. Nessun'altra unità eleggibile senza questa decisione.
+- Next eligible plan unit: nessuna (4.2 BLOCKED; 4.3 scritta, chiusura dipende da 4.2)
+- Unit base: `e2ccd94` (wip 4.1+4.2); branch `plan/001-bashtransfer`; owned changes: STATE.md, overview.md, README.md (4.3), commit di chiusura pendente
+- Repo state: HEAD `e2ccd94`; `Specifiche.md` non tracciato e intatto; nessun push; stack compose fermato e rete di test rimossa.
 
 ## 2. Feature context and readiness
 
@@ -105,6 +105,9 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | phase closure | P2 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 2 completa; I-1..I-5 invariati; D9, D15, D5 coperti | G-P2 PASS (35 PASS) | unit:P2:1 (`c385106`, solo STATE) |
 | sub-phase | 3.1 / 1 | 6 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/server/bench_test.go (NEW), scripts/bench.sh (NEW, +x) | G-U3.1 PASS; G-BENCH PASS (rapporti 1.02 / 0.956 / 0.991); self-review §7 | unit:3.1:1 (`2d91a0d`) |
 | phase closure | P3 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 3 completa; buffer 256 KiB confermato da dati | G-P3 PASS (36 PASS); G-BENCH PASS | unit:P3:1 (commit solo STATE) |
+| sub-phase | 4.1 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | Dockerfile, .dockerignore, compose.yaml (app, nginx), deploy/nginx/bashtransfer.conf | G-D1 PASS; self-review §7 | unit:4.2:1 wip (`e2ccd94`, con 4.2) |
+| sub-phase | 4.2 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | deploy/nginx/bashtransfer.conf, servizio nginx, scripts/e2e.sh (modalità esterna) | G-S2 PASS; G-E2E-FINAL FAIL (B-NGX) | unit:4.2:1 wip, `PEV-Result: blocked` (`e2ccd94`) |
+| sub-phase | 4.3 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | README.md (italiano) | cross-check variabili con config.go; sezione nginx non verificata | non ancora committato (vedi commit P4 blocked) |
 
 Le righe sono append-only. Commit reference: vedi §0.6.
 
@@ -160,6 +163,10 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | G-U3.1 (3.1) | `go test ./internal/server -run 'TestBenchHarnessSmoke' -v -count=1 -race` | pass | 1 test; 1 MiB esatti per lato | rev 6, `2d91a0d` | 2026-10-27 |
 | G-BENCH (3.1) | `scripts/bench.sh` (nproc 8, go1.27.3, Intel Xeon; 256 MiB per op, -benchtime 3x -count 5, senza -race) | pass | Mediane MB/s (relay / baseline): 64 KiB 5337.68 / 5219.48 = **1.02**; 256 KiB 6548.81 / 6853.35 = **0.956**; 1 MiB 6033.41 / 6086.60 = **0.991**. Criterio D13 ≥ 0.90: PASS in tutti e tre. Default 256 KiB: relay più alto (6548.81 vs 6033.41 e 5337.68, differenza 8.5% sul 1 MiB, nessuna revisione) | rev 6, `2d91a0d`; output grezzo in scratchpad `bench-run1.txt` | 2026-10-27 |
 | G-P3 (P3) | `go test -race -count=1 -v ./...` (conteggio) | pass | 36 PASS, 0 FAIL, 0 SKIP | rev 6, `2d91a0d` | 2026-10-27 |
+| G-D1 (4.1) | `docker build -t bashtransfer:local .`; `docker compose -f compose.yaml config`; `docker compose up -d app` + `wget -qO- http://app:8080/` dalla rete interna | pass (build 11 s; config senza `ports:` per app; usage text ricevuto) | immagini base pinnate per digest; utente non root (`nonroot:nonroot`) | rev 7, `e2ccd94` | 2026-10-27 |
+| G-S2 (4.2) | `nginx -t` nel servizio `nginx` con `BASHT_CERTS_DIR` di test | pass (`configuration file ... test is successful`) | 1 config | rev 7, `e2ccd94` | 2026-10-27 |
+| G-E2E-FINAL (4.2) | `BASHT_E2E_BASE=https://127.0.0.1:18443 BASHT_E2E_MB=256 bash scripts/e2e.sh` (override porte test) | FAIL: `end of response with 268260272 bytes missing`; 8 MiB: `8291176 bytes missing` | — | rev 7, `e2ccd94` | 2026-10-27 |
+| Review 4.1 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 7 / Dockerfile, compose | pinning per digest verificato con `docker images`; nessun segreto in immagine (`.dockerignore`, env da variabili); porte solo su nginx | PASS, self-review |
 | Review 3.1 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 6 / bench_test.go, scripts/bench.sh | baseline a due hop verificato in codice: client → `minimalRelay` (PUT) → GET ricevente, stesso `BufSize`, flush per blocco, nessun registry/slug/header; byte esatti verificati in `transfer`; criterio applicato senza riscrittura; buffer scelto dal dato (256 KiB è il relay più veloce) | PASS, self-review; non revisione forte. Limite: una sola misura, macchina a 8 CPU condivisa, varianza fra campioni fino a ~10% | 2026-10-27 |
 | Review 2.1+2.2 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 6 / auth.go, name.go, handler.go Options e 401 | I-5 (nessuna directory dal nome: `SanitizeName` taglia a `/`); D9 (solo PUT protetto, GET pubblico); D15 (idle deadline prima di ogni Read, `ErrIdle`); costo costante del confronto verificato in diff, non solo a comportamento; `WWW-Authenticate` su 401 | PASS, self-review; non revisione forte |
 
@@ -168,6 +175,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
 |----------|------------------------|---------------------------------|------------|------------------------|
 | 6 | Due scostamenti di esecuzione in 2.1/2.2 (nessuna decisione D1–D17 cambiata): (a) `SanitizeName` divide solo su `/` (il `\` viene rimosso come carattere vietato, quindi il risultato del contratto non cambia; la tabella di test resta `a"b\c.zip` → `abc.zip`); (b) 2.1 e 2.2 sono nello stesso commit `d64bffb` invece di due commit separati, perché `handler.go` e `handler_test.go` condividono le modifiche e la separazione per hunk non era verificabile senza rischio | agent-1 (self-review, Haiku 5.5), in esecuzione di 2.2 | name.go, name_test.go; ledger §4 riga 2.1+2.2; nessun test cambiato |
+| 7 | Fase 4 (rev 7): (a) `client_body_timeout 3600s` impostato nel server 443 (default 60s, letto da nginx.org) per non troncare mittenti fermi prima di `BASHT_IDLE_TIMEOUT`; (b) `BASHT_E2E_BASE` e `BASHT_E2E_MB` aggiunti a `scripts/e2e.sh` per il test esterno; (c) 4.3 README scritta con precondizione 4.2 non soddisfatta: contenuti non dipendenti da nginx, sezione nginx dichiarata non verificata; (d) porte test 18080/18443 solo come override fuori repo per la diagnosi; (e) Dockerfile e compose pinnati per tag e digest; `deploy/` escluso dal contesto Docker oltre alla lista del piano | agent-1 (self-review, Haiku 5.5) | overview R2; phase_05 4.2 e 4.3; README; nessun cambio D1–D17 |
 | 5 | Correzione tecnica trovata da e2e in 1.3 (nessuna decisione cambiata): con `Expect: 100-continue` (curl per body > 1 MiB) il `WriteHeader(200)` prima della lettura del body fa chiudere il body Go (`ErrBodyReadAfterClose`, `Connection: close`, reset del mittente, download a 0 byte). Fix: `100 Continue` esplicito prima dei comandi quando `Expect` è presente e `ContentLength != 0` (`expectsContinue`). Test `TestUploadExpectContinue` | agent-1 (self-review), trovato da `scripts/e2e.sh` | handler.go; test server 10 top-level; D4 invariato |
 | 4 | Scostamenti di 1.2 registrati dopo implementazione (nessuna decisione D1–D17 cambiata): (a) `Allow: GET, PUT` su `/` e `/<seg>` invece di `Allow: PUT`, perché `GET /` è la pagina d'uso; (b) il mittente in attesa senza body letto non è rilevato come caduto da `r.Context()` (il server Go avvia la lettura in background solo a fine body); l'unica chiusura è la scadenza D7 (`BASHT_WAIT_TIMEOUT`), dichiarata come limite in 4.3; (c) nome dal path non sanitizzato fino a 2.2 (quoting di `"` e `\` non ancora gestito); (d) la revisione pre-implementazione di `handler.go` richiesta dalla fase non è stata eseguita prima della scrittura: eseguita come self-review dopo la scrittura, con test di abort e lifecycle; limite di self-review dichiarato | agent-1 (self-review, Haiku 5.5), dopo implementazione di 1.2 | phase_02 1.2 (contratto `Allow`, `Context` branch); 4.3 limiti; 2.2 sanitize; test invariati |
 | 3 | D6/RS-1 passo 4 richiedono `410` per slug concluso; `Finish` che rimuove dalla mappa dava `404`. Nuovo D17: tombstone 24h (costante), slug terminali (concluso, reclamato, scaduto) → `410`; oltre 24h → `404`. Nuovi errori `ErrGone`; test `TestRegistryWaitTimeout` e `TestRegistryFinishOnce` aspettano `ErrGone`. Nessun cambio di D1–D16 | agent-1 (self-review, Haiku 5.5), trovato in preparazione di 1.1 | overview D17; phase_02 1.1 (Claim/Finish/tombstone) e 1.2 (mapping 410); e2e passo 6 invariato |
@@ -185,11 +193,17 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | B-R4 | RISOLTO in 0.3 | R4 CONFIRMED: (A) path `/payload.bin` senza slash; (B) riga visibile +3 ms, EOF stdin +3 s; (C) senza nome → `download` (limitazione in 4.3) | agent-2 | nessuna |
 | B-R3 | RISOLTO in 0.2 | `go doc` su go1.27.3 + `$GOROOT/api/go1.21.txt`: metodo presente dalla go1.21; `go.mod` = `go 1.21` | agent-2 | nessuna |
 | B-Q1 | RISOLTO | Decisione utente: auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug | utente | nessuna |
-| B-R2 | PARZIALE: 4.2 (S1), G-E2E-FINAL, G-FINAL | direttive confermate da nginx.org (rete autorizzata dall'utente); residuo `client_body_timeout` non letto | agent-2 | 4.2 S1: leggere `client_body_timeout` da nginx.org (core module) e registrarlo in `overview.md` R2 |
+| B-R2 | RISOLTO (rev 7) | direttive confermate da nginx.org; `client_body_timeout` letto: default 60s, per letture consecutive; scelto 3600s in `deploy/nginx/bashtransfer.conf` | agent-1 | nessuna |
 | B-DISC | LIMITE, non bloccante: 4.3 | Mittente caduto prima che un ricevente si agganci non è rilevato prima di `BASHT_WAIT_TIMEOUT` (test: `newTestServerWait`) | agent-1 | dichiarare in README (4.3); valutare lettura anticipata del body con buffer in fase successiva solo se richiesto |
-| B-NET | 4.1 (build Docker), 4.2 | pull delle immagini base pinnate: rete autorizzata dall'utente per Docker; esito del pull non ancora verificato | agent-2 | 4.1 S1 `docker build`; se il pull fallisce → G-D1 build `blocked` con log, non pass |
+| B-NET | RISOLTO (rev 7) | pull di `golang:1.27.3-bookworm`, `gcr.io/distroless/static-debian12:nonroot`, `nginx:1.27-alpine` riusciti (digest in Dockerfile e compose) | agent-2 | nessuna |
+| B-NGX | BLOCCA 4.2, G-E2E-FINAL, G-FINAL, chiusura P4 | Trasferimento attraverso nginx si blocca dopo circa 0.1–0.8 MB (RS-1 e RS-2, 8 MiB e 256 MiB, poi 8 MiB anche su 18443). Riprodotto con: stack compose; nginx con configurazione di produzione; configurazione minimale con solo `proxy_pass`; upstream minimo Go (risposta prima o dopo la lettura del body); nginx host-network con binario locale. Il binario diretto (senza nginx) passa 8 MiB in 3 ms. Ipotesi non provate: intercettazione del sandbox sulle porte 80/443 (la configurazione minima su porta 18080 ha inoltrato 1 MiB completo, ma il test con 8 MiB su 18080 non è stato concluso). Esclusi con esperimento: `Expect: 100-continue`, versione HTTP/1.0 upstream, `Connection` keep-alive, `proxy_buffer_size` 64k, TLS (stesso stallo in HTTP), `proxy_buffering on` (rompe lo streaming). Socket queue non rilevate (`ss` senza output). Esperimenti in scratchpad | utente (decisione) + agent-2 | (a) su un host senza intercettazione, o con nginx su porte non standard, eseguire `BASHT_E2E_BASE=https://<host> BASHT_E2E_MB=256 bash scripts/e2e.sh`; (b) se (a) passa, registrare G-E2E-FINAL e chiudere 4.2/P4; se non passa, il problema è nel percorso nginx: prossimo passo è tcpdump/ss in-container, non ancora fatto |
+| B-SERENA | non bloccante | MCP `serena` non connesso (CONNECTION_CLOSED) in questa sessione; ricerca semantica fatta con tokensave | utente | riavviare o riconfigurare serena |
+| B-SUBAGENT | non bloccante | `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-5-5` in `~/.claude/settings.json`: non verificato in una nuova sessione | utente | aprire una nuova sessione e controllare il modello dei subagent |
 
 ## 10. Do-not-repeat
+- Non eseguire `pkill -f <pattern>` quando il pattern compare nella stessa riga di comando: uccide la shell (exit 144). Usare `pkill -x` o PID.
+- Non provare di nuovo le varianti nginx già escluse in B-NGX senza una nuova ipotesi.
+- Il hook Bash blocca i comandi che contengono `curl`/`wget`: usare `ctx_execute` oppure uno script in file.
 
 none
 
@@ -208,9 +222,9 @@ none
 | 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race); committato insieme a 2.2 in `d64bffb` (deviazione rev 6) |
 | 2.2 | phase_03.md | 1.2 | DONE | 1 | G-U2.2 PASS (sanitize tabella, idle timeout, headers, config idle); G-E2E2 PASS; commit `d64bffb` |
 | 3.1 | phase_04.md | 1.2 | DONE | 1 | G-U3.1 PASS (smoke -race); G-BENCH: mediana relay/baseline 64 KiB 1.02, 256 KiB 0.956, 1 MiB 0.991 (criterio ≥ 0.90 PASS); default 256 KiB confermato; commit `2d91a0d` |
-| 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | TODO | 1 | build Docker: B-NET |
-| 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | TODO | 1 | B-R2 parziale |
-| 4.3 | phase_05.md | 4.1; 4.2 chiuso o SKIPPED; 2.1 DONE o SKIPPED | TODO | 1 | — |
+| 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | DONE | 1 | build `bashtransfer:local` pass (11 s); `compose config` pass senza `ports:` per app; `GET /` da rete interna pass; commit `e2ccd94` (wip) |
+| 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | BLOCKED | 1 | S1 R2 chiuso (`client_body_timeout` 60s default → 3600s); S2 `nginx -t` pass; trasferimento attraverso nginx NON verificato: B-NGX; commit `e2ccd94` (wip, `PEV-Result: blocked`) |
+| 4.3 | phase_05.md | 4.1; 4.2 chiuso o SKIPPED; 2.1 DONE o SKIPPED | WRITTEN | 1 | README.md scritto (rev 7: precondizione 4.2 non soddisfatta; sezione nginx dichiarata non verificata); S2 cross-check su variabili e comandi; da rivedere dopo B-NGX |
 
 README obligation per phase: P0 → N/A (nessun comportamento distribuito; verificato in chiusura P0); P1 → pendente su 4.3; P2 → pendente su 4.3 (auth, limiti); P3 → numeri di prestazione in 4.3 solo da §7; P4 → 4.3 completo.
 
@@ -221,7 +235,7 @@ README obligation per phase: P0 → N/A (nessun comportamento distribuito; verif
 | 1 | phase_02.md | P1 | DONE | G-P1 PASS: `go test -race -count=1 ./...` 34 PASS/0 FAIL/0 SKIP + G-E2E1 PASS; README pendente su 4.3 (B-DISC, limiti); self-review §7 |
 | 2 | phase_03.md | P2 | DONE | G-P2 PASS: `go test -race -count=1 ./...` 35 PASS/0 FAIL/0 SKIP + G-E2E2 PASS (`E2E OK` con auth e nome con spazi); README pendente su 4.3 (auth, limiti); self-review §7; commit `unit:P2:1` |
 | 3 | phase_04.md | P3 | DONE | G-BENCH PASS (criterio D13 su 5 campioni, nessuno SKIP); G-P3 PASS: `go test -race -count=1 ./...` 36 PASS/0 FAIL/0 SKIP; commit `unit:P3:1` (solo STATE) |
-| 4 | phase_05.md | P4 | TODO | B-R2 parziale, B-NET |
+| 4 | phase_05.md | P4 | BLOCKED | 4.2 BLOCKED (B-NGX); G-D1 build e compose PASS; G-E2E-FINAL e G-FINAL non eseguiti |
 
 Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
 
