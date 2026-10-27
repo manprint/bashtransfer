@@ -30,8 +30,8 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: sub-phase 1.2 (copy.go, receiver.go, handler.go) in `phase_02.md`; revisione ad alto rischio di agent-1 su handler.go prima di scriverlo (overview § Model-assignment); secondo ordine di handoff in §2.
-- Next eligible plan unit: 1.2 (`phase_02.md`)
+- Next action: sub-phase 1.3 (main.go, scripts/e2e.sh) in `phase_02.md`; poi P1 (G-P1 con `go test -race -count=1 ./...`).
+- Next eligible plan unit: 1.3 (`phase_02.md`)
 - Unit base: none; branch: main (nessun commit); owned changes: none
 - Repo state: nessun commit; `Specifiche.md` non tracciato; `docs/plans/001_plan-Bashtransfer/` non tracciato (creato in planning, nessun commit richiesto in planning).
 
@@ -92,6 +92,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | sub-phase | 0.1 / 1 | 1 | agent-2 (claude-haiku-5-5), state writer sessione corrente | overview R1; STATE; cartella piano (non tracciata prima, inclusa per provenienza) | G-R1 pass branch A; self-review §7 | unit:0.1:1 (risolto da trailer) |
 | plan | 001 / 1 | 1 | agent-1 (claude-haiku-5-5) | cartella piano: overview, phase_01..phase_05, STATE | nessuna esecuzione; nessuna revisione di codice | uncommitted (planning non committa) |
 | phase closure | P0 / 1 | 2 | agent-1 (claude-haiku-5-5), self-review | fase 0 completa; nessun codice di prodotto | G-BASE, G-U0.2, G-R1, G-R4 pass; R1/R3/R4 CONFIRMED; self-review §7 | unit:P0:1 |
+| sub-phase | 1.2 / 1 | 4 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/relay/copy.go(+test), internal/server/{receiver,handler}.go(+test); slug.Valid | G-U1.2 pass (-race, 5 ripetizioni); self-review post-scrittura §7; scostamenti rev 4 | unit:1.2:1 |
 | sub-phase | 1.1 / 1 | 3 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/config, internal/slug, internal/relay/registry.go (+test) | G-U1.1 pass; self-review §7 | unit:1.1:1 |
 | plan | rev 3 / 1 | 3 | agent-1 (claude-haiku-5-5) | D17, phase_02 1.1/1.2, STATE §8 | self-review | unit:plan-rev-3 |
 | sub-phase | 0.3 / 1 | 2 | agent-2 (claude-haiku-5-5), state writer sessione corrente | probe in scratch (nessun file repo); overview R4; phase_05 limite README | G-R4 pass; self-review §7 | unit:0.3:1 |
@@ -151,6 +152,7 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 
 | Revision | Previous decision/step | Approved replacement and reason | Supervisor | Dependents/revalidation |
 |----------|------------------------|---------------------------------|------------|------------------------|
+| 4 | Scostamenti di 1.2 registrati dopo implementazione (nessuna decisione D1–D17 cambiata): (a) `Allow: GET, PUT` su `/` e `/<seg>` invece di `Allow: PUT`, perché `GET /` è la pagina d'uso; (b) il mittente in attesa senza body letto non è rilevato come caduto da `r.Context()` (il server Go avvia la lettura in background solo a fine body); l'unica chiusura è la scadenza D7 (`BASHT_WAIT_TIMEOUT`), dichiarata come limite in 4.3; (c) nome dal path non sanitizzato fino a 2.2 (quoting di `"` e `\` non ancora gestito); (d) la revisione pre-implementazione di `handler.go` richiesta dalla fase non è stata eseguita prima della scrittura: eseguita come self-review dopo la scrittura, con test di abort e lifecycle; limite di self-review dichiarato | agent-1 (self-review, Haiku 5.5), dopo implementazione di 1.2 | phase_02 1.2 (contratto `Allow`, `Context` branch); 4.3 limiti; 2.2 sanitize; test invariati |
 | 3 | D6/RS-1 passo 4 richiedono `410` per slug concluso; `Finish` che rimuove dalla mappa dava `404`. Nuovo D17: tombstone 24h (costante), slug terminali (concluso, reclamato, scaduto) → `410`; oltre 24h → `404`. Nuovi errori `ErrGone`; test `TestRegistryWaitTimeout` e `TestRegistryFinishOnce` aspettano `ErrGone`. Nessun cambio di D1–D16 | agent-1 (self-review, Haiku 5.5), trovato in preparazione di 1.1 | overview D17; phase_02 1.1 (Claim/Finish/tombstone) e 1.2 (mapping 410); e2e passo 6 invariato |
 | 2 | Specifica di riferimento: solo RS-1 (upload da file con URL senza spec di stdin) | Aggiunto RS-2 da `Specifiche.md` (scenario 2 streaming da `tar`): D16 upload chunked con lunghezza ignota; R4 (curl senza `/` finale e da stdin) con sub-phase 0.3 prima di 1.2; test e e2e RS-2 in 1.2/1.3; RS-2 attraverso nginx in 4.2/G-FINAL; README con due scenari. Nessuna decisione di D1–D15 cambiata. Motivo: la specifica utente è più estesa del piano rev 1 | agent-1 (self-review, Haiku 5.5); utente ha chiesto "verifica ed adegua il piano" | overview, phase_01 (0.3), phase_02 (1.2 test/e2e), phase_05 (4.2 e 4.3); 0.2 non toccato; 0.1 invariato |
 
@@ -167,6 +169,7 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | B-R3 | RISOLTO in 0.2 | `go doc` su go1.27.3 + `$GOROOT/api/go1.21.txt`: metodo presente dalla go1.21; `go.mod` = `go 1.21` | agent-2 | nessuna |
 | B-Q1 | RISOLTO | Decisione utente: auth solo su `PUT`; `GET /<slug>` pubblico con solo lo slug | utente | nessuna |
 | B-R2 | PARZIALE: 4.2 (S1), G-E2E-FINAL, G-FINAL | direttive confermate da nginx.org (rete autorizzata dall'utente); residuo `client_body_timeout` non letto | agent-2 | 4.2 S1: leggere `client_body_timeout` da nginx.org (core module) e registrarlo in `overview.md` R2 |
+| B-DISC | LIMITE, non bloccante: 4.3 | Mittente caduto prima che un ricevente si agganci non è rilevato prima di `BASHT_WAIT_TIMEOUT` (test: `newTestServerWait`) | agent-1 | dichiarare in README (4.3); valutare lettura anticipata del body con buffer in fase successiva solo se richiesto |
 | B-NET | 4.1 (build Docker), 4.2 | pull delle immagini base pinnate: rete autorizzata dall'utente per Docker; esito del pull non ancora verificato | agent-2 | 4.1 S1 `docker build`; se il pull fallisce → G-D1 build `blocked` con log, non pass |
 
 ## 10. Do-not-repeat
@@ -183,7 +186,7 @@ none
 | 0.2 | phase_01.md | 0.1 (R1 branch A) | DONE | 1 | G-BASE + G-U0.2 pass (go1.27.3, vet exit 0, list non vuoto); R3 CONFIRMED |
 | 0.3 | phase_01.md | 0.1 (R1 branch A) | DONE | 1 | G-R4 pass: A path con nome; B riga prima di EOF; C limite `download` (overview R4) |
 | 1.1 | phase_02.md | 0.2 | DONE | 1 | G-U1.1 pass: 3 config, 3 slug, 6 registry (`-race`); D17 tombstone rev 3; self-review §7 |
-| 1.2 | phase_02.md | 1.1 | TODO | 1 | — |
+| 1.2 | phase_02.md | 1.1 | DONE | 1 | G-U1.2 pass (-race, 5 ripetizioni stabili): 3 copy + 9 server; scostamenti rev 4 |
 | 1.3 | phase_02.md | 1.2 | TODO | 1 | — |
 | 2.1 | phase_03.md | 1.2 | TODO | 1 | — |
 | 2.2 | phase_03.md | 1.2 | TODO | 1 | — |
@@ -211,8 +214,8 @@ Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
 | TestLoadDefaults, TestLoadAuthPairRequired, TestLoadRejectsBadNumbers | 1.1 | G-U1.1 | PASS | `go test ./internal/config -run TestLoad -v -count=1` |
 | TestGenerateLength, TestGenerateAlphabet, TestGenerateUnique | 1.1 | G-U1.1 | PASS | `go test ./internal/slug -v -count=1` |
 | TestRegistryClaimOnce, TestRegistryFinishOnce, TestRegistryWaitTimeout, TestRegistryCapacity, TestRegistrySlugCollision, TestRegistryAbortKeepsFirst | 1.1 | G-U1.1 | PASS | `go test ./internal/relay -run TestRegistry -v -count=1 -race` |
-| TestCopyFlushesEachWrite, TestCopyRoundTripBytes, TestCopyAllocsBounded | 1.2 | G-U1.2 | TODO | — |
-| TestUploadReturnsCommandsBeforeBody, TestRelayRoundTripSHA, TestGetUnknown404, TestGetSecondClaim410, TestSenderAbortFailsReceiver, TestReceiverAbortCleansSession, TestUploadMethodNotAllowed | 1.2 | G-U1.2 | TODO | — |
+| TestCopyFlushesEachWrite, TestCopyRoundTripBytes, TestCopyAllocsBounded | 1.2 | G-U1.2 | PASS | `go test ./internal/relay -run TestCopy -v -race` |
+| TestUploadReturnsCommandsBeforeBody, TestRelayRoundTripSHA, TestGetUnknown404, TestGetSecondClaim410, TestSenderAbortFailsReceiver, TestReceiverAbortCleansSession, TestUploadMethodNotAllowed, TestUploadUnknownLength, TestUploadNameFromPath | 1.2 | G-U1.2 | PASS | `go test ./internal/server -v -race` (9 top-level; 4 sottotest sui size) |
 | scripts/e2e.sh (E2E OK) | 1.3 | G-E2E1 | TODO | — |
 | TestBasicAuth*, TestUploadRequiresAuth | 2.1 | G-U2.1 | TODO | — |
 | TestSanitizeName, TestUploadIdleTimeout, TestDownloadHeaders, TestConfigIdleTimeout | 2.2 | G-U2.2 | TODO | — |

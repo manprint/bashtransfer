@@ -4,6 +4,7 @@ package slug
 import (
 	"crypto/rand"
 	"io"
+	"strings"
 )
 
 // Length è il numero di caratteri di uno slug.
@@ -18,6 +19,19 @@ const limit = 248
 // New genera uno slug con crypto/rand.
 func New() (string, error) {
 	return generate(rand.Reader)
+}
+
+// Valid riporta se s ha lunghezza e alfabeto di uno slug generato da New.
+func Valid(s string) bool {
+	if len(s) != Length {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(alphabet, s[i]) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func generate(r io.Reader) (string, error) {

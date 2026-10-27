@@ -13,6 +13,9 @@ func TestGenerateLength(t *testing.T) {
 	if len(s) != 10 {
 		t.Fatalf("lunghezza %d, attesa 10: %q", len(s), s)
 	}
+	if !Valid(s) || Valid("abc") || Valid(s+"!") {
+		t.Fatalf("Valid non riconosce %q", s)
+	}
 }
 
 func TestGenerateAlphabet(t *testing.T) {
