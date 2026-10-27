@@ -21,7 +21,7 @@ wget -O "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
 
 Ricevente: esegue una delle due righe. Il file viene scaricato mentre il mittente lo invia.
 
-Il nome del file è preso dal path dell'upload: `curl -T myfile.zip https://host/myfile.zip` produce `-o "myfile.zip"`. Con `https://host` senza nome il file si chiama `download`.
+Il nome del file è preso dal path dell'upload. Con `curl -T myfile.zip https://host` curl invia il nome locale come path e il comando è `-o "myfile.zip"` (verificato). Il nome `download` si usa solo quando il mittente invia da stdin (`-T -`) senza nome nel path.
 
 ### Scenario 2: stream da comando
 

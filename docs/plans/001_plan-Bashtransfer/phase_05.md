@@ -48,7 +48,7 @@ Plan revision: 2 (RS-2 attraverso nginx; README con due scenari).
   Contract: nessuna direttiva non confermata; ogni direttiva del draft riporta la fonte in STATE §2.
   Steps:
   1. S1 — leggere `client_body_timeout` da https://nginx.org/en/docs/http/ngx_http_core_module.html e, dal modulo proxy, verificare che con `proxy_request_buffering off` un body `Transfer-Encoding: chunked` del client (RS-2) venga inoltrato all'upstream senza bufferizzazione; registrare entrambi in R2 con valore, contesto e versione; expected: valori e fonte in overview.
-  2. S2 — scrivere `bashtransfer.conf` e il servizio `nginx` in compose; expected: `nginx -t` pass se il binario nginx è locale, altrimenti `docker compose config` pass.
+  2. S2 — scrivere `deploy/nginx/nginx.conf` (stream, rev 8) e il servizio `nginx` in compose; expected: `nginx -t` pass se il binario nginx è locale, altrimenti `docker compose config` pass.
   3. S3 — verifica RS-1 attraverso nginx (in 4.3 / G-FINAL).
   Failure handling: `client_body_timeout` ostacola upload lenti → escalation a agent-1 con test e numeri; nessuna modifica del contratto di attesa D7.
 - **Unit tests:** N/A — configurazione. Verifica: `nginx -t` su configurazione in container o locale quando disponibile.

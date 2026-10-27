@@ -105,6 +105,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | phase closure | P2 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 2 completa; I-1..I-5 invariati; D9, D15, D5 coperti | G-P2 PASS (35 PASS) | unit:P2:1 (`c385106`, solo STATE) |
 | sub-phase | 3.1 / 1 | 6 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/server/bench_test.go (NEW), scripts/bench.sh (NEW, +x) | G-U3.1 PASS; G-BENCH PASS (rapporti 1.02 / 0.956 / 0.991); self-review §7 | unit:3.1:1 (`2d91a0d`) |
 | phase closure | P3 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 3 completa; buffer 256 KiB confermato da dati | G-P3 PASS (36 PASS); G-BENCH PASS | unit:P3:1 (commit solo STATE) |
+| reconciliation | V001-C2 / 1 | 7 | agent-1 (claude-haiku-5-5), state writer | riferimenti completamento: 4.1 e 4.2 → `70c85be`; 2.1 → `d64bffb`; P4 → `70c85be` con ambiguità con `ae101a1` registrata (default, nessuna riscrittura di commit) | `git log` trailer check; V001-F2, V001-F3 restano OPEN fino a decisione utente | unit:V001-C2:1 (commit state, vedi sotto) |
 | sub-phase | 4.1 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | Dockerfile, .dockerignore, compose.yaml (app, nginx), deploy/nginx/bashtransfer.conf | G-D1 PASS; self-review §7 | unit:4.2:1 wip (`e2ccd94`, con 4.2) |
 | sub-phase | 4.2 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | deploy/nginx/bashtransfer.conf, servizio nginx, scripts/e2e.sh (modalità esterna) | G-S2 PASS; G-E2E-FINAL FAIL (B-NGX) | unit:4.2:1 wip, `PEV-Result: blocked` (`e2ccd94`) |
 | sub-phase | 4.3 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | README.md (italiano) | cross-check variabili con config.go; sezione nginx non verificata | non ancora committato (vedi commit P4 blocked) |
@@ -125,7 +126,7 @@ Le righe sono append-only. Commit reference: vedi §0.6.
 | `cmd/bashtransfer/main.go` | placeholder di 0.2 | WRITE | 1.3 (main), 2.1 (auth wiring) |
 | `scripts/e2e.sh`, `scripts/bench.sh` | — | NEW | 1.3, 3.1 |
 | `Dockerfile`, `.dockerignore`, `compose.yaml` | — | NEW | 4.1 (4.2 aggiunge nginx) |
-| `deploy/nginx/bashtransfer.conf` | — | NEW | 4.2 |
+| `deploy/nginx/nginx.conf` | — | NEW (rev 8; sostituisce `bashtransfer.conf`, committato in `e2ccd94` e rimosso in `70c85be`) | 4.2 |
 | `README.md` | — | NEW | 4.3 |
 
 ## 6. In-flight checkpoint
@@ -206,7 +207,7 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | B-NGX | RISOLTO (rev 8): proxy HTTP di nginx interrompe il body quando l'upstream risponde prima (D4). Coppia di test: upstream early → stallo 3.9 MB + EOF; upstream late → 8 MiB OK. Soluzione: `stream` TLS su 443 | — | — |
 | B-NGX-old | (storico) | Trasferimento attraverso nginx si blocca dopo circa 0.1–0.8 MB (RS-1 e RS-2, 8 MiB e 256 MiB, poi 8 MiB anche su 18443). Riprodotto con: stack compose; nginx con configurazione di produzione; configurazione minimale con solo `proxy_pass`; upstream minimo Go (risposta prima o dopo la lettura del body); nginx host-network con binario locale. Il binario diretto (senza nginx) passa 8 MiB in 3 ms. Ipotesi non provate: intercettazione del sandbox sulle porte 80/443 (la configurazione minima su porta 18080 ha inoltrato 1 MiB completo, ma il test con 8 MiB su 18080 non è stato concluso). Esclusi con esperimento: `Expect: 100-continue`, versione HTTP/1.0 upstream, `Connection` keep-alive, `proxy_buffer_size` 64k, TLS (stesso stallo in HTTP), `proxy_buffering on` (rompe lo streaming). Socket queue non rilevate (`ss` senza output). Esperimenti in scratchpad | utente (decisione) + agent-2 | (a) su un host senza intercettazione, o con nginx su porte non standard, eseguire `BASHT_E2E_BASE=https://<host> BASHT_E2E_MB=256 bash scripts/e2e.sh`; (b) se (a) passa, registrare G-E2E-FINAL e chiudere 4.2/P4; se non passa, il problema è nel percorso nginx: prossimo passo è tcpdump/ss in-container, non ancora fatto |
 | B-V001-F1 | P3 (riapre), README §Prestazioni | Rerun `scripts/bench.sh` 2026-10-27: 256 KiB relay/baseline = 5763.08/6433.27 = 0.896 < 0.90; sessione precedente 0.956. Codice invariato da `2d91a0d`. | utente o agent-1 (criterio o metodo) | C1: 3 sessioni, decisione in §8, poi aggiornare P3 |
-| B-V001-F2 | riferimenti 4.1, 4.2, P4, 2.1 | `P4/1/complete` su `70c85be` e `ae101a1`; nessun commit `PEV-Unit: 4.1`; 4.2 completo assente | agent-1 (stato) | C2: riferimenti in §4, scelta ambiguità (default: registrare) |
+| B-V001-F2 | riferimenti 4.1, 4.2, P4, 2.1 | `P4/1/complete` su `70c85be` e `ae101a1`; nessun commit `PEV-Unit: 4.1`; 4.2 completo assente. C2 applicata: riferimenti registrati; ambiguità non risolta in git | utente (accettare la registrazione come ACCEPTED, o autorizzare amend locale di `ae101a1` con trailer `PEV-Unit: state`) | decisione utente; poi aggiornare V001-F2 nel register |
 | B-SERENA | non bloccante | MCP `serena` non connesso (CONNECTION_CLOSED) in questa sessione; ricerca semantica fatta con tokensave | utente | riavviare o riconfigurare serena |
 | B-SUBAGENT | non bloccante | `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-5-5` in `~/.claude/settings.json`: non verificato in una nuova sessione | utente | aprire una nuova sessione e controllare il modello dei subagent |
 
@@ -230,10 +231,10 @@ none
 | 1.1 | phase_02.md | 0.2 | DONE | 1 | G-U1.1 pass: 3 config, 3 slug, 6 registry (`-race`); D17 tombstone rev 3; self-review §7 |
 | 1.2 | phase_02.md | 1.1 | DONE | 1 | G-U1.2 pass (-race, 5 ripetizioni stabili): 3 copy + 9 server; scostamenti rev 4 |
 | 1.3 | phase_02.md | 1.2 | DONE | 1 | G-E2E1 PASS (`E2E OK`); fix Expect (rev 5) |
-| 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race); committato insieme a 2.2 in `d64bffb` (deviazione rev 6) |
+| 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race). Riferimento completamento (V001-C2): `d64bffb`, trailer `PEV-Unit: 2.2` (2.1 non ha trailer proprio; deviazione rev 6). Ambiguità registrata, non risolta |
 | 2.2 | phase_03.md | 1.2 | DONE | 1 | G-U2.2 PASS (sanitize tabella, idle timeout, headers, config idle); G-E2E2 PASS; commit `d64bffb` |
 | 3.1 | phase_04.md | 1.2 | DONE | 1 | G-U3.1 PASS (smoke -race); G-BENCH: mediana relay/baseline 64 KiB 1.02, 256 KiB 0.956, 1 MiB 0.991 (criterio ≥ 0.90 PASS); default 256 KiB confermato; commit `2d91a0d` |
-| 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | DONE | 1 | build `bashtransfer:local` pass (11 s); `compose config` pass senza `ports:` per app; `GET /` da rete interna pass; commit `e2ccd94` (wip) |
+| 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | DONE | 1 | Riferimento completamento (V001-C2): `70c85be` (chiusura P4; nessun commit con `PEV-Unit: 4.1`). `e2ccd94` è WIP con trailer `PEV-Unit: 4.2` blocked. | build `bashtransfer:local` pass (11 s); `compose config` pass senza `ports:` per app; `GET /` da rete interna pass; commit `e2ccd94` (wip) |
 | 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | DONE | 2 | S1 R2 chiuso (`client_body_timeout` 60s default → 3600s); S2 `nginx -t` pass; trasferimento attraverso nginx NON verificato: B-NGX; commit `e2ccd94` (wip, `PEV-Result: blocked`) |
 | 4.3 | phase_05.md | 4.1; 4.2 chiuso o SKIPPED; 2.1 DONE o SKIPPED | WRITTEN | 1 | README.md scritto (rev 7: precondizione 4.2 non soddisfatta; sezione nginx dichiarata non verificata); S2 cross-check su variabili e comandi; da rivedere dopo B-NGX |
 
@@ -246,7 +247,7 @@ README obligation per phase: P0 → N/A (nessun comportamento distribuito; verif
 | 1 | phase_02.md | P1 | DONE | G-P1 PASS: `go test -race -count=1 ./...` 34 PASS/0 FAIL/0 SKIP + G-E2E1 PASS; README pendente su 4.3 (B-DISC, limiti); self-review §7 |
 | 2 | phase_03.md | P2 | DONE | G-P2 PASS: `go test -race -count=1 ./...` 35 PASS/0 FAIL/0 SKIP + G-E2E2 PASS (`E2E OK` con auth e nome con spazi); README pendente su 4.3 (auth, limiti); self-review §7; commit `unit:P2:1` |
 | 3 | phase_04.md | P3 | BLOCKED (V001-F1, correzione C1) | G-BENCH PASS su una sessione; rerun V001 FAIL a 256 KiB (0.896). Originale: G-BENCH PASS (criterio D13 su 5 campioni, nessuno SKIP); G-P3 PASS: `go test -race -count=1 ./...` 36 PASS/0 FAIL/0 SKIP; commit `unit:P3:1` (solo STATE) |
-| 4 | phase_05.md | P4 | DONE | G-D1, G-S2, G-E2E-FINAL PASS (256 MiB via compose stream 443); G-FINAL: vedi §7 |
+| 4 | phase_05.md | P4 | DONE | G-D1, G-S2, G-E2E-FINAL PASS (256 MiB via compose stream 443); G-FINAL: vedi §7. Riferimento (V001-C2): `70c85be`. Ambiguità: `ae101a1` (state-only) ha gli stessi quattro trailer; scelta registrata come default (non riscritta). Decisione utente pendente |
 
 Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
 
