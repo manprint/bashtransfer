@@ -22,7 +22,7 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 ## 1. Current unit and scope
 
 - Active scope: plan 001 intero, fasi 0–4 (richiesta utente: "Fai tutte le fasi in autonomia")
-- Scope result: RUNNING (fase 4 chiudibile: B-NGX risolto in rev 8 con `stream`; G-E2E-FINAL PASS; resta commit di chiusura e G-FINAL)
+- Scope result: COMPLETE (fasi 0–4 DONE; G-FINAL PASS; limiti dichiarati: certificato di test, auth non provata via nginx, self-review dello stesso modello)
 - Type: none
 - ID / attempt: none
 - Status: none
@@ -30,7 +30,7 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: decisione utente su B-NGX (vedi §9): verificare il percorso nginx su un host senza intercettazione delle porte 80/443, oppure accettare che il trasferimento attraverso nginx resti non verificato e chiudere P4 come BLOCKED. Nessun'altra unità eleggibile senza questa decisione.
+- Next action: nessuna. Decisioni per l'utente: push (non autorizzato), certificato reale per il deploy, verifica auth via nginx.
 - Next eligible plan unit: nessuna (4.2 BLOCKED; 4.3 scritta, chiusura dipende da 4.2)
 - Unit base: `e2ccd94` (wip 4.1+4.2); branch `plan/001-bashtransfer`; owned changes: STATE.md, overview.md, README.md (4.3), commit di chiusura pendente
 - Repo state: HEAD `e2ccd94`; `Specifiche.md` non tracciato e intatto; nessun push; stack compose fermato e rete di test rimossa.
