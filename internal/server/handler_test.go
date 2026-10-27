@@ -191,6 +191,49 @@ func TestRelayRoundTripSHA(t *testing.T) {
 	}
 }
 
+// TestUploadExpectContinue: client con "Expect: 100-continue" (come curl per upload grandi).
+// Il body deve arrivare intero; senza il 100 esplicito Go chiude il body alla risposta.
+func TestUploadExpectContinue(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	data := randomBytes(t, 1<<20)
+	want := sha256.Sum256(data)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/exp.bin", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Expect", "100-continue")
+	resp := within(t, 5*time.Second, "risposta PUT con Expect", func() *http.Response {
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		return r
+	})
+	if resp == nil {
+		t.FailNow()
+	}
+	br := bufio.NewReader(resp.Body)
+	line := within(t, 5*time.Second, "riga curl con Expect", func() string {
+		l, _ := br.ReadString('\n')
+		return l
+	})
+	dl := get(t, ctx, srv.URL+"/"+slugOf(line))
+	h := sha256.New()
+	n, err := io.Copy(h, dl.Body)
+	dl.Body.Close()
+	if err != nil {
+		t.Fatalf("download con Expect: %v", err)
+	}
+	if n != int64(len(data)) || !bytes.Equal(h.Sum(nil), want[:]) {
+		t.Fatalf("ricevuti %d byte su %d, sha256 diverso", n, len(data))
+	}
+	resp.Body.Close()
+}
+
 func TestGetUnknown404(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())

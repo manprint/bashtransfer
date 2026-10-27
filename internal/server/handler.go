@@ -119,6 +119,13 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		h.reg.Finish(s)
 	}()
 
+	// curl invia "Expect: 100-continue" per upload grandi. Se la risposta finale arriva prima
+	// del 100 e prima della lettura del body, Go chiude il body (ErrBodyReadAfterClose).
+	// Il 100 viene quindi inviato esplicitamente, prima dei comandi.
+	if expectsContinue(r) {
+		w.WriteHeader(http.StatusContinue)
+	}
+
 	base := h.baseURL(r)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "curl -o \"%s\" \"%s/%s\"\nwget -O \"%s\" \"%s/%s\"\n", name, base, s.Slug, name, base, s.Slug)
@@ -141,6 +148,11 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		panic(http.ErrAbortHandler)
 	case <-r.Context().Done():
 	}
+}
+
+// expectsContinue riporta se il client ha chiesto 100 Continue con un body non vuoto.
+func expectsContinue(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Expect"), "100-continue") && r.ContentLength != 0
 }
 
 // download reclama lo slug e attende la fine del trasferimento; il relay lo scrive il mittente.
