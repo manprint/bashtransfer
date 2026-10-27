@@ -30,10 +30,10 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
 - Current step: none
-- Next action: commit chiusura P2 (solo STATE); poi fase 3: 3.1 benchmark (`phase_04.md`).
-- Next eligible plan unit: 3.1 (`phase_04.md`)
-- Unit base: `d64bffb` (2.1+2.2); branch `plan/001-bashtransfer`; owned changes: STATE.md
-- Repo state: HEAD `d64bffb`; `Specifiche.md` non tracciato e intatto; nessun push.
+- Next action: commit chiusura P3 (solo STATE); poi fase 4: 4.1 Dockerfile e compose (`phase_05.md`).
+- Next eligible plan unit: 4.1 (`phase_05.md`)
+- Unit base: `2d91a0d` (3.1); branch `plan/001-bashtransfer`; owned changes: STATE.md
+- Repo state: HEAD `2d91a0d`; `Specifiche.md` non tracciato e intatto; nessun push.
 
 ## 2. Feature context and readiness
 
@@ -102,7 +102,9 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | plan | 001 / 2 (revisione RS-2) | 2 | agent-1 (claude-haiku-5-5) | overview D16, R4, RS-2; phase_01 0.3; phase_02 upload stdin e test; phase_05 RS-2 e README; STATE | specifica verificata contro piano; self-review (Haiku, stesso modello) | uncommitted → committato come plan rev 2 prima di 0.2 |
 | plan | 001 / 1 (cold review) | 1 | agent-1 (claude-haiku-5-5) | correzioni a–l in phase_02, phase_04, phase_05, STATE; Q1 e rete registrate | cold review self (Haiku fresco, nessun contesto di pianificazione) | uncommitted |
 | sub-phase | 2.1 + 2.2 / 1 | 6 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/server/{auth,name}.go(+test), handler.go (Authorize, IdleTimeout, SanitizeName, 401), handler_test.go, internal/relay/copy.go (NewIdleReader), internal/config (IdleTimeout), cmd main.go, scripts/e2e.sh (auth, nome con spazi) | G-U2.1 PASS, G-U2.2 PASS, G-E2E2 PASS; self-review §7 | unit:2.2:1 (`d64bffb`, commit unico, rev 6) |
-| phase closure | P2 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 2 completa; I-1..I-5 invariati; D9, D15, D5 coperti | G-P2 PASS (35 PASS) | unit:P2:1 (commit solo STATE) |
+| phase closure | P2 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 2 completa; I-1..I-5 invariati; D9, D15, D5 coperti | G-P2 PASS (35 PASS) | unit:P2:1 (`c385106`, solo STATE) |
+| sub-phase | 3.1 / 1 | 6 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/server/bench_test.go (NEW), scripts/bench.sh (NEW, +x) | G-U3.1 PASS; G-BENCH PASS (rapporti 1.02 / 0.956 / 0.991); self-review §7 | unit:3.1:1 (`2d91a0d`) |
+| phase closure | P3 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 3 completa; buffer 256 KiB confermato da dati | G-P3 PASS (36 PASS); G-BENCH PASS | unit:P3:1 (commit solo STATE) |
 
 Le righe sono append-only. Commit reference: vedi §0.6.
 
@@ -155,6 +157,10 @@ Risultati possibili: pass, fail, blocked, not-run, not-applicable-yet. Solo pass
 | G-U2.2 (2.2) | `go test ./internal/server ./internal/config ./internal/relay -v -count=1 -race`; `go test -race -count=3 -run 'Idle|Headers|SanitizeName|Auth' ./internal/server` | pass | sanitize (tabella 8 casi + 2 lunghezze); TestUploadIdleTimeout; TestDownloadHeaders; TestConfigIdleTimeout; nessuno saltato | rev 6, `d64bffb` | 2026-10-27 |
 | G-E2E2 (fine P2) | `bash scripts/e2e.sh` | pass (`E2E OK`) | RS-1 e RS-2 invariati; PUT senza credenziali 401; password errata 401; upload autorizzato `strano nome.zip` con comandi `curl -o`/`wget -O` corretti; download pubblico con auth; sha256 invariati | rev 6, `d64bffb` | 2026-10-27 |
 | G-P2 (P2) | `go test -race -count=1 -v ./...` (conteggio) + G-E2E2 | pass | 35 PASS, 0 FAIL, 0 SKIP | rev 6, `d64bffb` | 2026-10-27 |
+| G-U3.1 (3.1) | `go test ./internal/server -run 'TestBenchHarnessSmoke' -v -count=1 -race` | pass | 1 test; 1 MiB esatti per lato | rev 6, `2d91a0d` | 2026-10-27 |
+| G-BENCH (3.1) | `scripts/bench.sh` (nproc 8, go1.27.3, Intel Xeon; 256 MiB per op, -benchtime 3x -count 5, senza -race) | pass | Mediane MB/s (relay / baseline): 64 KiB 5337.68 / 5219.48 = **1.02**; 256 KiB 6548.81 / 6853.35 = **0.956**; 1 MiB 6033.41 / 6086.60 = **0.991**. Criterio D13 ≥ 0.90: PASS in tutti e tre. Default 256 KiB: relay più alto (6548.81 vs 6033.41 e 5337.68, differenza 8.5% sul 1 MiB, nessuna revisione) | rev 6, `2d91a0d`; output grezzo in scratchpad `bench-run1.txt` | 2026-10-27 |
+| G-P3 (P3) | `go test -race -count=1 -v ./...` (conteggio) | pass | 36 PASS, 0 FAIL, 0 SKIP | rev 6, `2d91a0d` | 2026-10-27 |
+| Review 3.1 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 6 / bench_test.go, scripts/bench.sh | baseline a due hop verificato in codice: client → `minimalRelay` (PUT) → GET ricevente, stesso `BufSize`, flush per blocco, nessun registry/slug/header; byte esatti verificati in `transfer`; criterio applicato senza riscrittura; buffer scelto dal dato (256 KiB è il relay più veloce) | PASS, self-review; non revisione forte. Limite: una sola misura, macchina a 8 CPU condivisa, varianza fra campioni fino a ~10% | 2026-10-27 |
 | Review 2.1+2.2 (self-review, stesso modello) | agent-1 (claude-haiku-5-5) | rev 6 / auth.go, name.go, handler.go Options e 401 | I-5 (nessuna directory dal nome: `SanitizeName` taglia a `/`); D9 (solo PUT protetto, GET pubblico); D15 (idle deadline prima di ogni Read, `ErrIdle`); costo costante del confronto verificato in diff, non solo a comportamento; `WWW-Authenticate` su 401 | PASS, self-review; non revisione forte |
 
 ## 8. Technical revisions and deviations
@@ -201,7 +207,7 @@ none
 | 1.3 | phase_02.md | 1.2 | DONE | 1 | G-E2E1 PASS (`E2E OK`); fix Expect (rev 5) |
 | 2.1 | phase_03.md | 1.2 | DONE | 1 | G-U2.1 PASS (6 test auth, -race); committato insieme a 2.2 in `d64bffb` (deviazione rev 6) |
 | 2.2 | phase_03.md | 1.2 | DONE | 1 | G-U2.2 PASS (sanitize tabella, idle timeout, headers, config idle); G-E2E2 PASS; commit `d64bffb` |
-| 3.1 | phase_04.md | 1.2 | TODO | 1 | — |
+| 3.1 | phase_04.md | 1.2 | DONE | 1 | G-U3.1 PASS (smoke -race); G-BENCH: mediana relay/baseline 64 KiB 1.02, 256 KiB 0.956, 1 MiB 0.991 (criterio ≥ 0.90 PASS); default 256 KiB confermato; commit `2d91a0d` |
 | 4.1 | phase_05.md | P2 (o 2.1 SKIPPED), P3 | TODO | 1 | build Docker: B-NET |
 | 4.2 | phase_05.md | 4.1; R2 (`client_body_timeout`, S1) | TODO | 1 | B-R2 parziale |
 | 4.3 | phase_05.md | 4.1; 4.2 chiuso o SKIPPED; 2.1 DONE o SKIPPED | TODO | 1 | — |
@@ -214,7 +220,7 @@ README obligation per phase: P0 → N/A (nessun comportamento distribuito; verif
 | 0 | phase_01.md | P0 | DONE | P0 unit:P0:1 (review self-review §7); R1, R3, R4 CONFIRMED; G-BASE, G-U0.2, G-R1, G-R4 pass |
 | 1 | phase_02.md | P1 | DONE | G-P1 PASS: `go test -race -count=1 ./...` 34 PASS/0 FAIL/0 SKIP + G-E2E1 PASS; README pendente su 4.3 (B-DISC, limiti); self-review §7 |
 | 2 | phase_03.md | P2 | DONE | G-P2 PASS: `go test -race -count=1 ./...` 35 PASS/0 FAIL/0 SKIP + G-E2E2 PASS (`E2E OK` con auth e nome con spazi); README pendente su 4.3 (auth, limiti); self-review §7; commit `unit:P2:1` |
-| 3 | phase_04.md | P3 | TODO | — |
+| 3 | phase_04.md | P3 | DONE | G-BENCH PASS (criterio D13 su 5 campioni, nessuno SKIP); G-P3 PASS: `go test -race -count=1 ./...` 36 PASS/0 FAIL/0 SKIP; commit `unit:P3:1` (solo STATE) |
 | 4 | phase_05.md | P4 | TODO | B-R2 parziale, B-NET |
 
 Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
