@@ -86,6 +86,10 @@ UP_PIDS+=("$UP_PID")
 SLUG="$(wait_slug "$TMP/upload.out")"
 [[ -n "$SLUG" ]] || fail "nessuno slug entro 10 s (upload.out: $(cat "$TMP/upload.out"))"
 grep -q '^wget -O "e2e.bin" ' "$TMP/upload.out" || fail "riga wget mancante o nome errato"
+# In modalità esterna i comandi devono usare la base del test (BASHT_PUBLIC_URL == BASHT_E2E_BASE).
+if [[ -n "$EXTERNAL" ]]; then
+	grep -qF "\"$BASE/" "$TMP/upload.out" || fail "comandi con base diversa da $BASE: $(cat "$TMP/upload.out")"
+fi
 
 curl -sS -o "$TMP/received.bin" "$BASE/$SLUG" || fail "download RS-1 fallito"
 RECV_SUM="$(sha256sum "$TMP/received.bin" | awk '{print $1}')"

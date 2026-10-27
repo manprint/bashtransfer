@@ -41,7 +41,7 @@ Plan revision: 2 (RS-2 attraverso nginx; README con due scenari).
 - **Model:** agent-2 (claude-haiku-5-5)
 - **Assignment:** scrivere la configurazione draft; review agent-1 solo dopo R2 confermato.
 - **Files:**
-  - NEW `deploy/nginx/bashtransfer.conf`: server su 443 (certificati montati da host in `/etc/nginx/certs/`, nessuna gestione certificati nel repository), redirect 80→443, `location /` con `proxy_pass http://app:8080;` e le direttive di R2.
+  - NEW `deploy/nginx/nginx.conf` (rev 8): blocco `stream` con `listen 443 ssl` (certificati montati da host in `/etc/nginx/certs/`) e `proxy_pass app:8080`, `proxy_timeout 3600s`; blocco `http` solo per il redirect 80→443. Il proxy HTTP non è usato per il relay (B-NGX, overview R2 rev 8).
   - WRITE `compose.yaml`: servizio `nginx` (immagine pinnata), volume `deploy/nginx` e certificati host, porte 80 e 443 pubblicate, rete `internal`.
 - **Change:**
   Preconditions: 4.1 chiuso; `client_body_timeout` letto da nginx.org (S1); immagine nginx pinnata scaricabile (rete autorizzata).

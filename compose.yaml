@@ -1,4 +1,4 @@
-# Stack bashtransfer: nginx pubblica 80 e 443, app resta sulla rete interna senza porte pubblicate.
+# Stack bashtransfer: nginx pubblica 80 e 443 (TLS in stream), app resta sulla rete interna senza porte.
 # Variabili da impostare sull'host o in un file .env non versionato (vedi README).
 services:
   app:
@@ -6,7 +6,7 @@ services:
     image: bashtransfer:local
     environment:
       BASHT_LISTEN: ":8080"
-      BASHT_PUBLIC_URL: ${BASHT_PUBLIC_URL:-}
+      BASHT_PUBLIC_URL: ${BASHT_PUBLIC_URL:?impostare BASHT_PUBLIC_URL, es. https://bashtransfer.mydomain.it}
       BASHT_AUTH_USER: ${BASHT_AUTH_USER:-}
       BASHT_AUTH_PASSWORD: ${BASHT_AUTH_PASSWORD:-}
       BASHT_WAIT_TIMEOUT: ${BASHT_WAIT_TIMEOUT:-}
@@ -27,7 +27,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./deploy/nginx/bashtransfer.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${BASHT_CERTS_DIR:?impostare BASHT_CERTS_DIR con fullchain.pem e privkey.pem}:/etc/nginx/certs:ro
     networks:
       - internal

@@ -46,7 +46,7 @@ Tutte le variabili sono opzionali. Un valore vuoto equivale a non impostarlo.
 | Variabile | Default | Significato |
 |-----------|---------|-------------|
 | `BASHT_LISTEN` | `:8080` | Indirizzo di ascolto HTTP del server. |
-| `BASHT_PUBLIC_URL` | vuoto | Base degli URL nei comandi. Se vuoto, si usa `X-Forwarded-Proto` (oppure `https` con TLS diretto) e `Host`. |
+| `BASHT_PUBLIC_URL` | vuoto | Base degli URL nei comandi. Se vuoto, si usa `X-Forwarded-Proto` (oppure `https` con TLS diretto) e `Host`. Obbligatorio in compose. |
 | `BASHT_AUTH_USER` | vuoto | Utente per l'upload. Va impostato insieme a `BASHT_AUTH_PASSWORD`. |
 | `BASHT_AUTH_PASSWORD` | vuoto | Password per l'upload. |
 | `BASHT_WAIT_TIMEOUT` | `1h` | Quanto il mittente può attendere un ricevente prima che lo slug scada. |
@@ -84,7 +84,9 @@ Il file `compose.yaml` avvia due servizi: `app` (il relay, sulla rete interna, s
    docker compose up -d --build
    ```
 
-La configurazione nginx è in `deploy/nginx/bashtransfer.conf`: redirect da 80 a 443, body illimitato, nessun buffer sul relay, timeout di lettura e scrittura di 3600 secondi, `client_body_timeout` di 3600 secondi (il default di 60 secondi tronca mittenti fermi più a lungo), header `Host`, `X-Forwarded-Proto` e `X-Forwarded-For`.
+La configurazione nginx è in `deploy/nginx/nginx.conf`. TLS è terminato dal blocco `stream` (proxy TCP): il relay passa byte per byte, senza il proxy HTTP di nginx, che interrompe il body di un upload quando il server ha già risposto (verificato in questo ambiente). Il blocco `http` serve solo il redirect da 80 a 443.
+
+Perché nginx non aggiunge header HTTP, `BASHT_PUBLIC_URL` è obbligatorio in compose: i comandi stampati usano quell'URL, non `Host` o `X-Forwarded-Proto`.
 
 Senza nginx il server parla solo HTTP semplice: non esegue TLS.
 
@@ -108,11 +110,14 @@ Misurate in loopback con `scripts/bench.sh` (8 CPU, Intel Xeon, go1.27.3, trasfe
 - Test unitari e di integrazione (`go test -race ./...`): verificati.
 - Script end-to-end locale (`scripts/e2e.sh`, con e senza auth, con nome con spazi): verificato.
 - Immagine Docker e configurazione compose (`docker compose config`, avvio di `app` e risposta a `GET /` dalla rete interna): verificati.
-- Percorso completo attraverso nginx: **non verificato**. In questo ambiente il trasferimento si blocca dopo circa 0.1–0.8 MB quando passa da nginx, anche con una configurazione minimale. La causa non è stata isolata.
+- Percorso completo attraverso nginx (stack compose, porta 443, certificato di test): `scripts/e2e.sh` esterno con 256 MiB, RS-1 e RS-2, sha256 identici: verificato. Redirect da 80 e `GET /` via HTTPS: verificati. Il certificato di test non è stato verificato con una CA pubblica.
+- Auth attraverso nginx: non verificata (la sezione auth dell'e2e gira solo sul server locale).
 
 ## Sviluppo
 
 ```bash
 go test -race ./...
 bash scripts/e2e.sh
+# contro uno stack già avviato (BASHT_PUBLIC_URL uguale a BASHT_E2E_BASE):
+BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_MB=256 bash scripts/e2e.sh
 ```

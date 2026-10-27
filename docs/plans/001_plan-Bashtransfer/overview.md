@@ -82,7 +82,7 @@ Package layout (tutti NEW, dettagli in phase file):
 - `internal/relay/`: registry, sessioni, pool buffer, relay.
 - `internal/server/`: handler HTTP, auth, risposta testo con comandi.
 - `scripts/e2e.sh`, `scripts/bench.sh`.
-- `Dockerfile`, `compose.yaml`, `deploy/nginx/bashtransfer.conf`, `README.md`, `go.mod`.
+- `Dockerfile`, `compose.yaml`, `deploy/nginx/nginx.conf` (rev 8: sostituisce `bashtransfer.conf`), `README.md`, `go.mod`.
 
 ## Interfaces and compatibility
 
@@ -157,8 +157,9 @@ Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna se
   - `proxy_read_timeout` e `proxy_send_timeout` default `60s`; si applicano tra due operazioni di lettura/scrittura successive, non all'intera trasmissione.
 - Supervisor inference (non garanzia della fonte): durante l'attesa del ricevente l'app non legge il body e non emette byte dopo i comandi. Quindi nginx vede un upstream fermo: `proxy_send_timeout` chiude la connessione verso l'app dopo 60s di blocco in scrittura, e `proxy_read_timeout` la chiude dopo 60s senza byte di risposta. Entrambi devono essere ≥ `BASHT_WAIT_TIMEOUT` (default 1h = 3600s). Per il relay in corso, il silenzio del mittente è limitato da `BASHT_IDLE_TIMEOUT` (D15), che deve essere < `proxy_read_timeout`.
 - Residuo chiuso (rev 7): `client_body_timeout` default `60s`, contesto http/server/location, si applica tra due letture consecutive del body, non all'intera trasmissione (fonte: nginx.org core module, letta in 4.2). Scelta: `client_body_timeout 3600s` nel server 443, così nginx non tronca un mittente fermo prima di `BASHT_IDLE_TIMEOUT`.
-- Local check 4.2: `nginx -t` pass nell'immagine `nginx:1.27-alpine` pinnata con digest (stack compose avviato). Trasferimento attraverso nginx: NON verificato, vedi STATE §9 B-NGX.
-- Decision impact: 4.2 sbloccata. Parametri nginx: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` e `proxy_send_timeout` = 3600s (≥ default `BASHT_WAIT_TIMEOUT`); `proxy_read_timeout` > `BASHT_IDLE_TIMEOUT`. Scelta reversibile; alternativa (timeout più corti) rifiutata perché rompe D7.
+- Local check 4.2: `nginx -t` pass nell'immagine `nginx:1.27-alpine` pinnata con digest.
+- Rev 8 (B-NGX risolto): il proxy HTTP di nginx (`proxy_pass` in `http`) interrompe il body dell'upload quando l'upstream ha già risposto (test a coppie: upstream che risponde prima della lettura → stallo a 3.9 MB, EOF; upstream che risponde dopo → 8 MiB in 3 s). D4 richiede la risposta prima del body, quindi R2 non basta. Scelta: TLS e inoltro in `stream` (TCP) su 443; `http` solo per il redirect 80→443. Verificato: `stream` con binario reale 8 MiB e 256 MiB (e2e esterno); stack compose su 443 con 256 MiB (RS-1 e RS-2, sha256 identico, 2.3 s); redirect 80 → 443 e `GET /` via HTTPS.
+- Decision impact (rev 8, supersede rev 7 per il blocco http): `BASHT_PUBLIC_URL` obbligatorio in compose (nginx stream non aggiunge header HTTP, quindi niente `X-Forwarded-Proto`). E2E esterno controlla che i comandi usino la base di test. Decision impact originale: 4.2 sbloccata. Parametri nginx: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` e `proxy_send_timeout` = 3600s (≥ default `BASHT_WAIT_TIMEOUT`); `proxy_read_timeout` > `BASHT_IDLE_TIMEOUT`. Scelta reversibile; alternativa (timeout più corti) rifiutata perché rompe D7.
 - Unresolved/replacement: inoltro del body chunked del client (RS-2) con `proxy_request_buffering off` da verificare nella stessa fonte. `client_body_timeout` (default 60s, tra due letture successive del body dal client) non ancora letto: da verificare in 4.2 con la stessa fonte prima di dichiarare la configurazione corretta. Resta aperto un punto: se nginx non legge il body mentre l'app attende, `client_body_timeout` può scattare sul mittente; da verificare con test e2e lento (upload che attende > 60s prima del download).
 
 ### R3 — Go full duplex
