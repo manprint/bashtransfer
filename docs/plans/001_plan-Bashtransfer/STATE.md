@@ -22,25 +22,25 @@ State writer: nessuno ancora (piano non in esecuzione); ownership: released.
 ## 1. Current unit and scope
 
 - Active scope: plan 001 intero, fasi 0–4 (richiesta utente: "Fai tutte le fasi in autonomia")
-- Scope result: RUNNING — in attesa di conferma utente su 3 punti (V001-F1 criterio D13, V001-F2, V001-F3). V001-C2 e V001-C3 DONE. P3 attempt 2 BLOCKED su F1. Vedi `verify/verify_001_2026-10-27.md`
+- Scope result: COMPLETE — piano 001 fasi 0–4 chiuse; audit V001 FAIL storico, tutti i finding FIXED o ACCEPTED (decisione utente 2026-10-27). Codice invariato da `2d91a0d`, quindi G-FINAL di P4 resta valido. Vedi `verify/verify_001_2026-10-27.md`
 - Type: correction
-- ID / attempt: V001-C1 / 2 (riaperta; attempt 1 = `a2d9a64`, dichiarazioni di decisione non verificate)
-- Status: BLOCKED (in attesa conferma criterio utente)
-- Intent: misura D13 su 4 sessioni; decidere se il criterio "mediana delle sessioni" è accettato
+- ID / attempt: V001-C1 / 2 (completata)
+- Status: DONE
+- Intent: misura D13 su 4 sessioni; criterio accettato dall'utente 2026-10-27
 - Assigned: none; supervisor: agent-1 (claude-haiku-5-5)
 - File / unit heading: none
-- Current step: S3 di C1 completato (misure); S4 (applicazione decisione) in attesa
-- Next action: l'utente conferma o rifiuta: (1) criterio D13 come mediana delle sessioni; (2) V001-F2 ACCEPTED con `70c85be`; (3) V001-F3 ACCEPTED con `d64bffb`. Poi chiudere P3 attempt 2 con commit proprio. Fuori scope di questa sessione: push (non autorizzato), certificato reale per il deploy, verifica auth via nginx.
-- Next eligible plan unit: nessuna eseguibile senza conferma (P3 attempt 2 BLOCKED)
-- Unit base: `a2d9a64` (V001-C1 attempt 1, primo commit); branch `plan/001-bashtransfer`; owned changes: README.md, STATE.md, verify/*; commit WIP V001-C1 attempt 2 (follow-up)
-- Repo state: HEAD `a2d9a64` + follow-up; `Specifiche.md` non tracciato e intatto; nessun push; stack compose fermato e rete di test rimossa.
+- Current step: none
+- Next action: nessuna nel scope. Fuori scope, non autorizzati: push, certificato reale per il deploy, verifica auth via nginx.
+- Next eligible plan unit: nessuna
+- Unit base: `85c49fe` (chiusura P3/2); branch `plan/001-bashtransfer`; commit V001-C1 attempt 2 completo: vedi §4
+- Repo state: HEAD = commit V001-C1 attempt 2; `Specifiche.md` non tracciato e intatto; nessun push; stack compose fermato e rete di test rimossa.
 
 ## 2. Feature context and readiness
 
 Readiness: READY (piano rev 8). Cold review e self-review registrate in §7; revisioni 2–8 in §8.
-Ordine di handoff: 0.1, 0.2, 0.3, 1.1, 1.2, 1.3, 2.1, 2.2, P2, 3.1, P3, 4.1, 4.2, 4.3, P4. Tutte DONE tranne P3 attempt 2 (BLOCKED su V001-F1; vedi §9).
-Eleggibile ora: nessuna unità in scope senza conferma utente.
-Blocchi aperti: B-V001-F1 (criterio D13), B-V001-F2 e B-V001-F3 (conferma ACCEPTED). Nessun blocco tecnico. R1, R2, R3, R4 CONFIRMED (vedi overview § Research).
+Ordine di handoff: 0.1, 0.2, 0.3, 1.1, 1.2, 1.3, 2.1, 2.2, P2, 3.1, P3, 4.1, 4.2, 4.3, P4. Tutte DONE.
+Eleggibile ora: nessuna. Scope completo.
+Blocchi aperti: nessuno. V001-F1..F3 chiusi con accettazione utente 2026-10-27. R1–R4 CONFIRMED.
 
 Goal: relay curl/wget per file e cartelle, senza persistenza, in Go, con docker compose e nginx. Esclusioni in `overview.md` § Goal. Scenario di riferimento RS-1 in `overview.md`.
 
@@ -104,7 +104,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | phase closure | P2 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 2 completa; I-1..I-5 invariati; D9, D15, D5 coperti | G-P2 PASS (35 PASS) | unit:P2:1 (`c385106`, solo STATE) |
 | sub-phase | 3.1 / 1 | 6 | agent-2 (claude-haiku-5-5), state writer sessione corrente | internal/server/bench_test.go (NEW), scripts/bench.sh (NEW, +x) | G-U3.1 PASS; G-BENCH PASS (rapporti 1.02 / 0.956 / 0.991); self-review §7 | unit:3.1:1 (`2d91a0d`) |
 | phase closure | P3 / 1 | 6 | agent-1 (claude-haiku-5-5), self-review | fase 3 completa; buffer 256 KiB confermato da dati | G-P3 PASS (36 PASS); G-BENCH PASS | unit:P3:1 (commit solo STATE) |
-| reconciliation | V001-C2 / 1 | 7 | agent-1 (claude-haiku-5-5), state writer | riferimenti completamento: 4.1 e 4.2 → `70c85be`; 2.1 → `d64bffb`; P4 → `70c85be` con ambiguità con `ae101a1` registrata (default, nessuna riscrittura di commit) | `git log` trailer check; V001-F2, V001-F3 restano OPEN fino a decisione utente | unit:V001-C2:1 (commit state, vedi sotto) |
+| reconciliation | V001-C2 / 1 | 7 | agent-1 (claude-haiku-5-5), state writer | riferimenti completamento: 4.1 e 4.2 → `70c85be`; 2.1 → `d64bffb`; P4 → `70c85be` con ambiguità con `ae101a1` registrata (default, nessuna riscrittura di commit) | `git log` trailer check; V001-F2, V001-F3 restano OPEN fino a decisione utente | be994da (trailer PEV-Unit: V001-C3; C2 nello stesso commit) |
 | sub-phase | 4.1 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | Dockerfile, .dockerignore, compose.yaml (app, nginx), deploy/nginx/bashtransfer.conf | G-D1 PASS; self-review §7 | unit:4.2:1 wip (`e2ccd94`, con 4.2) |
 | sub-phase | 4.2 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | deploy/nginx/bashtransfer.conf, servizio nginx, scripts/e2e.sh (modalità esterna) | G-S2 PASS; G-E2E-FINAL FAIL (B-NGX) | unit:4.2:1 wip, `PEV-Result: blocked` (`e2ccd94`) |
 | sub-phase | 4.3 / 1 | 7 | agent-2 (claude-haiku-5-5), state writer sessione corrente | README.md (italiano) | cross-check variabili con config.go; sezione nginx non verificata | in `70c85be` (chiusura P4) |
@@ -112,6 +112,7 @@ Regola: un gate con `blocked` non conta come pass. Un gate `not-applicable-yet` 
 | phase closure | P3 / 2 | 8+C1 | sessione V001 (claude-haiku-5-5) | P3 riaperta da V001-F1; chiusura NON effettuata: dipende da conferma criterio | G-P3 attempt 2 pass (36/0/0) | nessuna (BLOCKED) |
 | correction | V001-C1 / 2 | 8+C1 | sessione V001 (claude-haiku-5-5) | riconciliazione: 'decisioni utente' rimosse (non trovate nel record); F1–F3 in attesa; §1/§4/§7/§8/§9/§11 e verify/ allineati | — | wip (`PEV-Result: wip`, unit aperta fino a conferma) |
 | phase closure | P3 / 2 | 8+C1 | agent-1 (claude-haiku-5-5), self-review; criterio accettato dall'utente 2026-10-27 | G-P3 attempt 2 pass (36/0/0); G-BENCH V001-C1 pass | unit:P3:2 |
+| correction | V001-C1 / 2 | 8+C1 | agent-1 (claude-haiku-5-5), self-review; criterio accettato dall'utente 2026-10-27 | riconciliazione completa: F1 FIXED, F2 e F3 ACCEPTED; §1/§2/§4/§7/§8/§9/§11 e verify/ allineati | unit:V001-C1:2 |
 
 Le righe sono append-only. Commit reference: vedi §0.6.
 
@@ -215,7 +216,8 @@ Revisioni previste ma non ancora fatte (non registrate come approvate):
 | B-NGX | RISOLTO (rev 8): proxy HTTP di nginx interrompe il body quando l'upstream risponde prima (D4). Coppia di test: upstream early → stallo 3.9 MB + EOF; upstream late → 8 MiB OK. Soluzione: `stream` TLS su 443 | — | — |
 | B-NGX-old | (storico) | Trasferimento attraverso nginx si blocca dopo circa 0.1–0.8 MB (RS-1 e RS-2, 8 MiB e 256 MiB, poi 8 MiB anche su 18443). Riprodotto con: stack compose; nginx con configurazione di produzione; configurazione minimale con solo `proxy_pass`; upstream minimo Go (risposta prima o dopo la lettura del body); nginx host-network con binario locale. Il binario diretto (senza nginx) passa 8 MiB in 3 ms. Ipotesi non provate: intercettazione del sandbox sulle porte 80/443 (la configurazione minima su porta 18080 ha inoltrato 1 MiB completo, ma il test con 8 MiB su 18080 non è stato concluso). Esclusi con esperimento: `Expect: 100-continue`, versione HTTP/1.0 upstream, `Connection` keep-alive, `proxy_buffer_size` 64k, TLS (stesso stallo in HTTP), `proxy_buffering on` (rompe lo streaming). Socket queue non rilevate (`ss` senza output). Esperimenti in scratchpad | utente (decisione) + agent-2 | (a) su un host senza intercettazione, o con nginx su porte non standard, eseguire `BASHT_E2E_BASE=https://<host> BASHT_E2E_MB=256 bash scripts/e2e.sh`; (b) se (a) passa, registrare G-E2E-FINAL e chiudere 4.2/P4; se non passa, il problema è nel percorso nginx: prossimo passo è tcpdump/ss in-container, non ancora fatto |
 | B-V001-F1 | P3 attempt 2, scope, README §Prestazioni | Rerun 2026-10-27: 256 KiB 0.896 (sessione singola). 4 sessioni: mediana 256 KiB 0.989. | utente | RISOLTO 2026-10-27: criterio mediana delle sessioni accettato; P3 attempt 2 chiuso |
-| B-V001-F2 | riferimenti 4.1, 4.2, P4 | `P4/1/complete` su `70c85be` e `ae101a1`; nessun commit `PEV-Unit: 4.1`; 4.2 completo assente. C2: riferimenti registrati; ambiguità in git non risolta | utente (ACCEPTED o amend locale di `ae101a1`) | APERTO: proposta ACCEPTED con `70c85be`; nessuna decisione utente registrata |
+| B-V001-F2 | riferimenti 4.1, 4.2, P4 | `P4/1/complete` su `70c85be` e `ae101a1`; nessun commit `PEV-Unit: 4.1`; 4.2 completo assente. C2 applicata | utente | RISOLTO 2026-10-27: ACCEPTED con `70c85be`; `ae101a1` invariato |
+| B-V001-F3 | 2.1 | `d64bffb` ha trailer `PEV-Unit: 2.2`, nessun trailer proprio per 2.1 | utente | RISOLTO 2026-10-27: ACCEPTED con `d64bffb`; deviazione rev 6 |
 | B-SERENA | non bloccante | MCP `serena` non connesso (CONNECTION_CLOSED) in questa sessione; ricerca semantica fatta con tokensave | utente | riavviare o riconfigurare serena |
 | B-SUBAGENT | non bloccante | `CLAUDE_CODE_SUBAGENT_MODEL=claude-haiku-5-5` in `~/.claude/settings.json`: non verificato in una nuova sessione | utente | aprire una nuova sessione e controllare il modello dei subagent |
 
@@ -286,7 +288,7 @@ Statuses: TODO, IN_PROGRESS, IN_REVIEW, DONE, SKIPPED, BLOCKED.
 ### Audits
 | Report | Verdict | Current unresolved findings | Evidence |
 |--------|---------|-----------------------------|----------|
-| V001 | FAIL (storico); F1 OPEN (misura fatta, criterio in attesa); F2 e F3 OPEN (proposta ACCEPTED, in attesa utente); F4 e F5 FIXED | F1, F2, F3 | verify/index.md |
+| V001 | FAIL (storico); F1 FIXED, F2 e F3 ACCEPTED (decisione utente 2026-10-27), F4 e F5 FIXED | nessuno | verify/index.md |
 
 Audit finding details/statuses live in verify/index.md; phase progress lives here.
 
