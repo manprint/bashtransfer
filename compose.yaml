@@ -1,0 +1,37 @@
+# Stack bashtransfer: nginx pubblica 80 e 443, app resta sulla rete interna senza porte pubblicate.
+# Variabili da impostare sull'host o in un file .env non versionato (vedi README).
+services:
+  app:
+    build: .
+    image: bashtransfer:local
+    environment:
+      BASHT_LISTEN: ":8080"
+      BASHT_PUBLIC_URL: ${BASHT_PUBLIC_URL:-}
+      BASHT_AUTH_USER: ${BASHT_AUTH_USER:-}
+      BASHT_AUTH_PASSWORD: ${BASHT_AUTH_PASSWORD:-}
+      BASHT_WAIT_TIMEOUT: ${BASHT_WAIT_TIMEOUT:-}
+      BASHT_IDLE_TIMEOUT: ${BASHT_IDLE_TIMEOUT:-}
+      BASHT_MAX_SESSIONS: ${BASHT_MAX_SESSIONS:-}
+      BASHT_BUF_SIZE: ${BASHT_BUF_SIZE:-}
+    expose:
+      - "8080"
+    networks:
+      - internal
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/bashtransfer.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${BASHT_CERTS_DIR:?impostare BASHT_CERTS_DIR con fullchain.pem e privkey.pem}:/etc/nginx/certs:ro
+    networks:
+      - internal
+    restart: unless-stopped
+
+networks:
+  internal: {}

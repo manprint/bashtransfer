@@ -23,34 +23,51 @@ fail() {
 	exit 1
 }
 
-PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-BASE="http://127.0.0.1:$PORT"
-
-head -c 8388608 /dev/urandom > "$TMP/payload.bin"
+# BASHT_E2E_BASE: testa uno stack già avviato (es. nginx su https://127.0.0.1); il certificato
+# di test è accettato. BASHT_E2E_MB: dimensione del payload in MiB (default 8).
+MB="${BASHT_E2E_MB:-8}"
+head -c $((MB * 1048576)) /dev/urandom > "$TMP/payload.bin"
 PAYLOAD_SUM="$(sha256sum "$TMP/payload.bin" | awk '{print $1}')"
 
-(cd "$ROOT" && go build -o "$TMP/bashtransfer" ./cmd/bashtransfer)
+EXTERNAL=""
+if [[ -n "${BASHT_E2E_BASE:-}" ]]; then
+	EXTERNAL=1
+	BASE="$BASHT_E2E_BASE"
+	mkdir -p "$TMP/curlhome"
+	printf 'insecure\n' > "$TMP/curlhome/.curlrc"
+	export CURL_HOME="$TMP/curlhome"
+	for _ in $(seq 1 100); do
+		if curl -sf -o /dev/null "$BASE/"; then break; fi
+		sleep 0.1
+	done
+	curl -sf -o /dev/null "$BASE/" || fail "lo stack non risponde su $BASE"
+else
+	PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+	BASE="http://127.0.0.1:$PORT"
 
-BASHT_LISTEN="127.0.0.1:$PORT" "$TMP/bashtransfer" > "$TMP/server.log" 2>&1 &
-SERVER_PID=$!
+	(cd "$ROOT" && go build -o "$TMP/bashtransfer" ./cmd/bashtransfer)
 
-for _ in $(seq 1 100); do
-	if curl -sf -o /dev/null "$BASE/"; then break; fi
-	sleep 0.1
-done
-curl -sf -o /dev/null "$BASE/" || fail "il server non risponde su $BASE"
+	BASHT_LISTEN="127.0.0.1:$PORT" "$TMP/bashtransfer" > "$TMP/server.log" 2>&1 &
+	SERVER_PID=$!
 
-# Secondo server con Basic auth (D9): stessa binaria, altra porta.
-AUTH_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-AUTH_BASE="http://127.0.0.1:$AUTH_PORT"
-BASHT_LISTEN="127.0.0.1:$AUTH_PORT" BASHT_AUTH_USER=alice BASHT_AUTH_PASSWORD=s3cret \
-	"$TMP/bashtransfer" > "$TMP/auth.log" 2>&1 &
-AUTH_PID=$!
-for _ in $(seq 1 100); do
-	if curl -sf -o /dev/null "$AUTH_BASE/"; then break; fi
-	sleep 0.1
-done
-curl -sf -o /dev/null "$AUTH_BASE/" || fail "il server con auth non risponde su $AUTH_BASE"
+	for _ in $(seq 1 100); do
+		if curl -sf -o /dev/null "$BASE/"; then break; fi
+		sleep 0.1
+	done
+	curl -sf -o /dev/null "$BASE/" || fail "il server non risponde su $BASE"
+
+	# Secondo server con Basic auth (D9): stessa binaria, altra porta.
+	AUTH_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+	AUTH_BASE="http://127.0.0.1:$AUTH_PORT"
+	BASHT_LISTEN="127.0.0.1:$AUTH_PORT" BASHT_AUTH_USER=alice BASHT_AUTH_PASSWORD=s3cret \
+		"$TMP/bashtransfer" > "$TMP/auth.log" 2>&1 &
+	AUTH_PID=$!
+	for _ in $(seq 1 100); do
+		if curl -sf -o /dev/null "$AUTH_BASE/"; then break; fi
+		sleep 0.1
+	done
+	curl -sf -o /dev/null "$AUTH_BASE/" || fail "il server con auth non risponde su $AUTH_BASE"
+fi
 
 # Attende la prima riga di comandi di un upload e ne estrae lo slug.
 wait_slug() {
@@ -94,6 +111,7 @@ RECV2_SUM="$(sha256sum "$TMP/mydir.tgz" | awk '{print $1}')"
 [[ "$RECV2_SUM" == "$PAYLOAD_SUM" ]] || fail "sha256 RS-2 diverso"
 wait "$UP2_PID" || fail "upload RS-2 terminato con errore"
 
+if [[ -z "$EXTERNAL" ]]; then
 # Auth (D9): solo PUT è protetto; senza credenziali o con password sbagliata: 401.
 printf 'auth' > "$TMP/small.bin"
 CODE="$(curl -s -o /dev/null -w '%{http_code}' -T "$TMP/small.bin" "$AUTH_BASE/auth.bin")"
@@ -114,5 +132,6 @@ grep -q '^wget -O "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con sp
 curl -sS -o "$TMP/auth.dl" "$AUTH_BASE/$AUTH_SLUG" || fail "download pubblico con auth fallito"
 cmp -s "$TMP/auth.dl" "$TMP/small.bin" || fail "download con auth: contenuto diverso"
 wait "$AUTH_UP_PID" || fail "upload autorizzato terminato con errore"
+fi
 
 echo "E2E OK"
