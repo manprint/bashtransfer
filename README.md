@@ -37,7 +37,7 @@ Senza nome nel path (`... | curl -T - https://bashtransfer.mydomain.it`) il rice
 
 ### Limiti del nome
 
-Il nome viene ripulito: si tiene solo l'ultimo segmento del path, si tolgono caratteri di controllo, virgolette e backslash, si limita a 128 caratteri. Un nome vuoto diventa `download`.
+Il nome viene ripulito: si tiene solo l'ultimo segmento del path, si tolgono caratteri di controllo (anche C1), virgolette, backslash, separatori di riga e controlli bidirezionali Unicode, si tolgono i punti iniziali (`.bashrc` diventa `bashrc`: il ricevente esegue il comando nella sua directory e non deve sovrascrivere file nascosti), si limita a 128 caratteri. Un `/` codificato (`%2F`) conta come separatore: resta l'ultima parte. `$`, backtick e `!` diventano `_`, perché il nome finisce tra virgolette doppie in una riga che l'utente incolla in una shell. Un nome vuoto diventa `download`.
 
 ## Configurazione
 
@@ -46,11 +46,11 @@ Tutte le variabili sono opzionali. Un valore vuoto equivale a non impostarlo.
 | Variabile | Default | Significato |
 |-----------|---------|-------------|
 | `BASHT_LISTEN` | `:8080` | Indirizzo di ascolto HTTP del server. |
-| `BASHT_PUBLIC_URL` | vuoto | Base degli URL nei comandi. Se vuoto, si usa `X-Forwarded-Proto` (oppure `https` con TLS diretto) e `Host`. Obbligatorio in compose. |
+| `BASHT_PUBLIC_URL` | vuoto | Base degli URL nei comandi: `http(s)://host[/prefisso]`, senza query, credenziali né caratteri che la shell interpreta (validata all'avvio). Se vuoto, si usano `X-Forwarded-Proto` e `Host`; un `Host` con caratteri che la shell interpreta (`$`, `!`, spazi, virgolette, backtick, backslash) riceve `400`. Obbligatorio in compose. |
 | `BASHT_AUTH_USER` | vuoto | Utente per l'upload. Va impostato insieme a `BASHT_AUTH_PASSWORD`. |
 | `BASHT_AUTH_PASSWORD` | vuoto | Password per l'upload. |
 | `BASHT_WAIT_TIMEOUT` | `1h` | Quanto il mittente può attendere un ricevente prima che lo slug scada. |
-| `BASHT_IDLE_TIMEOUT` | `2m` | Interruzione del relay se il mittente non invia byte per questo tempo (minimo `1s`). |
+| `BASHT_IDLE_TIMEOUT` | `2m` | Interruzione del relay se il mittente non invia byte per questo tempo, o se il ricevente non accetta una singola scrittura entro questo tempo (minimo `1s`). |
 | `BASHT_MAX_SESSIONS` | `1000` | Numero massimo di slug attivi contemporaneamente. |
 | `BASHT_BUF_SIZE` | `262144` | Dimensione del buffer di copia, tra 4096 e 4194304 byte. Il default 256 KiB è il buffer con il throughput assoluto più alto del relay in tutte e quattro le sessioni. |
 
@@ -84,21 +84,30 @@ Il file `compose.yaml` avvia due servizi: `app` (il relay, sulla rete interna, s
    docker compose up -d --build
    ```
 
-La configurazione nginx è in `deploy/nginx/nginx.conf`. TLS è terminato dal blocco `stream` (proxy TCP): il relay passa byte per byte, senza il proxy HTTP di nginx, che interrompe il body di un upload quando il server ha già risposto (verificato in questo ambiente). Il blocco `http` serve solo il redirect da 80 a 443.
+La configurazione nginx è in `deploy/nginx/nginx.conf`: worker automatici, `worker_connections 8192`, risoluzione DNS a ogni connessione (il container `app` può essere ricreato senza riavviare nginx), buffer di copia da 128k, keepalive TCP verso il client (60 s, poi 4 sonde ogni 15 s: un client sparito libera la sessione in circa 2 minuti) e un tetto di 64 connessioni simultanee per IP del client (`limit_conn`; rimuovere le due righe per disattivarlo). TLS è terminato dal blocco `stream` (proxy TCP): il relay passa byte per byte, senza il proxy HTTP di nginx, che interrompe il body di un upload quando il server ha già risposto (verificato in questo ambiente). Il blocco `http` serve solo il redirect da 80 a 443.
 
 Perché nginx non aggiunge header HTTP, `BASHT_PUBLIC_URL` è obbligatorio in compose: i comandi stampati usano quell'URL, non `Host` o `X-Forwarded-Proto`.
 
 Senza nginx il server parla solo HTTP semplice: non esegue TLS.
+
+L'immagine ha un `HEALTHCHECK` (`/bashtransfer -healthcheck`: `GET /` su `BASHT_LISTEN`, solo loopback); `nginx` parte quando `app` è sano. Il container `app` gira con filesystem in sola lettura, senza capability e senza nuovi privilegi; i log hanno rotazione (3 file da 10 MB).
+
+## Log
+
+Una riga per trasferimento su stderr: `outcome` (`ok`, `aborted`, `expired`, `sender_gone`), byte, durata ed eventuale errore. Slug e nome del file non compaiono mai nei log.
 
 ## Limiti e sicurezza
 
 - Lo slug è il segreto: chi lo conosce può scaricare finché il trasferimento è attivo. Usare HTTPS.
 - Un solo ricevente per slug. Un secondo `GET` sullo stesso slug riceve `410`.
 - Uno slug concluso, scaduto o già reclamato risponde `410` per 24 ore; dopo, `404`.
-- Un mittente che attende senza che nessuno scarichi viene chiuso solo alla scadenza di `BASHT_WAIT_TIMEOUT`: il server Go non rileva la caduta del mittente finché non ha letto il body.
+- Il mittente deve restare connesso finché il ricevente non ha finito: se cade mentre attende (anche dopo aver inviato tutto il file), lo slug si libera entro circa un secondo e risponde `410`. Se i buffer TCP sono già pieni di dati non letti, la chiusura resta in coda dietro i dati: lo slug si libera quando il kernel del mittente abbandona la connessione (misurato in questo ambiente: circa 6 minuti); dietro nginx vale anche il keepalive verso il client. Su Linux il server controlla la connessione ogni secondo (`POLLRDHUP`), perché net/http non rileva la caduta finché il body non è letto; su altri sistemi la sessione resta fino a `BASHT_WAIT_TIMEOUT`.
 - Il relay non salva nulla su disco: se il mittente o il ricevente cadono a metà, il trasferimento fallisce e il ricevente vede un errore (il download viene interrotto senza chunk finale).
 - Un mittente fermo più a lungo di `BASHT_IDLE_TIMEOUT` interrompe il trasferimento.
-- Con `BASHT_AUTH_USER` non impostato chiunque può inviare un file.
+- Con `BASHT_AUTH_USER` non impostato chiunque può inviare un file. L'app vede solo l'IP di nginx (stream senza PROXY protocol): l'unico limite per IP è `limit_conn` in nginx; non ci sono quote di banda né limiti di frequenza.
+- Le tombstone sono al massimo 100000: sotto un carico molto alto uno slug concluso torna `404` prima delle 24 ore.
+- Un ricevente che resta connesso senza leggere viene interrotto da `BASHT_IDLE_TIMEOUT`.
+- Un arresto del server (SIGTERM) lascia 10 secondi ai trasferimenti in corso, poi li interrompe. Un secondo SIGINT o SIGTERM termina subito il processo.
 - Il relay non verifica l'integrità: il ricevente deve confrontare eventualmente un hash.
 
 ## Prestazioni
@@ -107,11 +116,12 @@ Misurate in loopback con `scripts/bench.sh` (8 CPU, Intel Xeon, go1.27.3, trasfe
 
 ## Stato della verifica
 
-- Test unitari e di integrazione (`go test -race ./...`): verificati.
-- Script end-to-end locale (`scripts/e2e.sh`, con e senza auth, con nome con spazi): verificato.
+- Test unitari e di integrazione (`go test -race ./...`), compresi concorrenza (40 trasferimenti paralleli), assenza di goroutine residue, ricevente fermo, mittente scaduto e keep-alive: verificati.
+- Script end-to-end locale (`scripts/e2e.sh`: file e stdin, download con `wget`, mittente e ricevente che cadono a metà, mittente che cade in attesa del ricevente, trasferimenti paralleli, con e senza auth, nome con spazi): verificato.
 - Immagine Docker e configurazione compose (`docker compose config`, avvio di `app` e risposta a `GET /` dalla rete interna): verificati.
-- Percorso completo attraverso nginx (stack compose, porta 443, certificato di test): `scripts/e2e.sh` esterno con 256 MiB, RS-1 e RS-2, sha256 identici: verificato. Redirect da 80 e `GET /` via HTTPS: verificati. Il certificato di test non è stato verificato con una CA pubblica.
-- Auth attraverso nginx: non verificata (la sezione auth dell'e2e gira solo sul server locale).
+- Percorso completo attraverso nginx (stack compose, porta 443, certificato di test): `scripts/e2e.sh` esterno con 256 MiB, auth (`BASHT_E2E_AUTH`), 20 trasferimenti paralleli, `wget`, caduta di mittente e ricevente (anche del mittente in attesa), sha256 identici: verificato. Redirect da 80 e `GET /` via HTTPS: verificati. Il certificato di test non è stato verificato con una CA pubblica.
+- Auth attraverso nginx (senza credenziali e con credenziali errate: `401`; con credenziali corrette: trasferimento identico; `GET` dello slug senza credenziali: `410` dopo l'uso): verificata dall'e2e esterno con `BASHT_E2E_AUTH`.
+- Healthcheck dell'immagine e avvio ordinato di nginx dopo `app`: verificati.
 
 ## Sviluppo
 
@@ -120,4 +130,6 @@ go test -race ./...
 bash scripts/e2e.sh
 # contro uno stack già avviato (BASHT_PUBLIC_URL uguale a BASHT_E2E_BASE):
 BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_MB=256 bash scripts/e2e.sh
+# stack con Basic auth: ogni PUT usa le credenziali e si verificano i 401
+BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_AUTH=utente:password BASHT_E2E_PARALLEL=20 bash scripts/e2e.sh
 ```

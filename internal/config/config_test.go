@@ -79,3 +79,24 @@ func TestLoadRejectsBadNumbers(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadPublicURL(t *testing.T) {
+	ok := []string{"https://bashtransfer.mydomain.it", "https://host.it/", "http://127.0.0.1:8080", "https://host.it/prefisso"}
+	for _, v := range ok {
+		if _, err := Load(env(map[string]string{"BASHT_PUBLIC_URL": v})); err != nil {
+			t.Errorf("BASHT_PUBLIC_URL=%q: %v", v, err)
+		}
+	}
+	bad := []string{"bashtransfer.mydomain.it", "ftp://host.it", "https://", "https://host.it?x=1", "https://host.it/#f",
+		"https://u:p@host.it", `https://host.it/"x`, "https://host.it/$(id)", "https://host.it/`id`", "https://host.it/a b"}
+	for _, v := range bad {
+		_, err := Load(env(map[string]string{"BASHT_PUBLIC_URL": v}))
+		if err == nil {
+			t.Errorf("BASHT_PUBLIC_URL=%q accettata, attesa rifiutata", v)
+			continue
+		}
+		if !strings.Contains(err.Error(), "BASHT_PUBLIC_URL") {
+			t.Errorf("errore senza nome della variabile: %v", err)
+		}
+	}
+}

@@ -6,12 +6,17 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -546,5 +551,633 @@ func TestDownloadHeaders(t *testing.T) {
 	u2.finish(t)
 	if got := dl2.Header.Get("Content-Length"); got != "" {
 		t.Errorf("Content-Length %q con lunghezza sconosciuta, atteso assente", got)
+	}
+}
+
+// TestStalledReceiverReleasesSession: un ricevente connesso che non legge mai non deve bloccare
+// per sempre mittente e sessione. Il timeout di scrittura (IdleTimeout) interrompe il relay.
+func TestStalledReceiverReleasesSession(t *testing.T) {
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 200 * time.Millisecond}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	defer pw.CloseWithError(io.ErrClosedPipe)
+	go func() {
+		block := make([]byte, 64<<10)
+		for {
+			if _, err := pw.Write(block); err != nil {
+				return
+			}
+		}
+	}()
+	u := openUpload(t, ctx, srv.URL+"/big.bin", pr)
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+	fmt.Fprintf(conn, "GET /%s HTTP/1.1\r\nHost: x\r\n\r\n", u.slug)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for reg.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d con ricevente fermo, attese 0", reg.Len())
+	}
+}
+
+// TestUploadExpiredClosesSender: senza ricevente, allo scadere dell'attesa il mittente è
+// interrotto (nessuna risposta completa) e lo slug risponde 410.
+func TestUploadExpiredClosesSender(t *testing.T) {
+	srv, reg := newTestServerWait(t, 100*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	u := openUpload(t, ctx, srv.URL+"/w.bin", pr)
+
+	within(t, 5*time.Second, "chiusura mittente scaduto", func() error {
+		_, err := io.ReadAll(u.br)
+		return err
+	})
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d dopo scadenza, attese 0", reg.Len())
+	}
+	resp := get(t, ctx, srv.URL+"/"+u.slug)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("slug scaduto: stato %d, atteso 410", resp.StatusCode)
+	}
+}
+
+// TestCommandLineHasNoShellExpansion: il nome nei comandi non contiene espansioni di shell
+// ($, backtick, !) né virgolette: l'utente incolla la riga in una shell.
+func TestCommandLineHasNoShellExpansion(t *testing.T) {
+	srv, _ := newTestServerWait(t, 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	u := openUpload(t, ctx, srv.URL+"/"+"x$(touch%20PWNED)%60id%60%21%22.zip", pr)
+	for _, line := range []string{u.curlLine, u.wgetLine} {
+		name := line[strings.Index(line, `"`)+1:]
+		name = name[:strings.Index(name, `"`)]
+		if strings.ContainsAny(name, "$`!\\") {
+			t.Errorf("nome non sicuro nella riga %q", line)
+		}
+	}
+}
+
+// TestDownloadHeadersNonASCII: nome non ASCII codificato con filename* (RFC 6266).
+func TestDownloadHeadersNonASCII(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	u := openUpload(t, ctx, srv.URL+"/citt%C3%A0.zip", strings.NewReader("x"))
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	_, _ = io.Copy(io.Discard, dl.Body)
+	dl.Body.Close()
+	u.finish(t)
+	cd := dl.Header.Get("Content-Disposition")
+	_, params, err := mime.ParseMediaType(cd)
+	if err != nil || params["filename"] != "città.zip" {
+		t.Fatalf("Content-Disposition %q: filename %q err %v", cd, params["filename"], err)
+	}
+	if dl.Header.Get("Cache-Control") != "no-store" || dl.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("header di sicurezza mancanti: %v", dl.Header)
+	}
+}
+
+// TestConcurrentTransfers: molti trasferimenti simultanei, di dimensioni e modalità diverse
+// (lunghezza nota e chunked), ciascuno verificato con sha256. Sotto -race rileva data race
+// nel registry e nel passaggio mittente-ricevente.
+func TestConcurrentTransfers(t *testing.T) {
+	reg := relay.NewRegistry(500, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 10 * time.Second}))
+	t.Cleanup(srv.Close)
+
+	const workers = 40
+	var wg sync.WaitGroup
+	errc := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errc <- func() error {
+				data := make([]byte, (i+1)*37_001)
+				if _, err := rand.Read(data); err != nil {
+					return err
+				}
+				want := sha256.Sum256(data)
+				var body io.Reader = bytes.NewReader(data)
+				if i%2 == 1 {
+					body = io.NopCloser(bytes.NewReader(data)) // lunghezza ignota: chunked
+				}
+				req, err := http.NewRequest(http.MethodPut, srv.URL+"/f.bin", body)
+				if err != nil {
+					return err
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					return err
+				}
+				defer resp.Body.Close()
+				br := bufio.NewReader(resp.Body)
+				line, err := br.ReadString('\n')
+				if err != nil {
+					return err
+				}
+				dl, err := http.Get(srv.URL + "/" + slugOf(line))
+				if err != nil {
+					return err
+				}
+				defer dl.Body.Close()
+				h := sha256.New()
+				n, err := io.Copy(h, dl.Body)
+				if err != nil {
+					return err
+				}
+				if n != int64(len(data)) || !bytes.Equal(h.Sum(nil), want[:]) {
+					return fmt.Errorf("worker %d: %d byte su %d, sha256 diverso", i, n, len(data))
+				}
+				_, err = io.Copy(io.Discard, br)
+				return err
+			}()
+		}(i)
+	}
+	wg.Wait()
+	close(errc)
+	for err := range errc {
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for reg.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+	}
+}
+
+// TestKeepAliveAfterDownload: dopo un download con IdleTimeout la stessa connessione serve
+// un'altra richiesta (il deadline di scrittura non deve restare impostato).
+func TestKeepAliveAfterDownload(t *testing.T) {
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 300 * time.Millisecond}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &http.Client{Transport: &http.Transport{MaxConnsPerHost: 1}}
+	defer client.CloseIdleConnections()
+	u := openUpload(t, ctx, srv.URL+"/k.bin", strings.NewReader("contenuto"))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/"+u.slug, nil)
+	dl, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, dl.Body); err != nil {
+		t.Fatal(err)
+	}
+	dl.Body.Close()
+	u.finish(t)
+
+	time.Sleep(600 * time.Millisecond) // oltre IdleTimeout: un deadline residuo sarebbe scaduto
+	req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/", nil)
+	resp, err := client.Do(req2)
+	if err != nil {
+		t.Fatalf("seconda richiesta sulla stessa connessione: %v", err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.ReadAll(resp.Body); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("seconda richiesta: stato %d err %v", resp.StatusCode, err)
+	}
+}
+
+// TestTransferLogHasNoSlug: il log dell'esito non contiene slug né nome del file.
+func TestTransferLogHasNoSlug(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Logger: logger}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	u := openUpload(t, ctx, srv.URL+"/segreto.bin", strings.NewReader("abc"))
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	_, _ = io.Copy(io.Discard, dl.Body)
+	dl.Body.Close()
+	u.finish(t)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "outcome=ok") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "outcome=ok") || !strings.Contains(out, "bytes=3") {
+		t.Fatalf("log senza esito: %q", out)
+	}
+	if strings.Contains(out, u.slug) || strings.Contains(out, "segreto") {
+		t.Fatalf("il log espone slug o nome: %q", out)
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestRejectedUploadDoesNotHoldConnection: dopo un 401 con body dichiarato e mai inviato,
+// il server chiude la connessione entro drainTimeout invece di aspettare il body all'infinito.
+func TestRejectedUploadDoesNotHoldConnection(t *testing.T) {
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Authorize: BasicAuth("u", "p")}))
+	t.Cleanup(srv.Close)
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "PUT /x HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n")
+	_ = conn.SetReadDeadline(time.Now().Add(drainTimeout + 3*time.Second))
+	n, err := io.Copy(io.Discard, conn)
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("connessione ancora aperta dopo %d byte di risposta", n)
+	}
+}
+
+// TestNoGoroutineLeak: trasferimenti riusciti, scaduti, con ricevente caduto e con mittente
+// caduto non lasciano goroutine né sessioni. Il numero di goroutine torna al valore iniziale.
+func TestNoGoroutineLeak(t *testing.T) {
+	reg := relay.NewRegistry(1000, 80*time.Millisecond)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 300 * time.Millisecond}))
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	t.Cleanup(srv.Close)
+
+	settle := func() int {
+		var n int
+		for i := 0; i < 100; i++ {
+			time.Sleep(50 * time.Millisecond)
+			n = runtime.NumGoroutine()
+			if i > 2 && n == runtime.NumGoroutine() {
+				break
+			}
+		}
+		return n
+	}
+	baseline := settle()
+
+	for i := 0; i < 30; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		pr, pw := io.Pipe()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/l.bin", pr)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		br := bufio.NewReader(resp.Body)
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		slug := slugOf(line)
+		switch i % 3 {
+		case 0: // riuscito
+			go func() { _, _ = pw.Write([]byte("dati")); _ = pw.Close() }()
+			dl, err := client.Get(srv.URL + "/" + slug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, dl.Body)
+			dl.Body.Close()
+		case 1: // scade senza ricevente
+			time.Sleep(150 * time.Millisecond)
+		case 2: // ricevente cade a metà
+			go func() {
+				block := make([]byte, 64<<10)
+				for {
+					if _, err := pw.Write(block); err != nil {
+						return
+					}
+				}
+			}()
+			rctx, rcancel := context.WithCancel(ctx)
+			rreq, _ := http.NewRequestWithContext(rctx, http.MethodGet, srv.URL+"/"+slug, nil)
+			dl, err := client.Do(rreq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.CopyN(io.Discard, dl.Body, 128<<10)
+			rcancel()
+			dl.Body.Close()
+		}
+		cancel()
+		pw.CloseWithError(io.ErrClosedPipe)
+		resp.Body.Close()
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for reg.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+	}
+	client.CloseIdleConnections()
+	after := settle()
+	if after > baseline+3 {
+		buf := make([]byte, 1<<16)
+		buf = buf[:runtime.Stack(buf, true)]
+		t.Fatalf("goroutine: %d prima, %d dopo\n%s", baseline, after, buf)
+	}
+}
+
+// TestUnsafeHostRejected: senza PublicURL la base dei comandi viene da Host; un Host con
+// caratteri che la shell interpreta tra virgolette doppie ($, !, spazi) riceve 400 e nessuno slug.
+func TestUnsafeHostRejected(t *testing.T) {
+	srv, reg := newTestServer(t)
+	for _, host := range []string{"x$(id)", "x!(id)"} {
+		for _, line := range []string{"PUT /f.txt", "GET /"} {
+			conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(conn, "%s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", line, host)
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatalf("%s Host %q: %v", line, host, err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			conn.Close()
+			if resp.StatusCode != http.StatusBadRequest || strings.Contains(string(body), host) {
+				t.Fatalf("%s Host %q: stato %d body %q, atteso 400 senza Host", line, host, resp.StatusCode, body)
+			}
+		}
+	}
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d dopo Host non valido, attese 0", reg.Len())
+	}
+}
+
+// TestPublicURLIgnoresHost: con PublicURL impostata Host non entra nei comandi, anche se non valido.
+func TestPublicURLIgnoresHost(t *testing.T) {
+	reg := relay.NewRegistry(100, 200*time.Millisecond)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{PublicURL: "https://pub.example/"}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/f.bin", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = "x$(id)"
+	u := openUploadRequest(t, ctx, req)
+	want := `"https://pub.example/` + u.slug + `"`
+	if !strings.HasSuffix(strings.TrimSpace(u.curlLine), want) || strings.Contains(u.curlLine, "$") {
+		t.Fatalf("riga curl %q, attesa base pubblica %s", u.curlLine, want)
+	}
+}
+
+// TestExpiredLogsExpired: lo scadere dell'attesa è registrato come scadenza, non come mittente caduto.
+func TestExpiredLogsExpired(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	reg := relay.NewRegistry(100, 100*time.Millisecond)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Logger: logger}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	u := openUpload(t, ctx, srv.URL+"/w.bin", pr)
+	within(t, 5*time.Second, "chiusura mittente scaduto", func() error {
+		_, err := io.ReadAll(u.br)
+		return err
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "outcome=expired") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "outcome=expired") || !strings.Contains(out, relay.ErrExpired.Error()) ||
+		strings.Contains(out, relay.ErrSenderGone.Error()) {
+		t.Fatalf("log della scadenza: %q", out)
+	}
+}
+
+// TestUploadCapacity503: oltre BASHT_MAX_SESSIONS il PUT riceve 503 senza comandi; liberata la
+// sessione, un nuovo upload riesce.
+func TestUploadCapacity503(t *testing.T) {
+	reg := relay.NewRegistry(1, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	u := openUpload(t, ctx, srv.URL+"/a.bin", strings.NewReader("abc"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/b.bin", strings.NewReader("def"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := within(t, 5*time.Second, "PUT oltre capacità", func() *http.Response {
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		return r
+	})
+	if resp == nil {
+		t.FailNow()
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "curl -o") {
+		t.Fatalf("PUT oltre capacità: stato %d body %q, atteso 503", resp.StatusCode, body)
+	}
+
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	_, _ = io.Copy(io.Discard, dl.Body)
+	dl.Body.Close()
+	u.finish(t)
+	u2 := openUpload(t, ctx, srv.URL+"/c.bin", strings.NewReader("ghi"))
+	dl2 := get(t, ctx, srv.URL+"/"+u2.slug)
+	got, _ := io.ReadAll(dl2.Body)
+	dl2.Body.Close()
+	u2.finish(t)
+	if string(got) != "ghi" {
+		t.Fatalf("upload dopo capacità liberata: %q", got)
+	}
+}
+
+// TestEmptyUpload: un file vuoto (Content-Length 0) arriva come risposta 200 vuota, non come errore.
+func TestEmptyUpload(t *testing.T) {
+	srv, reg := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/empty.txt", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = 0
+	u := openUploadRequest(t, ctx, req)
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	got, err := io.ReadAll(dl.Body)
+	dl.Body.Close()
+	if err != nil || dl.StatusCode != http.StatusOK || len(got) != 0 || dl.ContentLength != 0 {
+		t.Fatalf("download vuoto: stato %d len %d CL %d err %v", dl.StatusCode, len(got), dl.ContentLength, err)
+	}
+	u.finish(t)
+	if reg.Len() != 0 {
+		t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+	}
+}
+
+// newTestServerConn avvia il server con ConnContext, come main: serve al rilevamento del
+// mittente caduto durante l'attesa. L'attesa massima è 10 s: se il rilevamento non funziona,
+// la scadenza chiude comunque gli handler e srv.Close non resta bloccato.
+func newTestServerConn(t *testing.T, logger *slog.Logger) (*httptest.Server, *relay.Registry) {
+	t.Helper()
+	reg := relay.NewRegistry(100, 10*time.Second)
+	srv := httptest.NewUnstartedServer(New(reg, relay.NewCopier(64<<10), Options{Logger: logger}))
+	srv.Config.ConnContext = ConnContext
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, reg
+}
+
+// openRawUpload invia un PUT con Content-Length 100 e 10 byte di body, e restituisce lo slug.
+func openRawUpload(t *testing.T, addr string) (net.Conn, string) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(conn, "PUT /f.bin HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n0123456789")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatalf("riga curl: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return conn, slugOf(line)
+}
+
+// TestWaitingSenderGoneFreesSlug: un mittente che chiude mentre attende (body non letto) viene
+// rilevato entro pochi secondi: la sessione si libera e lo slug risponde 410. Un mittente ancora
+// connesso resta in attesa.
+func TestWaitingSenderGoneFreesSlug(t *testing.T) {
+	if !peerCheckSupported {
+		t.Skip("rilevamento disponibile solo su Linux")
+	}
+	var buf syncBuffer
+	srv, reg := newTestServerConn(t, slog.New(slog.NewTextHandler(&buf, nil)))
+	addr := srv.Listener.Addr().String()
+
+	alive, _ := openRawUpload(t, addr)
+	defer alive.Close()
+	gone, goneSlug := openRawUpload(t, addr)
+	gone.Close()
+
+	deadline := time.Now().Add(3*peerCheckInterval + 2*time.Second)
+	for reg.Len() != 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reg.Len() != 1 {
+		t.Fatalf("sessioni vive %d, attesa 1 (solo il mittente connesso)", reg.Len())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resp := get(t, ctx, srv.URL+"/"+goneSlug)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusGone {
+		t.Fatalf("slug del mittente caduto: stato %d, atteso 410", resp.StatusCode)
+	}
+	if out := buf.String(); !strings.Contains(out, "outcome=sender_gone") {
+		t.Fatalf("log senza sender_gone: %q", out)
+	}
+}
+
+// TestOkLogIgnoresReceiverCloseAfterLastByte: il ricevente chiude dopo aver letto tutti i byte,
+// prima che il mittente finisca; l'esito resta ok, senza errore nel log.
+func TestOkLogIgnoresReceiverCloseAfterLastByte(t *testing.T) {
+	var buf syncBuffer
+	srv, _ := newTestServerConn(t, slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	u := openUpload(t, ctx, srv.URL+"/f.bin", pr)
+
+	dctx, dcancel := context.WithCancel(ctx)
+	dl := get(t, dctx, srv.URL+"/"+u.slug)
+	data := randomBytes(t, 4096)
+	go func() { _, _ = pw.Write(data) }()
+	got := make([]byte, len(data))
+	if _, err := io.ReadFull(dl.Body, got); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("download: %v", err)
+	}
+	dcancel()
+	dl.Body.Close()
+	// Il server registra la chiusura del ricevente prima che il mittente concluda.
+	time.Sleep(300 * time.Millisecond)
+	pw.Close()
+	u.finish(t)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), "outcome=") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "outcome=ok") || strings.Contains(out, "err=") {
+		t.Fatalf("log: %q, atteso outcome=ok senza err", out)
+	}
+}
+
+// TestUploadNameEncodedSlash: un %2F nel nome non rende il path multi-segmento; resta l'ultima parte.
+func TestUploadNameEncodedSlash(t *testing.T) {
+	srv, _ := newTestServerWait(t, 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	u := openUpload(t, ctx, srv.URL+"/a%2Fb.txt", pr)
+	if !strings.HasPrefix(u.curlLine, `curl -o "b.txt" `) {
+		t.Fatalf("riga curl %q, atteso nome b.txt", u.curlLine)
+	}
+	resp := get(t, ctx, srv.URL+"/AbC%2F12345")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET con %%2F: stato %d, atteso 404", resp.StatusCode)
 	}
 }

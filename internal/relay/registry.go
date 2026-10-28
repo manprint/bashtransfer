@@ -20,12 +20,18 @@ var (
 	ErrReceiverGone   = errors.New("receiver gone")
 	ErrLengthMismatch = errors.New("length mismatch")
 	ErrIdle           = errors.New("sender idle")
+	ErrExpired        = errors.New("wait timeout expired")
 )
 
 const (
 	slugAttempts = 5
 	// tombstoneTTL: per quanto uno slug terminale resta 410 (D17).
 	tombstoneTTL = 24 * time.Hour
+	// maxTombstones limita la memoria delle tombstone (circa 100 byte ciascuna): oltre il limite
+	// la più vecchia viene scartata prima della scadenza e il suo slug risponde 404 invece di 410.
+	// Senza limite, un client anonimo che cicla PUT e GET farebbe crescere la memoria con il ritmo
+	// delle richieste per 24 ore.
+	maxTombstones = 100000
 )
 
 // Receiver è il destinatario del relay: riceve i byte e fa flush per blocco.
@@ -83,6 +89,7 @@ type Registry struct {
 	sessions    map[string]*Session
 	gone        map[string]struct{}
 	goneQ       []tombstone
+	maxGone     int
 	maxSessions int
 	waitTimeout time.Duration
 	gen         func() (string, error)
@@ -98,6 +105,7 @@ func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry {
 	return &Registry{
 		sessions:    make(map[string]*Session),
 		gone:        make(map[string]struct{}),
+		maxGone:     maxTombstones,
 		maxSessions: maxSessions,
 		waitTimeout: waitTimeout,
 		gen:         slug.New,
@@ -189,10 +197,20 @@ func (r *Registry) expire(s *Session) {
 	close(s.expired)
 }
 
-// bury registra lo slug come terminale per tombstoneTTL (D17).
+// bury registra lo slug come terminale per tombstoneTTL (D17), entro maxGone tombstone.
 func (r *Registry) bury(id string) {
 	r.gone[id] = struct{}{}
 	r.goneQ = append(r.goneQ, tombstone{slug: id, at: time.Now()})
+	for len(r.goneQ) > r.maxGone {
+		r.dropOldest()
+	}
+}
+
+// dropOldest rimuove la tombstone più vecchia e libera il riferimento alla stringa nell'array.
+func (r *Registry) dropOldest() {
+	delete(r.gone, r.goneQ[0].slug)
+	r.goneQ[0] = tombstone{}
+	r.goneQ = r.goneQ[1:]
 }
 
 func (r *Registry) isGone(id string) bool {
@@ -203,7 +221,6 @@ func (r *Registry) isGone(id string) bool {
 // prune rimuove le tombstone scadute dalla testa della coda (FIFO per data).
 func (r *Registry) prune(now time.Time) {
 	for len(r.goneQ) > 0 && now.Sub(r.goneQ[0].at) >= tombstoneTTL {
-		delete(r.gone, r.goneQ[0].slug)
-		r.goneQ = r.goneQ[1:]
+		r.dropOldest()
 	}
 }

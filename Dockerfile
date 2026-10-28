@@ -8,4 +8,6 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 COPY --from=builder /out/bashtransfer /bashtransfer
 USER nonroot:nonroot
 EXPOSE 8080
+# Runtime senza shell né curl: il binario si controlla da solo (GET / su BASHT_LISTEN, solo loopback).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD ["/bashtransfer", "-healthcheck"]
 ENTRYPOINT ["/bashtransfer"]

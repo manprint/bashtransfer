@@ -3,8 +3,12 @@ package relay
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"io"
+	"net"
+	"os"
 	"testing"
+	"time"
 )
 
 type countRcv struct {
@@ -70,5 +74,85 @@ func TestCopyAllocsBounded(t *testing.T) {
 	})
 	if allocs > 20 {
 		t.Fatalf("allocazioni per copia da 16 MiB: %.0f, attese <= 20", allocs)
+	}
+}
+
+type fakeConnReader struct {
+	data     []byte
+	err      error
+	deadline time.Time
+}
+
+func (f *fakeConnReader) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+func (f *fakeConnReader) setDeadline(t time.Time) error { f.deadline = t; return nil }
+
+// TestIdleReaderSetsDeadlineBeforeEachRead: la scadenza è rinnovata a ogni Read.
+func TestIdleReaderSetsDeadlineBeforeEachRead(t *testing.T) {
+	f := &fakeConnReader{data: []byte("abc"), err: io.EOF}
+	r := NewIdleReader(f, time.Minute, f.setDeadline)
+	before := time.Now()
+	buf := make([]byte, 2)
+	if _, err := r.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if d := f.deadline.Sub(before); d < 59*time.Second || d > 61*time.Second {
+		t.Fatalf("scadenza a %s, attesa ~1m", d)
+	}
+}
+
+// TestIdleReaderMapsTimeoutToErrIdle: timeout di rete e os.ErrDeadlineExceeded diventano ErrIdle;
+// EOF e altri errori passano invariati; un errore di setDeadline è propagato senza leggere.
+func TestIdleReaderMapsTimeoutToErrIdle(t *testing.T) {
+	timeout := &net.OpError{Op: "read", Err: os.ErrDeadlineExceeded}
+	for _, e := range []error{os.ErrDeadlineExceeded, timeout} {
+		f := &fakeConnReader{err: e}
+		if _, err := NewIdleReader(f, time.Second, f.setDeadline).Read(make([]byte, 1)); !errors.Is(err, ErrIdle) {
+			t.Errorf("errore %v: ottenuto %v, atteso ErrIdle", e, err)
+		}
+	}
+	f := &fakeConnReader{err: io.EOF}
+	if _, err := NewIdleReader(f, time.Second, f.setDeadline).Read(make([]byte, 1)); err != io.EOF {
+		t.Errorf("EOF: ottenuto %v", err)
+	}
+	other := errors.New("reset")
+	f = &fakeConnReader{err: other}
+	if _, err := NewIdleReader(f, time.Second, f.setDeadline).Read(make([]byte, 1)); err != other {
+		t.Errorf("errore generico: ottenuto %v", err)
+	}
+	setErr := errors.New("no deadline")
+	f = &fakeConnReader{data: []byte("x")}
+	if n, err := NewIdleReader(f, time.Second, func(time.Time) error { return setErr }).Read(make([]byte, 1)); n != 0 || err != setErr {
+		t.Errorf("setDeadline in errore: n=%d err=%v", n, err)
+	}
+}
+
+type failRcv struct{ after int }
+
+func (f *failRcv) Write(p []byte) (int, error) {
+	if f.after <= 0 {
+		return 0, errors.New("ricevente chiuso")
+	}
+	f.after--
+	return len(p), nil
+}
+func (f *failRcv) Flush() {}
+
+// TestCopyStopsOnReceiverError: un errore di scrittura interrompe la copia e viene restituito.
+func TestCopyStopsOnReceiverError(t *testing.T) {
+	src := make([]byte, 1<<20)
+	n, err := NewCopier(64<<10).Copy(&failRcv{after: 2}, plainReader{bytes.NewReader(src)})
+	if err == nil {
+		t.Fatal("atteso errore dal ricevente")
+	}
+	if n != 2*(64<<10) {
+		t.Fatalf("copiati %d byte, attesi %d", n, 2*(64<<10))
 	}
 }

@@ -18,11 +18,26 @@ services:
     networks:
       - internal
     restart: unless-stopped
+    # Il binario è statico e non scrive su disco: filesystem in sola lettura, nessuna capability.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # I trasferimenti attivi hanno al più 10 s di grazia (shutdownTimeout): stop_grace_period
+    # deve restare sopra, altrimenti Docker invia SIGKILL durante l'arresto ordinato.
+    stop_grace_period: 15s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   nginx:
     image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
@@ -32,6 +47,9 @@ services:
     networks:
       - internal
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *logging
 
 networks:
   internal: {}

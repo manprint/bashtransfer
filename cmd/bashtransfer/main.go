@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +23,15 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
+	healthcheck := flag.Bool("healthcheck", false, "controlla il server locale (BASHT_LISTEN) ed esce 0 se risponde")
+	flag.Parse()
+	if *healthcheck {
+		if err := checkHealth(os.Getenv("BASHT_LISTEN")); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -35,7 +46,7 @@ func run() error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	reg := relay.NewRegistry(cfg.MaxSessions, cfg.WaitTimeout)
-	opts := server.Options{PublicURL: cfg.PublicURL, IdleTimeout: cfg.IdleTimeout}
+	opts := server.Options{PublicURL: cfg.PublicURL, IdleTimeout: cfg.IdleTimeout, Logger: logger}
 	if cfg.AuthUser != "" {
 		opts.Authorize = server.BasicAuth(cfg.AuthUser, cfg.AuthPassword)
 	}
@@ -46,15 +57,25 @@ func run() error {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		// Serve all'handler per rilevare un mittente caduto mentre attende il ricevente.
+		ConnContext: server.ConnContext,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Listen prima del log: "in ascolto" compare solo quando la porta accetta connessioni, e un
+	// indirizzo occupato fa fallire run subito.
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		return err
+	}
 	errc := make(chan error, 1)
 	go func() {
-		logger.Info("in ascolto", "addr", cfg.Listen)
-		errc <- srv.ListenAndServe()
+		logger.Info("in ascolto", "addr", ln.Addr().String())
+		errc <- srv.Serve(ln)
 	}()
 
 	select {
@@ -65,6 +86,9 @@ func run() error {
 		return err
 	case <-ctx.Done():
 	}
+	// Dal secondo segnale torna il comportamento predefinito: un altro Ctrl-C termina subito il
+	// processo invece di attendere shutdownTimeout.
+	stop()
 
 	logger.Info("arresto in corso")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -72,6 +96,40 @@ func run() error {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("shutdown forzato", "err", err)
 		_ = srv.Close()
+	}
+	return nil
+}
+
+// healthURL ricava l'URL locale dall'indirizzo di ascolto: un host vuoto o non specificato
+// diventa il loopback.
+func healthURL(listen string) (string, error) {
+	if listen == "" {
+		listen = ":8080"
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return "", fmt.Errorf("BASHT_LISTEN non valida: %q: %w", listen, err)
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/", nil
+}
+
+// checkHealth esegue GET / sul server locale. Nessun proxy e nessuna rete esterna.
+func checkHealth(listen string) error {
+	u, err := healthURL(listen)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("stato %d", resp.StatusCode)
 	}
 	return nil
 }

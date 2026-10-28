@@ -3,7 +3,9 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,6 +37,12 @@ func Load(getenv func(string) string) (Config, error) {
 		IdleTimeout: 2 * time.Minute,
 		MaxSessions: 1000,
 		BufSize:     262144,
+	}
+
+	if cfg.PublicURL != "" {
+		if err := validatePublicURL(cfg.PublicURL); err != nil {
+			return Config{}, fmt.Errorf("BASHT_PUBLIC_URL non valida: %q: %w", cfg.PublicURL, err)
+		}
 	}
 
 	cfg.AuthUser = getenv("BASHT_AUTH_USER")
@@ -76,6 +84,28 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validatePublicURL richiede una base http(s) senza query né frammento. L'URL finisce tra
+// virgolette doppie nei comandi stampati: caratteri che la shell interpreta sono rifiutati.
+func validatePublicURL(v string) error {
+	u, err := url.Parse(v)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("schema http o https richiesto")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("host mancante")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("query, frammento e credenziali non ammessi")
+	}
+	if strings.ContainsAny(v, "\"`$\\ !\t\r\n") {
+		return fmt.Errorf("caratteri non ammessi")
+	}
+	return nil
 }
 
 func withDefault(v, def string) string {
