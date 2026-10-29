@@ -159,7 +159,16 @@ sudo sysctl -w net.ipv4.tcp_wmem="4096 16384 33554432" net.ipv4.tcp_rmem="4096 1
 sudo sysctl -w net.ipv4.tcp_congestion_control=bbr   # richiede il modulo tcp_bbr
 ```
 
-Non misurati: il percorso con nginx e TLS sotto netem (TLS costa CPU per connessione, non finestra), reti reali. Un client in Wi-Fi è spesso limitato dalla radio prima che da TCP.
+Attraverso lo stack compose (nginx stream con TLS, Basic auth), stessa emulazione, client con il profilo `host`:
+
+| Gamba | nginx | 20 ms | 20 ms, 0.1% perdita | 40 ms | 40 ms, 0.1% perdita |
+|---|---|---|---|---|---|
+| download | stock | 116 | 30 | 67 | 26 |
+| download | compose (`tuned`) | 117 | 117 | 114 | 114 |
+| upload | stock | 119 | 110 | 66 | 62 |
+| upload | compose (`tuned`) | 118 | 109 | 66 | 62 |
+
+Il TLS di nginx non è il limite: senza netem, con mittente e ricevente sulla rete interna, il relay attraverso nginx porta circa 950 MB/s (16 CPU condivise da tutti i container). Non misurato su reti reali. Un client in Wi-Fi è spesso limitato dalla radio prima che da TCP.
 
 Comando usato: `BASHT_NB_IMAGE=<immagine locale con sh, curl, tc, ethtool, pkill> bash scripts/netbench.sh` (serve `sudo modprobe sch_netem` sull'host).
 
@@ -172,7 +181,7 @@ Comando usato: `BASHT_NB_IMAGE=<immagine locale con sh, curl, tc, ethtool, pkill
 - Auth attraverso nginx (senza credenziali e con credenziali errate: `401`; con credenziali corrette: trasferimento identico; `GET` dello slug senza credenziali: `410` dopo l'uso): verificata dall'e2e esterno con `BASHT_E2E_AUTH`.
 - Healthcheck dell'immagine e avvio ordinato di nginx dopo `app`: verificati.
 - Riga `aria2c`, rifiuto della ripresa (`curl -C -`: `400`, slug ancora scaricabile), interruzione immediata del mittente quando il ricevente cade, chiusura dei mittenti in attesa all'arresto: verificati da test Go e `scripts/e2e.sh` locale. Il download con `aria2c` è nell'e2e ma non è stato eseguito (`aria2c` non installato in questo ambiente).
-- Effetto di algoritmo di congestione e buffer TCP: misurato con `scripts/netbench.sh` (vedi "Prestazioni di rete"); non attraverso nginx e TLS.
+- Effetto di algoritmo di congestione e buffer TCP: misurato con `scripts/netbench.sh` e attraverso lo stack compose con netem (vedi "Prestazioni di rete"). Stack compose con i sysctl di nginx: `scripts/e2e.sh` esterno con 256 MiB, auth e 20 trasferimenti paralleli verificato.
 
 ## Sviluppo
 
