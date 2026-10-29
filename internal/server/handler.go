@@ -2,10 +2,12 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -30,7 +32,8 @@ type Options struct {
 	// IdleTimeout, se > 0, interrompe il relay se il mittente è fermo così a lungo (D15)
 	// o se una singola scrittura verso il ricevente non termina entro questo tempo.
 	IdleTimeout time.Duration
-	// Logger, se non nil, riceve l'esito di ogni trasferimento. Non vi compaiono slug né nomi.
+	// Logger, se non nil, riceve gli eventi del relay (README, "Log"). Non vi compaiono mai slug,
+	// nomi di file, path o credenziali: una sessione è identificata dal suo ID casuale.
 	Logger *slog.Logger
 }
 
@@ -42,7 +45,30 @@ type handler struct {
 
 // New restituisce il gestore HTTP del relay.
 func New(reg *relay.Registry, copier *relay.Copier, opts Options) http.Handler {
+	if opts.Logger == nil {
+		opts.Logger = slog.New(slog.DiscardHandler)
+	}
 	return &handler{reg: reg, copier: copier, opts: opts}
+}
+
+// Motivi dei rifiuti registrati nei log (campo reason di request_rejected).
+const (
+	reasonUnauthorized     = "unauthorized"
+	reasonInvalidHost      = "invalid_host"
+	reasonCapacity         = "capacity"
+	reasonInternal         = "internal"
+	reasonMethod           = "method_not_allowed"
+	reasonNotFound         = "not_found"
+	reasonGone             = "gone"
+	reasonRangeUnsupported = "range_not_supported"
+)
+
+// reject registra il rifiuto di una richiesta e risponde con status e msg. Il path non compare
+// nel log: contiene slug o nome del file.
+func (h *handler) reject(w http.ResponseWriter, r *http.Request, level slog.Level, status int, reason, msg string) {
+	h.opts.Logger.LogAttrs(r.Context(), level, "request_rejected",
+		slog.String("method", r.Method), slog.Int("status", status), slog.String("reason", reason))
+	http.Error(w, msg, status)
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +76,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// un separatore (SanitizeName ne tiene poi l'ultima parte).
 	seg, ok := singleSegment(r.URL.EscapedPath())
 	if !ok {
-		http.NotFound(w, r)
+		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	}
 	switch r.Method {
@@ -64,7 +90,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.upload(w, r, seg)
 	default:
 		w.Header().Set("Allow", "GET, PUT")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		h.reject(w, r, slog.LevelDebug, http.StatusMethodNotAllowed, reasonMethod, "method not allowed")
 	}
 }
 
@@ -112,7 +138,7 @@ func (h *handler) baseURL(r *http.Request) (base string, ok bool) {
 func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 	base, ok := h.baseURL(r)
 	if !ok {
-		http.Error(w, "invalid host", http.StatusBadRequest)
+		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonInvalidHost, "invalid host")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -133,27 +159,33 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	}()
 	if h.opts.Authorize != nil && !h.opts.Authorize(r) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="bashtransfer"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		h.reject(w, r, slog.LevelWarn, http.StatusUnauthorized, reasonUnauthorized, "unauthorized")
 		return
 	}
 	base, baseOK := h.baseURL(r)
 	if !baseOK {
-		http.Error(w, "invalid host", http.StatusBadRequest)
+		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonInvalidHost, "invalid host")
 		return
 	}
 	if err := rc.EnableFullDuplex(); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.opts.Logger.Error("full_duplex_unavailable", "err", err)
+		h.reject(w, r, slog.LevelError, http.StatusInternalServerError, reasonInternal, "internal error")
 		return
 	}
 	name := SanitizeName(seg)
 	s, err := h.reg.Create(name, r.ContentLength)
 	if err != nil {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		level, reason := slog.LevelWarn, reasonCapacity
+		if !errors.Is(err, relay.ErrCapacity) {
+			level, reason = slog.LevelError, reasonInternal
+			h.opts.Logger.Error("session_create_failed", "err", err)
+		}
+		h.reject(w, r, level, http.StatusServiceUnavailable, reason, "service unavailable")
 		return
 	}
-	start := time.Now()
-	var sent int64
-	outcome := "sender_gone"
+	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_accepted",
+		slog.String("id", s.ID), slog.Int64("length", s.Length))
+	tr := transferLog{session: s}
 	defer func() {
 		if !ok {
 			s.Abort(relay.ErrSenderGone)
@@ -165,7 +197,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			// appena ha letto Content-Length byte) non è un errore del trasferimento.
 			err = nil
 		}
-		h.logTransfer(outcome, sent, time.Since(start), err)
+		tr.log(h.opts.Logger, err)
 	}()
 
 	// curl invia "Expect: 100-continue" per upload grandi. Se la risposta finale arriva prima
@@ -196,24 +228,27 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		select {
 		case rcv := <-s.Attached():
 			rr := rcv.(*responseReceiver)
+			tr.attached = time.Now()
+			h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "receiver_attached",
+				slog.String("id", s.ID), seconds("wait_s", tr.attached.Sub(s.Created)))
 			rr.start(name, s.Length)
 			body := relay.NewIdleReader(r.Body, h.opts.IdleTimeout, rc.SetReadDeadline)
 			n, err := h.copyUntilAbort(s, rr, body)
-			sent = n
+			tr.bytes = n
 			if err == nil && s.Length >= 0 && n != s.Length {
 				err = relay.ErrLengthMismatch
 			}
 			if err != nil {
-				outcome = "aborted"
+				tr.outcome = outcomeAborted
 				s.Abort(err)
 				drain = 0
 				panic(http.ErrAbortHandler)
 			}
-			outcome = "ok"
+			tr.outcome = outcomeOK
 			ok = true
 			return
 		case <-s.Expired():
-			outcome = "expired"
+			tr.outcome = outcomeExpired
 			// Prima dell'Abort differito con ErrSenderGone: il log deve dire scadenza, non mittente caduto.
 			s.Abort(relay.ErrExpired)
 			drain = 0
@@ -257,17 +292,62 @@ func commands(name, u string) string {
 		name, u, name, u, name, u)
 }
 
-func (h *handler) logTransfer(outcome string, bytes int64, d time.Duration, err error) {
-	if h.opts.Logger == nil {
-		return
+// Esiti di un trasferimento (campo outcome dell'evento transfer).
+const (
+	outcomeOK         = "ok"          // tutti i byte consegnati al ricevente
+	outcomeAborted    = "aborted"     // relay iniziato e interrotto (mittente, ricevente, inattività)
+	outcomeExpired    = "expired"     // nessun ricevente entro BASHT_WAIT_TIMEOUT (o arresto)
+	outcomeSenderGone = "sender_gone" // il mittente è caduto prima che un ricevente si agganciasse
+)
+
+// transferLog raccoglie i dati dell'evento transfer, registrato una volta per sessione alla fine
+// dell'upload.
+type transferLog struct {
+	session  *relay.Session
+	outcome  string
+	attached time.Time // zero se nessun ricevente si è agganciato
+	bytes    int64
+}
+
+// log registra l'esito: Info per ok, scadenza e mittente caduto in attesa (comportamenti normali
+// degli utenti), Warn per un relay interrotto a metà.
+func (t *transferLog) log(l *slog.Logger, err error) {
+	if t.outcome == "" {
+		t.outcome = outcomeSenderGone
 	}
-	attrs := []any{"outcome", outcome, "bytes", bytes, "duration", d.Round(time.Millisecond)}
+	now := time.Now()
+	s := t.session
+	attrs := []slog.Attr{
+		slog.String("id", s.ID),
+		slog.String("outcome", t.outcome),
+		slog.Int64("bytes", t.bytes),
+	}
+	if s.Length >= 0 {
+		attrs = append(attrs, slog.Int64("length", s.Length))
+	}
+	if t.attached.IsZero() {
+		attrs = append(attrs, seconds("wait_s", now.Sub(s.Created)))
+	} else {
+		d := now.Sub(t.attached)
+		attrs = append(attrs, seconds("wait_s", t.attached.Sub(s.Created)), seconds("transfer_s", d))
+		if d > 0 {
+			attrs = append(attrs, slog.Float64("rate_mbs", math.Round(float64(t.bytes)/d.Seconds()/1e4)/100))
+		}
+	}
+	level := slog.LevelInfo
 	if err != nil {
-		attrs = append(attrs, "err", err)
-		h.opts.Logger.Warn("trasferimento", attrs...)
-		return
+		attrs = append(attrs, slog.String("err", err.Error()))
 	}
-	h.opts.Logger.Info("trasferimento", attrs...)
+	if t.outcome == outcomeAborted {
+		level = slog.LevelWarn
+	}
+	l.LogAttrs(context.Background(), level, "transfer", attrs...)
+}
+
+// seconds rende una durata come secondi con tre decimali: leggibile in text e numerica in JSON
+// (slog scriverebbe time.Duration in nanosecondi nel JSON).
+func seconds(key string, d time.Duration) slog.Attr {
+	return slog.Float64(key, math.Round(d.Seconds()*1000)/1000)
 }
 
 // expectsContinue riporta se il client ha chiesto 100 Continue con un body non vuoto.
@@ -278,7 +358,7 @@ func expectsContinue(r *http.Request) bool {
 // download reclama lo slug e attende la fine del trasferimento; il relay lo scrive il mittente.
 func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 	if !slug.Valid(id) {
-		http.NotFound(w, r)
+		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	}
 	if !rangeFromStart(r.Header) {
@@ -289,15 +369,17 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 	s, err := h.reg.Claim(id, rcv)
 	switch {
 	case errors.Is(err, relay.ErrNotFound):
-		http.NotFound(w, r)
+		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	case errors.Is(err, relay.ErrClaimed), errors.Is(err, relay.ErrGone):
-		http.Error(w, "gone", http.StatusGone)
+		h.reject(w, r, slog.LevelInfo, http.StatusGone, reasonGone, "gone")
 		return
 	case err != nil:
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		h.opts.Logger.Error("claim_failed", "err", err)
+		h.reject(w, r, slog.LevelError, http.StatusInternalServerError, reasonInternal, "internal error")
 		return
 	}
+	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "download_claimed", slog.String("id", s.ID))
 
 	finished := s.Finished()
 	ctxDone := r.Context().Done()
@@ -377,11 +459,12 @@ func rangeFromStart(h http.Header) bool {
 func (h *handler) rejectRange(w http.ResponseWriter, r *http.Request, id string) {
 	switch err := h.reg.Peek(id); {
 	case errors.Is(err, relay.ErrNotFound):
-		http.NotFound(w, r)
+		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 	case err != nil:
-		http.Error(w, "gone", http.StatusGone)
+		h.reject(w, r, slog.LevelInfo, http.StatusGone, reasonGone, "gone")
 	default:
 		w.Header().Set("Accept-Ranges", "none")
-		http.Error(w, "range requests not supported: download from the first byte, without resume", http.StatusBadRequest)
+		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonRangeUnsupported,
+			"range requests not supported: download from the first byte, without resume")
 	}
 }

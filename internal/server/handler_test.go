@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1400,5 +1401,153 @@ func TestPeerClosedOnClosedConn(t *testing.T) {
 	conn.Close()
 	if !peerClosed(conn) {
 		t.Fatal("connessione chiusa non segnalata")
+	}
+}
+
+// jsonLines decodifica le righe JSON del log.
+func jsonLines(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if l == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("riga di log non JSON %q: %v", l, err)
+		}
+		lines = append(lines, m)
+	}
+	return lines
+}
+
+// TestTransferLogFields: a livello debug una sessione completa produce upload_accepted,
+// download_claimed, receiver_attached e transfer con lo stesso id; transfer ha byte, lunghezza,
+// tempi e velocità. Nessuna riga contiene slug, nome o path.
+func TestTransferLogFields(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Logger: logger}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	data := randomBytes(t, 1<<20)
+	u := openUpload(t, ctx, srv.URL+"/segreto.bin", bytes.NewReader(data))
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	_, _ = io.Copy(io.Discard, dl.Body)
+	dl.Body.Close()
+	u.finish(t)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), `"msg":"transfer"`) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	out := buf.String()
+	if strings.Contains(out, u.slug) || strings.Contains(out, "segreto") {
+		t.Fatalf("il log espone slug o nome: %q", out)
+	}
+	byMsg := map[string]map[string]any{}
+	for _, m := range jsonLines(t, out) {
+		byMsg[m["msg"].(string)] = m
+	}
+	tr := byMsg["transfer"]
+	if tr == nil {
+		t.Fatalf("evento transfer mancante: %q", out)
+	}
+	id, _ := tr["id"].(string)
+	if len(id) != 16 {
+		t.Fatalf("id %q, attesi 16 caratteri esadecimali", id)
+	}
+	for _, msg := range []string{"upload_accepted", "download_claimed", "receiver_attached"} {
+		if byMsg[msg] == nil || byMsg[msg]["id"] != id || byMsg[msg]["level"] != "DEBUG" {
+			t.Errorf("evento %s: %v, atteso a DEBUG con id %s", msg, byMsg[msg], id)
+		}
+	}
+	if tr["level"] != "INFO" || tr["outcome"] != "ok" || tr["bytes"] != float64(len(data)) || tr["length"] != float64(len(data)) {
+		t.Errorf("transfer: %v", tr)
+	}
+	for _, k := range []string{"wait_s", "transfer_s", "rate_mbs"} {
+		if _, ok := tr[k].(float64); !ok {
+			t.Errorf("transfer: campo %s non numerico: %v", k, tr[k])
+		}
+	}
+	if _, ok := tr["err"]; ok {
+		t.Errorf("transfer ok con err: %v", tr)
+	}
+}
+
+// TestRejectionLogs: i rifiuti sono registrati come request_rejected con stato e motivo, al
+// livello previsto, senza path né credenziali.
+func TestRejectionLogs(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Logger: logger, Authorize: BasicAuth("u", "p")}))
+	t.Cleanup(srv.Close)
+
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/segreto.bin", strings.NewReader("x"))
+	req.SetBasicAuth("u", "passwordsbagliata")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	resp, err = http.Get(srv.URL + "/ZZZZZZZZZZ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	out := buf.String()
+	if strings.Contains(out, "segreto") || strings.Contains(out, "passwordsbagliata") || strings.Contains(out, "ZZZZZZZZZZ") {
+		t.Fatalf("il log espone path o credenziali: %q", out)
+	}
+	want := []struct {
+		level, reason string
+		status        float64
+	}{{"WARN", "unauthorized", 401}, {"DEBUG", "not_found", 404}}
+	lines := jsonLines(t, out)
+	if len(lines) != len(want) {
+		t.Fatalf("righe %d, attese %d: %q", len(lines), len(want), out)
+	}
+	for i, w := range want {
+		m := lines[i]
+		if m["msg"] != "request_rejected" || m["level"] != w.level || m["reason"] != w.reason || m["status"] != w.status {
+			t.Errorf("riga %d: %v, attesi %s %s %v", i, m, w.level, w.reason, w.status)
+		}
+	}
+}
+
+// TestAbortedTransferLogsWarn: un relay interrotto a metà è registrato a WARN con l'errore; la
+// scadenza dell'attesa resta INFO.
+func TestAbortedTransferLogsWarn(t *testing.T) {
+	var buf syncBuffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Logger: logger}))
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/f.bin", pr)
+	req.ContentLength = 1 << 20
+	u := openUploadRequest(t, ctx, req)
+	dl := get(t, ctx, srv.URL+"/"+u.slug)
+	go func() { _, _ = pw.Write(make([]byte, 1000)); pw.CloseWithError(errors.New("mittente caduto")) }()
+	_, _ = io.Copy(io.Discard, dl.Body)
+	dl.Body.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(buf.String(), `"msg":"transfer"`) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	lines := jsonLines(t, buf.String())
+	if len(lines) != 1 {
+		t.Fatalf("righe %d: %q", len(lines), buf.String())
+	}
+	m := lines[0]
+	if m["level"] != "WARN" || m["outcome"] != "aborted" || m["err"] == nil || m["length"] != float64(1<<20) {
+		t.Fatalf("transfer interrotto: %v", m)
 	}
 }

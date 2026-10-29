@@ -2,6 +2,11 @@
 
 Relay di file: il mittente invia un file con `curl -T`, il server risponde subito con il comando di download, e il ricevente lo esegue. Il file passa in streaming dal mittente al ricevente e non viene mai salvato su disco.
 
+Altra documentazione:
+
+- [docs/architettura.md](docs/architettura.md): flusso di una sessione, stati, concorrenza, codici HTTP, scelte di progetto;
+- [docs/operazioni.md](docs/operazioni.md): deploy sulla VM, tuning TCP, log e monitoraggio, aggiornamenti, risoluzione dei problemi.
+
 ## Uso
 
 ### Scenario 1: file
@@ -62,6 +67,10 @@ Tutte le variabili sono opzionali. Un valore vuoto equivale a non impostarlo.
 | `BASHT_IDLE_TIMEOUT` | `2m` | Interruzione del relay se il mittente non invia byte per questo tempo, o se il ricevente non accetta una singola scrittura entro questo tempo (minimo `1s`). |
 | `BASHT_MAX_SESSIONS` | `1000` | Numero massimo di slug attivi contemporaneamente. |
 | `BASHT_BUF_SIZE` | `262144` | Dimensione del buffer di copia, tra 4096 e 4194304 byte. Il default 256 KiB è il buffer con il throughput assoluto più alto del relay in tutte e quattro le sessioni. |
+| `BASHT_LOG_FORMAT` | `text` (`json` in compose) | Formato dei log su stderr: `text` (logfmt, `chiave=valore`) o `json` (un oggetto per riga). |
+| `BASHT_LOG_LEVEL` | `info` | Livello minimo: `debug`, `info`, `warn`, `error`. `debug` aggiunge gli eventi intermedi di ogni sessione e i rifiuti `404`. |
+
+Un valore non valido ferma l'avvio con un messaggio che nomina la variabile.
 
 ## Autenticazione
 
@@ -103,7 +112,41 @@ L'immagine ha un `HEALTHCHECK` (`/bashtransfer -healthcheck`: `GET /` su `BASHT_
 
 ## Log
 
-Una riga per trasferimento su stderr: `outcome` (`ok`, `aborted`, `expired`, `sender_gone`), byte, durata ed eventuale errore. Slug e nome del file non compaiono mai nei log.
+Una riga per evento su stderr, nel formato di `BASHT_LOG_FORMAT`. Ogni riga ha `time`, `level` e `msg` (il nome dell'evento, stabile: usarlo per filtrare). **Slug, nomi di file, path e credenziali non compaiono mai**: una sessione è identificata da `id`, 16 caratteri esadecimali casuali e indipendenti dallo slug, quindi chi legge i log non può scaricare.
+
+| Evento (`msg`) | Livello | Quando | Campi |
+|---|---|---|---|
+| `server_start` | INFO | avvio | `listen`, `public_url`, `auth` (bool), `wait_timeout`, `idle_timeout`, `max_sessions`, `buf_size`, `log_level`, `go`, `gomaxprocs` |
+| `server_listening` | INFO | porta aperta | `addr` |
+| `upload_accepted` | DEBUG | sessione creata, comandi inviati | `id`, `length` (-1 se ignota) |
+| `download_claimed` | DEBUG | un ricevente ha reclamato lo slug | `id` |
+| `receiver_attached` | DEBUG | il relay inizia | `id`, `wait_s` |
+| `transfer` | INFO, WARN se `aborted` | fine di ogni sessione, una volta | `id`, `outcome`, `bytes`, `length` (se nota), `wait_s`, `transfer_s` e `rate_mbs` (se un ricevente si è agganciato), `err` (se presente) |
+| `request_rejected` | vedi sotto | richiesta rifiutata | `method`, `status`, `reason` |
+| `shutdown_start` | INFO | primo SIGTERM/SIGINT | `sessions` (vive), `grace` |
+| `shutdown_forced` | WARN | grazia scaduta | `err`, `sessions` |
+| `shutdown_done` | INFO | uscita | `forced`, `duration_s` |
+| `session_create_failed`, `claim_failed`, `full_duplex_unavailable` | ERROR | errori interni (non attesi) | `err` |
+| (messaggio di net/http) | WARN | errori del server HTTP (accept, richieste malformate) | `component=net/http` |
+
+`outcome` di `transfer`:
+
+- `ok`: tutti i byte consegnati;
+- `aborted`: relay iniziato e interrotto; `err` dice perché (`sender idle`, `receiver gone`, `length mismatch`, `relay interrupted`, errore di rete del mittente o del ricevente);
+- `expired`: nessun ricevente entro `BASHT_WAIT_TIMEOUT`, o arresto del server;
+- `sender_gone`: il mittente è caduto prima che un ricevente si agganciasse.
+
+`wait_s` è l'attesa del ricevente, `transfer_s` la durata del relay, `rate_mbs` la velocità media in MB/s (10^6 byte). Le durate sono secondi con tre decimali, numeri anche in JSON.
+
+`reason` di `request_rejected`, con il livello: `unauthorized` (401, WARN), `capacity` (503, WARN: `BASHT_MAX_SESSIONS` raggiunto), `range_not_supported` (400, INFO), `invalid_host` (400, INFO), `gone` (410, INFO), `not_found` (404, DEBUG: slug inesistenti, scansioni), `method_not_allowed` (405, DEBUG), `internal` (500 o 503, ERROR).
+
+Esempio (`json`):
+
+```json
+{"time":"2026-10-29T18:02:11.4+01:00","level":"INFO","msg":"transfer","id":"9f3c2a71d04be6a8","outcome":"ok","bytes":268435456,"length":268435456,"wait_s":4.217,"transfer_s":2.31,"rate_mbs":116.21}
+```
+
+Esempi di analisi in [docs/operazioni.md](docs/operazioni.md#log).
 
 ## Limiti e sicurezza
 

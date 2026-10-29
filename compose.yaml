@@ -13,6 +13,9 @@ services:
       BASHT_IDLE_TIMEOUT: ${BASHT_IDLE_TIMEOUT:-}
       BASHT_MAX_SESSIONS: ${BASHT_MAX_SESSIONS:-}
       BASHT_BUF_SIZE: ${BASHT_BUF_SIZE:-}
+      # JSON: un oggetto per riga, pronto per docker logs | jq o per un raccoglitore di log.
+      BASHT_LOG_FORMAT: ${BASHT_LOG_FORMAT:-json}
+      BASHT_LOG_LEVEL: ${BASHT_LOG_LEVEL:-}
     expose:
       - "8080"
     networks:

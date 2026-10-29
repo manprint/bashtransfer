@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -25,7 +26,16 @@ type Config struct {
 	IdleTimeout  time.Duration
 	MaxSessions  int
 	BufSize      int
+	// LogFormat è "text" (logfmt, una riga chiave=valore) o "json" (un oggetto per riga).
+	LogFormat string
+	LogLevel  slog.Level
 }
+
+// Formati di log accettati da BASHT_LOG_FORMAT.
+const (
+	LogText = "text"
+	LogJSON = "json"
+)
 
 // Load costruisce la Config usando getenv (os.Getenv in produzione).
 // Ogni errore nomina la variabile non valida.
@@ -37,6 +47,8 @@ func Load(getenv func(string) string) (Config, error) {
 		IdleTimeout: 2 * time.Minute,
 		MaxSessions: 1000,
 		BufSize:     262144,
+		LogFormat:   LogText,
+		LogLevel:    slog.LevelInfo,
 	}
 
 	if cfg.PublicURL != "" {
@@ -81,6 +93,21 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("BASHT_BUF_SIZE non valida (tra %d e %d): %q", minBufSize, maxBufSize, v)
 		}
 		cfg.BufSize = n
+	}
+
+	switch v := strings.ToLower(getenv("BASHT_LOG_FORMAT")); v {
+	case "":
+	case LogText, LogJSON:
+		cfg.LogFormat = v
+	default:
+		return Config{}, fmt.Errorf("BASHT_LOG_FORMAT non valida (text o json): %q", v)
+	}
+
+	if v := getenv("BASHT_LOG_LEVEL"); v != "" {
+		// UnmarshalText accetta debug, info, warn, error (anche maiuscoli e con offset, es. info+2).
+		if err := cfg.LogLevel.UnmarshalText([]byte(v)); err != nil {
+			return Config{}, fmt.Errorf("BASHT_LOG_LEVEL non valida (debug, info, warn, error): %q", v)
+		}
 	}
 
 	return cfg, nil

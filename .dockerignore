@@ -5,3 +5,6 @@ bin/
 scripts/
 *.test
 Specifiche.md
+.serena/
+.tokensave/
+.claude/

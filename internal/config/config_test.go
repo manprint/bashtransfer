@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,32 @@ func TestLoadPublicURL(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "BASHT_PUBLIC_URL") {
 			t.Errorf("errore senza nome della variabile: %v", err)
+		}
+	}
+}
+
+func TestLoadLogging(t *testing.T) {
+	cfg, err := Load(env(nil))
+	if err != nil || cfg.LogFormat != LogText || cfg.LogLevel != slog.LevelInfo {
+		t.Fatalf("default log: %q %v %v", cfg.LogFormat, cfg.LogLevel, err)
+	}
+	cfg, err = Load(env(map[string]string{"BASHT_LOG_FORMAT": "JSON", "BASHT_LOG_LEVEL": "debug"}))
+	if err != nil || cfg.LogFormat != LogJSON || cfg.LogLevel != slog.LevelDebug {
+		t.Fatalf("json/debug: %q %v %v", cfg.LogFormat, cfg.LogLevel, err)
+	}
+	for _, m := range []map[string]string{
+		{"BASHT_LOG_FORMAT": "xml"},
+		{"BASHT_LOG_LEVEL": "verbose"},
+	} {
+		_, err := Load(env(m))
+		if err == nil {
+			t.Errorf("%v: atteso errore", m)
+			continue
+		}
+		for k := range m {
+			if !strings.Contains(err.Error(), k) {
+				t.Errorf("errore %q non nomina %s", err, k)
+			}
 		}
 	}
 }

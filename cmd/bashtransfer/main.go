@@ -7,11 +7,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -43,7 +46,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	logger := newLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel)
+	logger.Info("server_start",
+		"listen", cfg.Listen,
+		"public_url", cfg.PublicURL,
+		"auth", cfg.AuthUser != "",
+		"wait_timeout", cfg.WaitTimeout.String(),
+		"idle_timeout", cfg.IdleTimeout.String(),
+		"max_sessions", cfg.MaxSessions,
+		"buf_size", cfg.BufSize,
+		"log_level", cfg.LogLevel.String(),
+		"go", runtime.Version(),
+		"gomaxprocs", runtime.GOMAXPROCS(0))
 
 	reg := relay.NewRegistry(cfg.MaxSessions, cfg.WaitTimeout)
 	opts := server.Options{PublicURL: cfg.PublicURL, IdleTimeout: cfg.IdleTimeout, Logger: logger}
@@ -58,7 +72,8 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 << 10,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
+		// Errori interni di net/http (accept, header malformati): evento http_error.
+		ErrorLog: slog.NewLogLogger(logger.With("component", "net/http").Handler(), slog.LevelWarn),
 		// Serve all'handler per rilevare un mittente caduto mentre attende il ricevente.
 		ConnContext: server.ConnContext,
 	}
@@ -69,7 +84,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Listen prima del log: "in ascolto" compare solo quando la porta accetta connessioni, e un
+	// Listen prima del log: server_listening compare solo quando la porta accetta connessioni, e un
 	// indirizzo occupato fa fallire run subito.
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
@@ -77,7 +92,7 @@ func run() error {
 	}
 	errc := make(chan error, 1)
 	go func() {
-		logger.Info("in ascolto", "addr", ln.Addr().String())
+		logger.Info("server_listening", "addr", ln.Addr().String())
 		errc <- srv.Serve(ln)
 	}()
 
@@ -93,14 +108,28 @@ func run() error {
 	// processo invece di attendere shutdownTimeout.
 	stop()
 
-	logger.Info("arresto in corso")
+	start := time.Now()
+	logger.Info("shutdown_start", "sessions", reg.Len(), "grace", shutdownTimeout.String())
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	forced := false
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("shutdown forzato", "err", err)
+		forced = true
+		logger.Warn("shutdown_forced", "err", err.Error(), "sessions", reg.Len())
 		_ = srv.Close()
 	}
+	logger.Info("shutdown_done", "forced", forced,
+		"duration_s", math.Round(time.Since(start).Seconds()*1000)/1000)
 	return nil
+}
+
+// newLogger crea il logger del server: text (logfmt) o json, una riga per evento, su w.
+func newLogger(w io.Writer, format string, level slog.Level) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: level}
+	if format == config.LogJSON {
+		return slog.New(slog.NewJSONHandler(w, opts))
+	}
+	return slog.New(slog.NewTextHandler(w, opts))
 }
 
 // healthURL ricava l'URL locale dall'indirizzo di ascolto: un host vuoto o non specificato

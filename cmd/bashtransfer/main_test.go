@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"bashtransfer/internal/config"
 )
 
 func TestHealthURL(t *testing.T) {
@@ -81,7 +85,7 @@ type child struct {
 }
 
 // startServer avvia run in un sottoprocesso che esegue solo il test chiamante e attende
-// "in ascolto".
+// server_listening.
 func startServer(t *testing.T, testName string) *child {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -112,7 +116,7 @@ func startServer(t *testing.T, testName string) *child {
 		}
 		close(c.lines)
 	}()
-	c.waitLine(t, "in ascolto")
+	c.waitLine(t, "server_listening")
 	return c
 }
 
@@ -180,7 +184,7 @@ func TestSecondSignalExits(t *testing.T) {
 	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
-	c.waitLine(t, "arresto in corso")
+	c.waitLine(t, "shutdown_start")
 	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
@@ -227,5 +231,26 @@ func TestShutdownExpiresWaitingSenders(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := io.Copy(io.Discard, conn); err != nil {
 		t.Fatalf("connessione del mittente non chiusa: %v", err)
+	}
+}
+
+// TestNewLogger: json produce un oggetto per riga con time, level e msg; il livello filtra.
+func TestNewLogger(t *testing.T) {
+	var buf strings.Builder
+	l := newLogger(&buf, config.LogJSON, slog.LevelInfo)
+	l.Debug("nascosto")
+	l.Info("evento", "k", 1)
+	var m map[string]any
+	if err := json.Unmarshal([]byte(buf.String()), &m); err != nil {
+		t.Fatalf("riga non JSON %q: %v", buf.String(), err)
+	}
+	if m["msg"] != "evento" || m["level"] != "INFO" || m["k"] != float64(1) || m["time"] == nil {
+		t.Fatalf("campi JSON: %v", m)
+	}
+	buf.Reset()
+	newLogger(&buf, config.LogText, slog.LevelWarn).Info("nascosto")
+	newLogger(&buf, config.LogText, slog.LevelWarn).Warn("visibile", "k", "v")
+	if out := buf.String(); strings.Contains(out, "nascosto") || !strings.Contains(out, "msg=visibile k=v") {
+		t.Fatalf("text: %q", out)
 	}
 }

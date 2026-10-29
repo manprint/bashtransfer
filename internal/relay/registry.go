@@ -2,6 +2,8 @@
 package relay
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"io"
 	"sync"
@@ -43,11 +45,15 @@ type Receiver interface {
 }
 
 // Session è una sessione di upload in attesa di un ricevente.
-// Slug, Name e Length sono immutabili; gli altri campi sono protetti da reg.mu.
+// Slug, ID, Name, Length e Created sono immutabili; gli altri campi sono protetti da reg.mu.
 type Session struct {
-	Slug   string
-	Name   string
-	Length int64 // -1 se ignota
+	Slug string
+	// ID identifica la sessione nei log. È casuale e indipendente dallo slug: chi legge i log
+	// non può ricavarne l'URL di download.
+	ID      string
+	Name    string
+	Length  int64 // -1 se ignota
+	Created time.Time
 
 	reg      *Registry
 	claimed  bool
@@ -136,10 +142,16 @@ func (r *Registry) Create(name string, length int64) (*Session, error) {
 		if _, live := r.sessions[id]; live || r.isGone(id) {
 			continue
 		}
+		logID, err := newLogID()
+		if err != nil {
+			return nil, err
+		}
 		s := &Session{
 			Slug:     id,
+			ID:       logID,
 			Name:     name,
 			Length:   length,
+			Created:  time.Now(),
 			reg:      r,
 			attached: make(chan Receiver, 1),
 			expired:  make(chan struct{}),
@@ -151,6 +163,15 @@ func (r *Registry) Create(name string, length int64) (*Session, error) {
 		return s, nil
 	}
 	return nil, ErrSlugCollision
+}
+
+// newLogID genera l'identificativo di sessione per i log: 8 byte casuali in esadecimale.
+func newLogID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 // Claim assegna il ricevente allo slug. Esattamente un claim riesce per sessione.
