@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,7 +118,7 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprintf(w, "bashtransfer: relay di file senza salvataggio su disco.\n"+
 		"Invio:     curl -T FILE %s\n"+
-		"Ricezione: esegui il comando curl o wget ricevuto dal mittente.\n", base)
+		"Ricezione: esegui il comando curl, wget o aria2c ricevuto dal mittente.\n", base)
 }
 
 // upload apre la sessione, scrive subito i comandi e legge il body solo quando il ricevente si aggancia.
@@ -175,7 +176,10 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "curl -o \"%s\" \"%s/%s\"\nwget -O \"%s\" \"%s/%s\"\n", name, base, s.Slug, name, base, s.Slug)
+	// La connessione del mittente non viene riusata: Stop può lasciarvi una scadenza di lettura
+	// passata, e un upload resta comunque l'unica richiesta di curl -T.
+	w.Header().Set("Connection", "close")
+	io.WriteString(w, commands(name, base+"/"+s.Slug))
 	_ = rc.Flush()
 
 	// Con il body non letto net/http non vede la caduta del mittente: la connessione viene
@@ -193,11 +197,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		case rcv := <-s.Attached():
 			rr := rcv.(*responseReceiver)
 			rr.start(name, s.Length)
-			var body io.Reader = r.Body
-			if h.opts.IdleTimeout > 0 {
-				body = relay.NewIdleReader(r.Body, h.opts.IdleTimeout, rc.SetReadDeadline)
-			}
-			n, err := h.copier.Copy(rr, body)
+			body := relay.NewIdleReader(r.Body, h.opts.IdleTimeout, rc.SetReadDeadline)
+			n, err := h.copyUntilAbort(s, rr, body)
 			sent = n
 			if err == nil && s.Length >= 0 && n != s.Length {
 				err = relay.ErrLengthMismatch
@@ -229,6 +230,33 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	}
 }
 
+// copyUntilAbort copia il body verso il ricevente. Se la sessione viene interrotta durante la
+// copia (ricevente caduto), una lettura del mittente in attesa di dati viene sbloccata subito
+// invece di attendere il prossimo byte o BASHT_IDLE_TIMEOUT.
+func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *relay.IdleReader) (int64, error) {
+	copied := make(chan struct{})
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		select {
+		case <-s.Aborted():
+			body.Stop()
+		case <-copied:
+		}
+	}()
+	n, err := h.copier.Copy(rr, body)
+	close(copied)
+	<-watched
+	return n, err
+}
+
+// commands restituisce le righe di download stampate al mittente. aria2c usa una sola
+// connessione: il relay è un flusso unico e non serve intervalli di byte.
+func commands(name, u string) string {
+	return fmt.Sprintf("curl -o \"%s\" \"%s\"\nwget -O \"%s\" \"%s\"\naria2c -x1 -s1 -o \"%s\" \"%s\"\n",
+		name, u, name, u, name, u)
+}
+
 func (h *handler) logTransfer(outcome string, bytes int64, d time.Duration, err error) {
 	if h.opts.Logger == nil {
 		return
@@ -251,6 +279,10 @@ func expectsContinue(r *http.Request) bool {
 func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 	if !slug.Valid(id) {
 		http.NotFound(w, r)
+		return
+	}
+	if !rangeFromStart(r.Header) {
+		h.rejectRange(w, r, id)
 		return
 	}
 	rcv := newResponseReceiver(w, h.opts.IdleTimeout)
@@ -285,5 +317,71 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 			panic(http.ErrAbortHandler)
 		}
 		http.Error(w, "transfer aborted", http.StatusServiceUnavailable)
+	}
+}
+
+// rangeFromStart riporta se la richiesta si serve dal primo byte: nessun Range, un Range da
+// ignorare (con If-Range, mai soddisfatto senza validatori; unità diversa da bytes; sintassi non
+// valida) o intervalli che partono tutti da 0. In questi casi il relay risponde 200 con il body
+// intero, come RFC 9110 consente.
+func rangeFromStart(h http.Header) bool {
+	v := h.Get("Range")
+	if v == "" || h.Get("If-Range") != "" {
+		return true
+	}
+	unit, set, ok := strings.Cut(v, "=")
+	if !ok || !strings.EqualFold(strings.TrimSpace(unit), "bytes") {
+		return true
+	}
+	fromStart := true
+	specs := 0
+	for _, spec := range strings.Split(set, ",") {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+		specs++
+		first, last, ok := strings.Cut(spec, "-")
+		if !ok || (first == "" && last == "") {
+			return true
+		}
+		if first == "" {
+			// Intervallo suffisso (ultimi N byte): richiede la fine del flusso.
+			if _, err := strconv.ParseUint(last, 10, 64); err != nil {
+				return true
+			}
+			fromStart = false
+			continue
+		}
+		n, err := strconv.ParseUint(first, 10, 64)
+		if err != nil {
+			return true
+		}
+		if last != "" {
+			if _, err := strconv.ParseUint(last, 10, 64); err != nil {
+				return true
+			}
+		}
+		if n > 0 {
+			fromStart = false
+		}
+	}
+	return specs == 0 || fromStart
+}
+
+// rejectRange risponde a una richiesta di intervallo che non parte dal primo byte (ripresa con
+// curl -C -, wget -c, connessioni aggiuntive di aria2) senza reclamare lo slug: il relay è un
+// flusso unico, e un 200 con il body intero consumerebbe il trasferimento. Uno slug sconosciuto,
+// concluso o già reclamato risponde come un GET normale. Non 416: curl -C - lo tratta come file
+// già completo ed esce con successo lasciando il file parziale.
+func (h *handler) rejectRange(w http.ResponseWriter, r *http.Request, id string) {
+	switch err := h.reg.Peek(id); {
+	case errors.Is(err, relay.ErrNotFound):
+		http.NotFound(w, r)
+	case err != nil:
+		http.Error(w, "gone", http.StatusGone)
+	default:
+		w.Header().Set("Accept-Ranges", "none")
+		http.Error(w, "range requests not supported: download from the first byte, without resume", http.StatusBadRequest)
 	}
 }

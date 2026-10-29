@@ -156,3 +156,51 @@ func TestCopyStopsOnReceiverError(t *testing.T) {
 		t.Fatalf("copiati %d byte, attesi %d", n, 2*(64<<10))
 	}
 }
+
+// TestIdleReaderStopInterruptsRead: Stop sblocca una Read in attesa di dati, con e senza
+// scadenza di inattività, e le letture successive falliscono con ErrInterrupted.
+func TestIdleReaderStopInterruptsRead(t *testing.T) {
+	for _, idle := range []time.Duration{0, time.Minute} {
+		c1, c2 := net.Pipe()
+		defer c1.Close()
+		defer c2.Close()
+		r := NewIdleReader(c1, idle, c1.SetReadDeadline)
+		done := make(chan error, 1)
+		go func() {
+			_, err := r.Read(make([]byte, 16))
+			done <- err
+		}()
+		time.Sleep(50 * time.Millisecond)
+		r.Stop()
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrInterrupted) {
+				t.Fatalf("idle %s: Read dopo Stop: %v, atteso ErrInterrupted", idle, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("idle %s: Stop non sblocca la Read", idle)
+		}
+		go func() { _, _ = c2.Write([]byte("x")) }()
+		if _, err := r.Read(make([]byte, 1)); !errors.Is(err, ErrInterrupted) {
+			t.Fatalf("idle %s: Read successiva: %v, atteso ErrInterrupted", idle, err)
+		}
+	}
+}
+
+// TestIdleReaderStopKeepsEOF: dopo Stop, una lettura che si conclude senza toccare la connessione
+// (fine di un body con Content-Length) restituisce dati ed EOF, non un'interruzione.
+func TestIdleReaderStopKeepsEOF(t *testing.T) {
+	f := &fakeConnReader{data: []byte("ab"), err: io.EOF}
+	r := NewIdleReader(f, time.Minute, f.setDeadline)
+	r.Stop()
+	if !f.deadline.Before(time.Now()) {
+		t.Fatalf("Stop: scadenza %v, attesa nel passato", f.deadline)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil || string(got) != "ab" {
+		t.Fatalf("ReadAll dopo Stop: %q, %v", got, err)
+	}
+	if !f.deadline.Before(time.Now()) {
+		t.Fatalf("Read dopo Stop ha rinnovato la scadenza: %v", f.deadline)
+	}
+}

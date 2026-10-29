@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -61,16 +62,28 @@ func TestCheckHealth(t *testing.T) {
 	}
 }
 
-// TestSecondSignalExits: con un upload in attesa lo shutdown ordinato dura shutdownTimeout; un
-// secondo SIGINT termina subito il processo. Il server gira in un sottoprocesso (run reale).
-func TestSecondSignalExits(t *testing.T) {
-	if os.Getenv("BT_TEST_RUN_MAIN") == "1" {
-		if err := run(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		os.Exit(0)
+// runChild esegue run nel sottoprocesso avviato da startServer e ne termina il processo.
+func runChild() {
+	if os.Getenv("BT_TEST_RUN_MAIN") != "1" {
+		return
 	}
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+type child struct {
+	cmd   *exec.Cmd
+	addr  string
+	lines chan string
+}
+
+// startServer avvia run in un sottoprocesso che esegue solo il test chiamante e attende
+// "in ascolto".
+func startServer(t *testing.T, testName string) *child {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("SIGINT non inviabile a un processo su Windows")
 	}
@@ -81,7 +94,7 @@ func TestSecondSignalExits(t *testing.T) {
 	addr := l.Addr().String()
 	l.Close()
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestSecondSignalExits$")
+	cmd := exec.Command(os.Args[0], "-test.run=^"+testName+"$")
 	cmd.Env = append(os.Environ(), "BT_TEST_RUN_MAIN=1", "BASHT_LISTEN="+addr)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -91,54 +104,88 @@ func TestSecondSignalExits(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
-	lines := make(chan string, 16)
+	c := &child{cmd: cmd, addr: addr, lines: make(chan string, 16)}
 	go func() {
 		sc := bufio.NewScanner(stderr)
 		for sc.Scan() {
-			lines <- sc.Text()
+			c.lines <- sc.Text()
 		}
-		close(lines)
+		close(c.lines)
 	}()
-	waitLine := func(substr string) {
-		t.Helper()
-		deadline := time.After(5 * time.Second)
-		for {
-			select {
-			case l, ok := <-lines:
-				if !ok {
-					t.Fatalf("processo terminato prima di %q", substr)
-				}
-				if strings.Contains(l, substr) {
-					return
-				}
-			case <-deadline:
-				t.Fatalf("nessuna riga %q entro 5 s", substr)
+	c.waitLine(t, "in ascolto")
+	return c
+}
+
+func (c *child) waitLine(t *testing.T, substr string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case l, ok := <-c.lines:
+			if !ok {
+				t.Fatalf("processo terminato prima di %q", substr)
 			}
+			if strings.Contains(l, substr) {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("nessuna riga %q entro 5 s", substr)
 		}
 	}
-	waitLine("in ascolto")
+}
 
-	// Upload in attesa: connessione aperta, body dichiarato e non inviato.
+// waitingUpload apre un upload con body dichiarato e non inviato e ne restituisce lo slug.
+func waitingUpload(t *testing.T, addr string) (net.Conn, string) {
+	t.Helper()
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { conn.Close() })
 	fmt.Fprintf(conn, "PUT /f.bin HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n")
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := http.ReadResponse(bufio.NewReader(conn), nil); err != nil {
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
 		t.Fatalf("risposta dell'upload: %v", err)
 	}
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatalf("riga curl: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	line = strings.TrimSuffix(strings.TrimSpace(line), `"`)
+	return conn, line[strings.LastIndex(line, "/")+1:]
+}
 
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+// TestSecondSignalExits: con un trasferimento in corso lo shutdown ordinato dura fino a
+// shutdownTimeout; un secondo SIGINT termina subito il processo. Il server gira in un
+// sottoprocesso (run reale).
+func TestSecondSignalExits(t *testing.T) {
+	runChild()
+	c := startServer(t, "TestSecondSignalExits")
+
+	// Trasferimento in corso: slug reclamato, mittente che non invia il body.
+	_, slug := waitingUpload(t, c.addr)
+	dl, err := net.Dial("tcp", c.addr)
+	if err != nil {
 		t.Fatal(err)
 	}
-	waitLine("arresto in corso")
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+	defer dl.Close()
+	fmt.Fprintf(dl, "GET /%s HTTP/1.1\r\nHost: x\r\n\r\n", slug)
+	_ = dl.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := http.ReadResponse(bufio.NewReader(dl), nil); err != nil {
+		t.Fatalf("risposta del download: %v", err)
+	}
+
+	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	c.waitLine(t, "arresto in corso")
+	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() { done <- c.cmd.Wait() }()
 	select {
 	case err := <-done:
 		var ee *exec.ExitError
@@ -150,5 +197,35 @@ func TestSecondSignalExits(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("il secondo SIGINT non ha terminato il processo")
+	}
+}
+
+// TestShutdownExpiresWaitingSenders: all'arresto i mittenti ancora senza ricevente vengono
+// chiusi subito: il processo esce con successo ben prima di shutdownTimeout.
+func TestShutdownExpiresWaitingSenders(t *testing.T) {
+	runChild()
+	c := startServer(t, "TestShutdownExpiresWaitingSenders")
+	conn, _ := waitingUpload(t, c.addr)
+
+	start := time.Now()
+	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("uscita: %v, attesa 0", err)
+		}
+		if d := time.Since(start); d >= shutdownTimeout/2 {
+			t.Fatalf("arresto in %s con un solo mittente in attesa", d)
+		}
+	case <-time.After(shutdownTimeout / 2):
+		t.Fatal("il mittente in attesa trattiene l'arresto")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		t.Fatalf("connessione del mittente non chiusa: %v", err)
 	}
 }

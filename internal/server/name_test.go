@@ -29,6 +29,8 @@ func TestSanitizeName(t *testing.T) {
 		{"override bidi", "doc\u202efdp.exe", "docfdp.exe"},
 		{"separatore di riga", "a\u2028b", "ab"},
 		{"DEL e NUL", "a\x7fb\x00c", "abc"},
+		{"trattino (stdout per curl e wget)", "-", "download"},
+		{"trattino iniziale invariato", "-x.zip", "-x.zip"},
 	}
 	for _, c := range cases {
 		if got := SanitizeName(c.in); got != c.want {

@@ -21,6 +21,8 @@ var (
 	ErrLengthMismatch = errors.New("length mismatch")
 	ErrIdle           = errors.New("sender idle")
 	ErrExpired        = errors.New("wait timeout expired")
+	// ErrInterrupted è l'errore di lettura del body dopo l'interruzione del relay (Stop).
+	ErrInterrupted = errors.New("relay interrupted")
 )
 
 const (
@@ -54,6 +56,7 @@ type Session struct {
 	attached chan Receiver
 	expired  chan struct{}
 	finished chan struct{}
+	aborted  chan struct{}
 
 	finishOnce sync.Once
 }
@@ -67,6 +70,10 @@ func (s *Session) Expired() <-chan struct{} { return s.expired }
 // Finished si chiude quando il mittente ha terminato (Registry.Finish).
 func (s *Session) Finished() <-chan struct{} { return s.finished }
 
+// Aborted si chiude alla prima chiamata di Abort: il mittente può interrompere una lettura
+// bloccata invece di attendere il prossimo byte o BASHT_IDLE_TIMEOUT.
+func (s *Session) Aborted() <-chan struct{} { return s.aborted }
+
 // Err restituisce il primo errore registrato con Abort, o nil.
 func (s *Session) Err() error {
 	s.reg.mu.Lock()
@@ -74,12 +81,13 @@ func (s *Session) Err() error {
 	return s.err
 }
 
-// Abort registra err solo alla prima chiamata. Non chiude nulla.
+// Abort registra err solo alla prima chiamata e chiude Aborted.
 func (s *Session) Abort(err error) {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	if s.err == nil {
 		s.err = err
+		close(s.aborted)
 	}
 }
 
@@ -136,6 +144,7 @@ func (r *Registry) Create(name string, length int64) (*Session, error) {
 			attached: make(chan Receiver, 1),
 			expired:  make(chan struct{}),
 			finished: make(chan struct{}),
+			aborted:  make(chan struct{}),
 		}
 		r.sessions[id] = s
 		s.timer = time.AfterFunc(r.waitTimeout, func() { r.expire(s) })
@@ -165,6 +174,24 @@ func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
 	return s, nil
 }
 
+// Peek riporta lo stato di uno slug senza reclamarlo: nil se attende un ricevente, altrimenti
+// ErrClaimed, ErrGone o ErrNotFound come Claim.
+func (r *Registry) Peek(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prune(time.Now())
+	s, ok := r.sessions[id]
+	switch {
+	case !ok && r.isGone(id):
+		return ErrGone
+	case !ok:
+		return ErrNotFound
+	case s.claimed:
+		return ErrClaimed
+	}
+	return nil
+}
+
 // Finish termina la sessione: rimuove dal registry una sola volta e chiude Finished.
 // Deve essere chiamata solo dalla goroutine del mittente, dopo l'ultima scrittura al ricevente.
 func (r *Registry) Finish(s *Session) {
@@ -185,13 +212,29 @@ func (r *Registry) Len() int {
 	return len(r.sessions)
 }
 
+// ExpireWaiting fa scadere subito tutte le sessioni non ancora reclamate. Serve all'arresto:
+// senza nuovi riceventi possibili, i mittenti in attesa vengono chiusi invece di occupare il
+// periodo di grazia. I trasferimenti in corso non sono toccati.
+func (r *Registry) ExpireWaiting() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range r.sessions {
+		r.expireLocked(s)
+	}
+}
+
 // expire rimuove una sessione non reclamata allo scadere del timeout. Idempotente.
 func (r *Registry) expire(s *Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.expireLocked(s)
+}
+
+func (r *Registry) expireLocked(s *Session) {
 	if s.claimed || r.sessions[s.Slug] != s {
 		return
 	}
+	s.timer.Stop()
 	delete(r.sessions, s.Slug)
 	r.bury(s.Slug)
 	close(s.expired)

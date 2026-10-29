@@ -61,14 +61,15 @@ func slugOf(line string) string {
 }
 
 type upload struct {
-	resp     *http.Response
-	br       *bufio.Reader
-	curlLine string
-	wgetLine string
-	slug     string
+	resp      *http.Response
+	br        *bufio.Reader
+	curlLine  string
+	wgetLine  string
+	aria2Line string
+	slug      string
 }
 
-// openUpload invia PUT e legge i due comandi della prima risposta.
+// openUpload invia PUT e legge i tre comandi della prima risposta.
 func openUpload(t *testing.T, ctx context.Context, url string, body io.Reader) *upload {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, body)
@@ -78,7 +79,7 @@ func openUpload(t *testing.T, ctx context.Context, url string, body io.Reader) *
 	return openUploadRequest(t, ctx, req)
 }
 
-// openUploadRequest invia req e legge i due comandi della prima risposta.
+// openUploadRequest invia req e legge i tre comandi della prima risposta.
 func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *upload {
 	t.Helper()
 	resp := within(t, 5*time.Second, "risposta PUT", func() *http.Response {
@@ -101,7 +102,11 @@ func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *up
 		l, _ := br.ReadString('\n')
 		return l
 	})
-	return &upload{resp: resp, br: br, curlLine: curl, wgetLine: wget, slug: slugOf(curl)}
+	aria2 := within(t, 5*time.Second, "riga aria2c", func() string {
+		l, _ := br.ReadString('\n')
+		return l
+	})
+	return &upload{resp: resp, br: br, curlLine: curl, wgetLine: wget, aria2Line: aria2, slug: slugOf(curl)}
 }
 
 // finish legge il resto della risposta del mittente e verifica lo stato 200.
@@ -538,6 +543,9 @@ func TestDownloadHeaders(t *testing.T) {
 	if got := dl.Header.Get("Content-Disposition"); got != `attachment; filename="strano nome.zip"` {
 		t.Errorf("Content-Disposition %q", got)
 	}
+	if got := dl.Header.Get("Accept-Ranges"); got != "none" {
+		t.Errorf("Accept-Ranges %q, atteso none", got)
+	}
 
 	pr, pw := io.Pipe()
 	go func() {
@@ -626,7 +634,7 @@ func TestCommandLineHasNoShellExpansion(t *testing.T) {
 	defer pw.Close()
 
 	u := openUpload(t, ctx, srv.URL+"/"+"x$(touch%20PWNED)%60id%60%21%22.zip", pr)
-	for _, line := range []string{u.curlLine, u.wgetLine} {
+	for _, line := range []string{u.curlLine, u.wgetLine, u.aria2Line} {
 		name := line[strings.Index(line, `"`)+1:]
 		name = name[:strings.Index(name, `"`)]
 		if strings.ContainsAny(name, "$`!\\") {
@@ -1129,29 +1137,33 @@ func TestWaitingSenderGoneFreesSlug(t *testing.T) {
 	}
 }
 
-// TestOkLogIgnoresReceiverCloseAfterLastByte: il ricevente chiude dopo aver letto tutti i byte,
-// prima che il mittente finisca; l'esito resta ok, senza errore nel log.
+// TestOkLogIgnoresReceiverCloseAfterLastByte: con Content-Length il ricevente chiude appena ha
+// letto tutti i byte, anche prima che il mittente concluda; l'esito resta ok, senza errore nel log.
+// Con lunghezza ignota una chiusura prima del chunk finale è invece un'interruzione
+// (TestReceiverGoneInterruptsIdleSender).
 func TestOkLogIgnoresReceiverCloseAfterLastByte(t *testing.T) {
 	var buf syncBuffer
 	srv, _ := newTestServerConn(t, slog.New(slog.NewTextHandler(&buf, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	data := randomBytes(t, 4096)
 	pr, pw := io.Pipe()
-	u := openUpload(t, ctx, srv.URL+"/f.bin", pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/f.bin", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = int64(len(data))
+	u := openUploadRequest(t, ctx, req)
 
 	dctx, dcancel := context.WithCancel(ctx)
 	dl := get(t, dctx, srv.URL+"/"+u.slug)
-	data := randomBytes(t, 4096)
-	go func() { _, _ = pw.Write(data) }()
+	go func() { _, _ = pw.Write(data); pw.Close() }()
 	got := make([]byte, len(data))
 	if _, err := io.ReadFull(dl.Body, got); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("download: %v", err)
 	}
 	dcancel()
 	dl.Body.Close()
-	// Il server registra la chiusura del ricevente prima che il mittente concluda.
-	time.Sleep(300 * time.Millisecond)
-	pw.Close()
 	u.finish(t)
 
 	deadline := time.Now().Add(3 * time.Second)
@@ -1179,5 +1191,214 @@ func TestUploadNameEncodedSlash(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("GET con %%2F: stato %d, atteso 404", resp.StatusCode)
+	}
+}
+
+// TestUploadCommands: le tre righe usano lo stesso nome e lo stesso URL; aria2c usa una sola
+// connessione. La risposta al mittente chiude la connessione.
+func TestUploadCommands(t *testing.T) {
+	srv, _ := newTestServerWait(t, 200*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	u := openUpload(t, ctx, srv.URL+"/a%20b.tgz", pr)
+	url := srv.URL + "/" + u.slug
+	want := []string{
+		`curl -o "a b.tgz" "` + url + `"` + "\n",
+		`wget -O "a b.tgz" "` + url + `"` + "\n",
+		`aria2c -x1 -s1 -o "a b.tgz" "` + url + `"` + "\n",
+	}
+	for i, got := range []string{u.curlLine, u.wgetLine, u.aria2Line} {
+		if got != want[i] {
+			t.Errorf("riga %d: %q, attesa %q", i+1, got, want[i])
+		}
+	}
+	if !u.resp.Close {
+		t.Error("risposta al mittente senza Connection: close")
+	}
+}
+
+func TestRangeFromStart(t *testing.T) {
+	cases := []struct {
+		rng, ifRange string
+		want         bool
+	}{
+		{"", "", true},
+		{"bytes=0-", "", true},
+		{"bytes=0-99", "", true},
+		{"BYTES = 0-", "", true},
+		{"bytes=0-,0-10", "", true},
+		{"bytes=00-", "", true},
+		{"bytes=100-", "", false},
+		{"bytes=100-199", "", false},
+		{"bytes=-500", "", false},
+		{"bytes=0-99, 200-299", "", false},
+		{" bytes=1-", "", false},
+		{"bytes=100-", `"etag"`, true},
+		{"items=5-", "", true},
+		{"bytes=abc", "", true},
+		{"bytes=a-", "", true},
+		{"bytes=5-x", "", true},
+		{"bytes=-", "", true},
+		{"bytes=", "", true},
+		{"bytes=,", "", true},
+		{"bytes", "", true},
+	}
+	for _, c := range cases {
+		h := http.Header{}
+		if c.rng != "" {
+			h.Set("Range", c.rng)
+		}
+		if c.ifRange != "" {
+			h.Set("If-Range", c.ifRange)
+		}
+		if got := rangeFromStart(h); got != c.want {
+			t.Errorf("Range %q If-Range %q: %v, atteso %v", c.rng, c.ifRange, got, c.want)
+		}
+	}
+}
+
+// getWithRange esegue un GET con l'header Range indicato.
+func getWithRange(t *testing.T, ctx context.Context, url, rng string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Range", rng)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+// TestRangeResumeDoesNotClaim: una ripresa (Range da un byte > 0) riceve 400 senza consumare
+// lo slug; il download completo successivo riesce. Su slug sconosciuti, reclamati o conclusi la
+// risposta è quella di un GET normale. Range da 0 è servito con 200 e il body intero.
+func TestRangeResumeDoesNotClaim(t *testing.T) {
+	srv, _ := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	data := randomBytes(t, 64<<10)
+	u := openUpload(t, ctx, srv.URL+"/r.bin", bytes.NewReader(data))
+	url := srv.URL + "/" + u.slug
+
+	for _, rng := range []string{"bytes=100-", "bytes=-10", "bytes=0-9,20-29"} {
+		resp := getWithRange(t, ctx, url, rng)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Accept-Ranges") != "none" {
+			t.Fatalf("Range %q: stato %d Accept-Ranges %q, atteso 400 e none", rng, resp.StatusCode, resp.Header.Get("Accept-Ranges"))
+		}
+	}
+	unknown := getWithRange(t, ctx, srv.URL+"/ZZZZZZZZZZ", "bytes=100-")
+	unknown.Body.Close()
+	if unknown.StatusCode != http.StatusNotFound {
+		t.Fatalf("Range su slug sconosciuto: stato %d, atteso 404", unknown.StatusCode)
+	}
+
+	dl := getWithRange(t, ctx, url, "bytes=0-")
+	if dl.StatusCode != http.StatusOK {
+		t.Fatalf("Range da 0: stato %d, atteso 200", dl.StatusCode)
+	}
+	claimed := getWithRange(t, ctx, url, "bytes=100-")
+	claimed.Body.Close()
+	if claimed.StatusCode != http.StatusGone {
+		t.Fatalf("Range su slug reclamato: stato %d, atteso 410", claimed.StatusCode)
+	}
+	got, err := io.ReadAll(dl.Body)
+	dl.Body.Close()
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("download dopo i rifiuti: %d byte, %v", len(got), err)
+	}
+	u.finish(t)
+	gone := getWithRange(t, ctx, url, "bytes=100-")
+	gone.Body.Close()
+	if gone.StatusCode != http.StatusGone {
+		t.Fatalf("Range su slug concluso: stato %d, atteso 410", gone.StatusCode)
+	}
+}
+
+// TestReceiverGoneInterruptsIdleSender: il ricevente chiude mentre il mittente non sta inviando
+// (lettura del body in attesa). Il relay si interrompe subito, senza attendere il prossimo byte
+// del mittente o IdleTimeout: la sessione si libera e il mittente vede un errore.
+func TestReceiverGoneInterruptsIdleSender(t *testing.T) {
+	for _, idle := range []time.Duration{0, time.Minute} {
+		t.Run(fmt.Sprint("idle=", idle), func(t *testing.T) {
+			var buf syncBuffer
+			reg := relay.NewRegistry(100, time.Hour)
+			srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{
+				IdleTimeout: idle,
+				Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+			}))
+			t.Cleanup(srv.Close)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			u := openUpload(t, ctx, srv.URL+"/slow.bin", pr)
+
+			dctx, dcancel := context.WithCancel(ctx)
+			dl := get(t, dctx, srv.URL+"/"+u.slug)
+			data := randomBytes(t, 4096)
+			go func() { _, _ = pw.Write(data) }()
+			if _, err := io.ReadFull(dl.Body, make([]byte, len(data))); err != nil {
+				t.Fatalf("download: %v", err)
+			}
+			dcancel()
+			dl.Body.Close()
+
+			err := within(t, 5*time.Second, "fine risposta del mittente", func() error {
+				_, err := io.ReadAll(u.br)
+				return err
+			})
+			u.resp.Body.Close()
+			if err == nil {
+				t.Fatal("risposta del mittente completa dopo la caduta del ricevente, atteso errore")
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for reg.Len() != 0 && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if reg.Len() != 0 {
+				t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+			}
+			for !strings.Contains(buf.String(), "outcome=") && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if out := buf.String(); !strings.Contains(out, "outcome=aborted") || !strings.Contains(out, `err="receiver gone"`) {
+				t.Fatalf("log %q, atteso outcome=aborted con receiver gone", out)
+			}
+		})
+	}
+}
+
+// TestPeerClosedOnClosedConn: una connessione già chiusa dal server conta come caduta, così un
+// mittente in attesa non resta appeso dopo srv.Close.
+func TestPeerClosedOnClosedConn(t *testing.T) {
+	if !peerCheckSupported {
+		t.Skip("rilevamento disponibile solo su Linux")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	client, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	conn, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peerClosed(conn) {
+		t.Fatal("connessione aperta segnalata come chiusa")
+	}
+	conn.Close()
+	if !peerClosed(conn) {
+		t.Fatal("connessione chiusa non segnalata")
 	}
 }

@@ -36,7 +36,8 @@ func SanitizeName(raw string) string {
 		// Il taglio può lasciare uno spazio in coda: TrimSpace di nuovo.
 		s = strings.TrimSpace(string(rs[:maxNameRunes]))
 	}
-	if s == "" {
+	// "-" è lo stdout per curl -o e wget -O: il ricevente non avrebbe un file.
+	if s == "" || s == "-" {
 		return "download"
 	}
 	return s

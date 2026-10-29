@@ -93,6 +93,13 @@ UP_PIDS+=("$UP_PID")
 SLUG="$(wait_slug "$TMP/upload.out")"
 [[ -n "$SLUG" ]] || fail "nessuno slug entro 10 s (upload.out: $(cat "$TMP/upload.out"))"
 grep -q '^wget -O "e2e.bin" ' "$TMP/upload.out" || fail "riga wget mancante o nome errato"
+grep -q '^aria2c -x1 -s1 -o "e2e.bin" ' "$TMP/upload.out" || fail "riga aria2c mancante o nome errato"
+
+# Ripresa (curl -C -): 400 senza reclamare lo slug; il download completo successivo riesce.
+printf 'parziale' > "$TMP/received.bin"
+CODE="$(curl -s -C - -o "$TMP/received.bin" -w '%{http_code}' "$BASE/$SLUG" || true)"
+[[ "$CODE" == "400" ]] || fail "ripresa con curl -C -: $CODE, atteso 400"
+rm -f "$TMP/received.bin"
 # In modalità esterna i comandi devono usare la base del test (BASHT_PUBLIC_URL == BASHT_E2E_BASE).
 if [[ -n "$EXTERNAL" ]]; then
 	grep -qF "\"$BASE/" "$TMP/upload.out" || fail "comandi con base diversa da $BASE: $(cat "$TMP/upload.out")"
@@ -132,6 +139,18 @@ if command -v wget > /dev/null; then
 	wget -q --no-check-certificate --tries=1 -O "$TMP/w.bin" "$BASE/$SLUG3" || fail "download wget fallito"
 	cmp -s "$TMP/w.bin" "$TMP/payload.bin" || fail "download wget: contenuto diverso"
 	wait "$UP3_PID" || fail "upload RS-3 terminato con errore"
+fi
+
+# RS-3b: download con aria2c, come nella terza riga stampata (solo se installato).
+if command -v aria2c > /dev/null; then
+	cat "$TMP/payload.bin" | curl -N -sS "${UP_AUTH[@]}" -T - "$BASE/a.bin" > "$TMP/upload3b.out" 2> "$TMP/upload3b.err" &
+	UP3B_PID=$!
+	UP_PIDS+=("$UP3B_PID")
+	SLUG3B="$(wait_slug "$TMP/upload3b.out")"
+	[[ -n "$SLUG3B" ]] || fail "RS-3b: nessuno slug entro 10 s"
+	(cd "$TMP" && aria2c -q --check-certificate=false --max-tries=1 -x1 -s1 -o a.dl "$BASE/$SLUG3B") || fail "download aria2c fallito"
+	cmp -s "$TMP/a.dl" "$TMP/payload.bin" || fail "download aria2c: contenuto diverso"
+	wait "$UP3B_PID" || fail "upload RS-3b terminato con errore"
 fi
 
 # RS-4: il mittente cade a metà. Il ricevente deve vedere un errore, non un file troncato con esito 0.

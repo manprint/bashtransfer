@@ -34,6 +34,8 @@ func (r *responseReceiver) start(name string, length int64) {
 	h.Set("Content-Disposition", contentDisposition(name))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
+	// Il relay non serve intervalli: aria2 e i download manager non aprono connessioni aggiuntive.
+	h.Set("Accept-Ranges", "none")
 	if length >= 0 {
 		h.Set("Content-Length", strconv.FormatInt(length, 10))
 	}

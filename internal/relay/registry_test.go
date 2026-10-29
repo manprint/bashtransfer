@@ -230,3 +230,91 @@ func TestRegistryConcurrentLifecycle(t *testing.T) {
 		t.Fatalf("sessioni vive %d, attese 0", r.Len())
 	}
 }
+
+// TestRegistryAbortClosesAborted: Aborted si chiude alla prima Abort; le successive non chiudono
+// di nuovo il canale e non cambiano l'errore.
+func TestRegistryAbortClosesAborted(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, err := r.Create("a.bin", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.Aborted():
+		t.Fatal("Aborted chiuso prima di Abort")
+	default:
+	}
+	s.Abort(ErrReceiverGone)
+	s.Abort(ErrSenderGone)
+	select {
+	case <-s.Aborted():
+	default:
+		t.Fatal("Aborted non chiuso dopo Abort")
+	}
+	if !errors.Is(s.Err(), ErrReceiverGone) {
+		t.Fatalf("Err %v, atteso il primo errore", s.Err())
+	}
+}
+
+// TestRegistryPeek: Peek riporta lo stato senza reclamare lo slug.
+func TestRegistryPeek(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, err := r.Create("a.bin", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("Peek slug in attesa: %v", err)
+	}
+	if err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("Peek ripetuto: %v, lo slug non deve risultare reclamato", err)
+	}
+	if err := r.Peek("ZZZZZZZZZZ"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Peek sconosciuto: %v", err)
+	}
+	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Peek(s.Slug); !errors.Is(err, ErrClaimed) {
+		t.Fatalf("Peek reclamato: %v", err)
+	}
+	r.Finish(s)
+	if err := r.Peek(s.Slug); !errors.Is(err, ErrGone) {
+		t.Fatalf("Peek concluso: %v", err)
+	}
+}
+
+// TestRegistryExpireWaiting: le sessioni in attesa scadono subito (Expired chiuso, slug 410);
+// quelle reclamate restano.
+func TestRegistryExpireWaiting(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	waiting, err := r.Create("a.bin", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := r.Create("b.bin", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Claim(active.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	r.ExpireWaiting()
+	r.ExpireWaiting()
+	select {
+	case <-waiting.Expired():
+	default:
+		t.Fatal("sessione in attesa non scaduta")
+	}
+	select {
+	case <-active.Expired():
+		t.Fatal("sessione reclamata scaduta")
+	default:
+	}
+	if r.Len() != 1 {
+		t.Fatalf("sessioni vive %d, attesa 1", r.Len())
+	}
+	if _, err := r.Claim(waiting.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
+		t.Fatalf("Claim dopo ExpireWaiting: %v, atteso ErrGone", err)
+	}
+}

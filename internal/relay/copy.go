@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,27 +33,54 @@ func (c *Copier) Copy(dst Receiver, src io.Reader) (int64, error) {
 }
 
 // NewIdleReader limita l'inattività del mittente (D15): prima di ogni Read imposta la
-// scadenza di lettura con setDeadline; una lettura scaduta restituisce ErrIdle.
-func NewIdleReader(r io.Reader, idle time.Duration, setDeadline func(time.Time) error) io.Reader {
-	return &idleReader{r: r, idle: idle, setDeadline: setDeadline}
+// scadenza di lettura con setDeadline; una lettura scaduta restituisce ErrIdle. Con idle <= 0
+// non imposta scadenze e serve solo a Stop.
+func NewIdleReader(r io.Reader, idle time.Duration, setDeadline func(time.Time) error) *IdleReader {
+	return &IdleReader{r: r, idle: idle, setDeadline: setDeadline}
 }
 
-type idleReader struct {
+// IdleReader è il reader restituito da NewIdleReader.
+type IdleReader struct {
 	r           io.Reader
 	idle        time.Duration
 	setDeadline func(time.Time) error
+	stopped     atomic.Bool
 }
 
-func (d *idleReader) Read(p []byte) (int, error) {
-	if err := d.setDeadline(time.Now().Add(d.idle)); err != nil {
-		return 0, err
+// aLongTimeAgo è una scadenza già passata: sblocca subito una Read in corso.
+var aLongTimeAgo = time.Unix(1, 0)
+
+func (d *IdleReader) Read(p []byte) (int, error) {
+	if d.idle > 0 {
+		if err := d.setDeadline(time.Now().Add(d.idle)); err != nil {
+			return 0, err
+		}
+	}
+	// Uno Stop concorrente può aver impostato la scadenza passata prima di quella appena
+	// rinnovata: la si ripristina. Non si restituisce subito errore, perché la lettura può
+	// ancora concludersi senza toccare la connessione (EOF di un body con Content-Length).
+	if d.stopped.Load() {
+		_ = d.setDeadline(aLongTimeAgo)
 	}
 	n, err := d.r.Read(p)
+	if err == nil || err == io.EOF {
+		return n, err
+	}
+	if d.stopped.Load() {
+		return n, ErrInterrupted
+	}
 	var ne net.Error
 	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
 		return n, ErrIdle
 	}
 	return n, err
+}
+
+// Stop sblocca una Read in attesa di dati e fa fallire le successive letture dalla connessione
+// con ErrInterrupted. Può essere chiamata da un'altra goroutine durante una Read.
+func (d *IdleReader) Stop() {
+	d.stopped.Store(true)
+	_ = d.setDeadline(aLongTimeAgo)
 }
 
 // flushWriter fa flush del Receiver dopo ogni Write che ha scritto byte.

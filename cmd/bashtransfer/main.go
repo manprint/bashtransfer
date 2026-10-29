@@ -62,6 +62,9 @@ func run() error {
 		// Serve all'handler per rilevare un mittente caduto mentre attende il ricevente.
 		ConnContext: server.ConnContext,
 	}
+	// All'arresto il listener chiude: nessun ricevente può più arrivare, quindi i mittenti in
+	// attesa vengono chiusi subito e il periodo di grazia resta ai trasferimenti in corso.
+	srv.RegisterOnShutdown(reg.ExpireWaiting)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

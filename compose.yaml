@@ -49,6 +49,16 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # TCP verso i client (README, "Prestazioni di rete"). Valgono solo nel namespace di rete di
+    # nginx, che termina le connessioni di mittente e ricevente; il trasporto verso app è locale.
+    # BBR tiene la banda con perdita e RTT alti dove cubic crolla; buffer massimi a 32 MiB per
+    # coprire il BDP di 1 Gbit/s fino a ~150 ms. Richiede il modulo tcp_bbr caricato sull'host:
+    # un container non può caricarlo.
+    sysctls:
+      net.ipv4.tcp_congestion_control: ${BASHT_TCP_CC:-bbr}
+      net.ipv4.tcp_rmem: "4096 131072 33554432"
+      net.ipv4.tcp_wmem: "4096 16384 33554432"
+      net.ipv4.tcp_slow_start_after_idle: "0"
     logging: *logging
 
 networks:
