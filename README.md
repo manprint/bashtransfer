@@ -82,14 +82,33 @@ curl -u utente:password -T myfile.zip https://bashtransfer.mydomain.it
 
 Se le variabili non sono impostate, l'upload è anonimo.
 
+## Immagine
+
+Il workflow `.github/workflows/image.yml` esegue `gofmt`, `go vet`, `go test -race` e `scripts/e2e.sh` (con `aria2c`) a ogni pull request e push, e pubblica l'immagine su GitHub Container Registry (`ghcr.io/<owner>/<repo>`, con il token del workflow, senza secret):
+
+| Evento | Tag pubblicati |
+|---|---|
+| push su `main` | `main`, `sha-<commit>` |
+| tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `latest` |
+| pull request | nessuno (solo build) |
+
+L'immagine è multi-architettura (`linux/amd64`, `linux/arm64`, compilazione incrociata senza emulazione), con SBOM e provenance. Il primo push crea un pacchetto privato: per scaricarlo senza login renderlo pubblico dalle impostazioni del pacchetto su GitHub, oppure eseguire `docker login ghcr.io` sulla VM con un token con permesso `read:packages`.
+
+Rilascio:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
 ## Deploy con Docker Compose
 
-Il file `compose.yaml` avvia due servizi: `app` (il relay, sulla rete interna, senza porte pubblicate) e `nginx` (TLS e porte 80 e 443).
+`compose.yaml` è lo stack di produzione: `app` (il relay, immagine pubblicata) e `nginx` (TLS, porte 80 e 443). La procedura completa per la VM è in [docs/operazioni.md](docs/operazioni.md).
 
 1. Preparare una directory con `fullchain.pem` e `privkey.pem`. Il repository non gestisce certificati.
-2. Impostare le variabili desiderate, per esempio in un file `.env` non versionato accanto a `compose.yaml`:
+2. Impostare le variabili, per esempio in un file `.env` non versionato accanto a `compose.yaml`:
 
    ```
+   BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.0.0
    BASHT_CERTS_DIR=/etc/ssl/bashtransfer
    BASHT_PUBLIC_URL=https://bashtransfer.mydomain.it
    BASHT_AUTH_USER=utente
@@ -99,16 +118,33 @@ Il file `compose.yaml` avvia due servizi: `app` (il relay, sulla rete interna, s
 3. Avviare:
 
    ```bash
-   docker compose up -d --build
+   docker compose pull
+   docker compose up -d
    ```
 
-La configurazione nginx è in `deploy/nginx/nginx.conf`: worker automatici, `worker_connections 8192`, risoluzione DNS a ogni connessione (il container `app` può essere ricreato senza riavviare nginx), buffer di copia da 128k, keepalive TCP verso il client (60 s, poi 4 sonde ogni 15 s: un client sparito libera la sessione in circa 2 minuti) e un tetto di 64 connessioni simultanee per IP del client (`limit_conn`; rimuovere le due righe per disattivarlo). TLS è terminato dal blocco `stream` (proxy TCP): il relay passa byte per byte, senza il proxy HTTP di nginx, che interrompe il body di un upload quando il server ha già risposto (verificato in questo ambiente). Il blocco `http` serve solo il redirect da 80 a 443.
+Per costruire l'immagine dal sorgente invece di scaricarla:
+
+```bash
+BASHT_IMAGE=bashtransfer:local docker compose -f compose.yaml -f compose.build.yaml up -d --build
+```
+
+Variabili di compose (oltre alle `BASHT_*` del server): `BASHT_IMAGE` (obbligatoria), `BASHT_CERTS_DIR` (obbligatoria), `BASHT_TCP_CC` (algoritmo di congestione di nginx, default `bbr`).
+
+Reti: `frontend` porta le porte pubblicate di nginx; `backend` è `internal`, collega nginx e `app`, e non ha uscita verso l'esterno: `app` non è raggiungibile se non da nginx e non può aprire connessioni verso Internet.
+
+Isolamento dei container:
+
+- `app`: filesystem in sola lettura, nessuna capability, `no-new-privileges`, utente `nonroot` (immagine distroless senza shell).
+- `nginx`: filesystem in sola lettura con tmpfs per pid e file temporanei, solo le capability `CHOWN`, `SETUID`, `SETGID`, `NET_BIND_SERVICE` (il master parte come root, i worker come `nginx`), `no-new-privileges`. Senza `DAC_OVERRIDE` il master legge i certificati solo se sono di root o leggibili da tutti: `privkey.pem` di root con permessi `600` (come con certbot) va bene.
+- Log con rotazione (3 file da 10 MB per container).
+
+La configurazione nginx è in `deploy/nginx/nginx.conf` (nginx 1.30 stable, fissato per digest): worker automatici, `worker_connections 8192`, risoluzione DNS a ogni connessione (il container `app` può essere ricreato senza riavviare nginx), buffer di copia da 128k, keepalive TCP verso il client (60 s, poi 4 sonde ogni 15 s: un client sparito libera la sessione in circa 2 minuti) e un tetto di 64 connessioni simultanee per IP del client (`limit_conn`; rimuovere le due righe per disattivarlo). TLS è terminato dal blocco `stream` (proxy TCP): il relay passa byte per byte, senza il proxy HTTP di nginx, che interrompe il body di un upload quando il server ha già risposto (verificato in questo ambiente). Il blocco `http` serve solo il redirect da 80 a 443.
 
 Perché nginx non aggiunge header HTTP, `BASHT_PUBLIC_URL` è obbligatorio in compose: i comandi stampati usano quell'URL, non `Host` o `X-Forwarded-Proto`.
 
 Senza nginx il server parla solo HTTP semplice: non esegue TLS.
 
-L'immagine ha un `HEALTHCHECK` (`/bashtransfer -healthcheck`: `GET /` su `BASHT_LISTEN`, solo loopback); `nginx` parte quando `app` è sano. Il container `app` gira con filesystem in sola lettura, senza capability e senza nuovi privilegi; i log hanno rotazione (3 file da 10 MB).
+L'immagine ha un `HEALTHCHECK` (`/bashtransfer -healthcheck`: `GET /` su `BASHT_LISTEN`, solo loopback); `nginx` parte quando `app` è sano. All'arresto nginx riceve `SIGQUIT` e attende la fine dei trasferimenti in corso fino a 30 secondi (`stop_grace_period`); `app` ha 10 secondi di grazia interni (15 in compose).
 
 ## Log
 
@@ -223,7 +259,10 @@ Comando usato: `BASHT_NB_IMAGE=<immagine locale con sh, curl, tc, ethtool, pkill
 - Percorso completo attraverso nginx (stack compose, porta 443, certificato di test): `scripts/e2e.sh` esterno con 256 MiB, auth (`BASHT_E2E_AUTH`), 20 trasferimenti paralleli, `wget`, caduta di mittente e ricevente (anche del mittente in attesa), sha256 identici: verificato. Redirect da 80 e `GET /` via HTTPS: verificati. Il certificato di test non è stato verificato con una CA pubblica.
 - Auth attraverso nginx (senza credenziali e con credenziali errate: `401`; con credenziali corrette: trasferimento identico; `GET` dello slug senza credenziali: `410` dopo l'uso): verificata dall'e2e esterno con `BASHT_E2E_AUTH`.
 - Healthcheck dell'immagine e avvio ordinato di nginx dopo `app`: verificati.
-- Riga `aria2c`, rifiuto della ripresa (`curl -C -`: `400`, slug ancora scaricabile), interruzione immediata del mittente quando il ricevente cade, chiusura dei mittenti in attesa all'arresto: verificati da test Go e `scripts/e2e.sh` locale. Il download con `aria2c` è nell'e2e ma non è stato eseguito (`aria2c` non installato in questo ambiente).
+- Stack di produzione con isolamento (nginx 1.30 in sola lettura con capability ridotte, rete `backend` interna senza uscita verso l'esterno): e2e esterno con auth e 20 trasferimenti paralleli, redirect da 80, arresto di nginx con un trasferimento in corso (atteso fino alla fine, file integro): verificati.
+- Immagine multi-architettura: build `linux/amd64` e `linux/arm64` verificata in locale (binario arm64 statico). Il workflow GitHub è validato con `actionlint` ma non eseguito (nessun remote).
+- `aria2c` 1.37 contro il relay: download da file e da pipe con sha256 identico; anche con `-x4` usa una sola connessione e completa.
+- Riga `aria2c`, rifiuto della ripresa (`curl -C -`: `400`, slug ancora scaricabile), interruzione immediata del mittente quando il ricevente cade, chiusura dei mittenti in attesa all'arresto: verificati da test Go e `scripts/e2e.sh` locale. Il download con `aria2c` dell'e2e gira nel workflow (qui `aria2c` non è installato sull'host).
 - Effetto di algoritmo di congestione e buffer TCP: misurato con `scripts/netbench.sh` e attraverso lo stack compose con netem (vedi "Prestazioni di rete"). Stack compose con i sysctl di nginx: `scripts/e2e.sh` esterno con 256 MiB, auth e 20 trasferimenti paralleli verificato.
 
 ## Sviluppo

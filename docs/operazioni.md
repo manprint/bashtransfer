@@ -19,21 +19,25 @@ Deploy e gestione di bashtransfer su una VM con Docker. Uso e configurazione son
    echo tcp_bbr | sudo tee /etc/modules-load.d/bbr.conf
    ```
 
-2. Clonare il repository e creare `.env` accanto a `compose.yaml` (non versionato, permessi `600`):
+2. Servono sulla VM solo `compose.yaml` e `deploy/nginx/nginx.conf` (clonare il repository è il modo più semplice). Creare `.env` accanto a `compose.yaml` (non versionato, permessi `600`):
 
    ```
-   BASHT_CERTS_DIR=/etc/letsencrypt/live/bashtransfer.mydomain.it
+   BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.0.0
+   BASHT_CERTS_DIR=/etc/ssl/bashtransfer
    BASHT_PUBLIC_URL=https://bashtransfer.mydomain.it
    BASHT_AUTH_USER=utente
    BASHT_AUTH_PASSWORD=una-password-lunga
    ```
 
-   Con certbot i file in `live/` sono link simbolici verso `archive/`: montare la directory padre o copiare i file in una directory dedicata, perché un link che punta fuori dal volume montato non si risolve nel container.
+   `BASHT_CERTS_DIR` deve contenere `fullchain.pem` e `privkey.pem` come file regolari. Con certbot i file in `live/` sono link simbolici relativi verso `archive/`, che dentro il container non si risolvono: copiarli in `/etc/ssl/bashtransfer` con un deploy hook (sezione "Rinnovo del certificato"). nginx gira senza `DAC_OVERRIDE`: i file devono essere di root o leggibili da tutti; `privkey.pem` di root con permessi `600` va bene (verificato).
+
+   Se il pacchetto su ghcr.io è privato: `docker login ghcr.io` con un token con permesso `read:packages`.
 
 3. Avviare e controllare:
 
    ```bash
-   docker compose up -d --build
+   docker compose pull
+   docker compose up -d
    docker compose ps                     # app: healthy, nginx: running
    docker compose logs app | head        # server_start, server_listening
    curl -sS https://bashtransfer.mydomain.it/
@@ -58,10 +62,15 @@ Deploy e gestione di bashtransfer su una VM con Docker. Uso e configurazione son
 
 ## Aggiornamenti
 
+Impostare in `.env` il nuovo tag (`BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.1.0`; usare tag di versione, non `latest`, per sapere cosa gira e poter tornare indietro), poi:
+
 ```bash
-git pull
-docker compose up -d --build
+git pull                # solo se cambiano compose.yaml o nginx.conf
+docker compose pull
+docker compose up -d
 ```
+
+Ritorno alla versione precedente: rimettere il tag precedente in `.env` e ripetere `docker compose up -d`.
 
 La ricreazione di `app` interrompe i trasferimenti in corso dopo 10 secondi di grazia; i mittenti in attesa vengono chiusi subito. Gli slug emessi prima del riavvio rispondono `404` (le sessioni sono solo in memoria). nginx risolve `app` a ogni connessione e non va riavviato.
 
@@ -73,7 +82,17 @@ nginx legge i certificati all'avvio. Dopo il rinnovo:
 docker compose exec nginx nginx -s reload
 ```
 
-Il reload non interrompe i trasferimenti: i worker vecchi terminano quando le loro connessioni finiscono. Con certbot si può usare un deploy hook che esegue questo comando.
+Il reload non interrompe i trasferimenti: i worker vecchi terminano quando le loro connessioni finiscono. Con certbot, un deploy hook che copia i file e ricarica nginx, per esempio `/etc/letsencrypt/renewal-hooks/deploy/bashtransfer.sh` (eseguibile):
+
+```bash
+#!/bin/sh
+set -e
+install -m 644 -o root -g root /etc/letsencrypt/live/bashtransfer.mydomain.it/fullchain.pem /etc/ssl/bashtransfer/fullchain.pem
+install -m 600 -o root -g root /etc/letsencrypt/live/bashtransfer.mydomain.it/privkey.pem /etc/ssl/bashtransfer/privkey.pem
+cd /opt/bashtransfer && docker compose exec -T nginx nginx -s reload
+```
+
+(`/opt/bashtransfer` è la directory con `compose.yaml` e `.env`.)
 
 ## Log
 
@@ -108,7 +127,9 @@ docker compose logs --no-log-prefix app | jq -c 'select(.msg=="request_rejected"
 | Sintomo | Causa probabile | Cosa fare |
 |---|---|---|
 | nginx non parte, errore su `tcp_congestion_control` | modulo `tcp_bbr` non caricato | `sudo modprobe tcp_bbr`, oppure `BASHT_TCP_CC=cubic` |
-| `docker compose up` chiede `BASHT_PUBLIC_URL` o `BASHT_CERTS_DIR` | variabile obbligatoria mancante | impostarla nel `.env` |
+| `docker compose up` chiede `BASHT_IMAGE`, `BASHT_PUBLIC_URL` o `BASHT_CERTS_DIR` | variabile obbligatoria mancante | impostarla nel `.env` |
+| `docker compose pull` fallisce con `denied` o `unauthorized` | pacchetto ghcr.io privato | renderlo pubblico o `docker login ghcr.io` con un token `read:packages` |
+| nginx non parte: `cannot load certificate` o `Permission denied` | link simbolici di certbot o file non di root e non leggibili | copiare i file come file regolari di root (deploy hook sopra) |
 | upload lento con RTT alto, download veloce | buffer di invio del mittente (default Linux 4 MiB: ~66 MB/s a 40 ms) | sul mittente: `sysctl -w net.ipv4.tcp_wmem="4096 16384 33554432"` e `bbr` (README, "Prestazioni di rete") |
 | download lento con RTT alto | buffer di ricezione del ricevente o perdita sul suo percorso | sul ricevente: `net.ipv4.tcp_rmem` con massimo 32 MiB |
 | velocità ferma sotto ~200–300 Mbit/s su un solo lato | client in Wi-Fi | misurare con il client via cavo |

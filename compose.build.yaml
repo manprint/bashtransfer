@@ -1,0 +1,5 @@
+# Override per costruire l'immagine di app dal sorgente invece di usare quella pubblicata:
+#   BASHT_IMAGE=bashtransfer:local docker compose -f compose.yaml -f compose.build.yaml up -d --build
+services:
+  app:
+    build: .
