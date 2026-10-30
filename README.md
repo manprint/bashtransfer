@@ -146,6 +146,60 @@ Senza nginx il server parla solo HTTP semplice: non esegue TLS.
 
 L'immagine ha un `HEALTHCHECK` (`/bashtransfer -healthcheck`: `GET /` su `BASHT_LISTEN`, solo loopback); `nginx` parte quando `app` è sano. All'arresto nginx riceve `SIGQUIT` e attende la fine dei trasferimenti in corso fino a 30 secondi (`stop_grace_period`); `app` ha 10 secondi di grazia interni (15 in compose).
 
+### Dietro Apache (mod_proxy_http2)
+
+Alternativa a nginx quando la 443 è già di Apache. Il server accetta HTTP/1.1 e HTTP/2 in chiaro (h2c) sulla stessa porta; Apache deve parlargli in h2c.
+
+Il proxy HTTP/1.1 di Apache (`ProxyPass http://`) non funziona: invia tutto il body dell'upload prima di leggere la risposta, il server risponde con i comandi e legge il body solo quando arriva il ricevente, quindi `curl -T` resta fermo senza stampare nulla. Con `h2c://` richiesta e risposta scorrono insieme.
+
+Cosa fare:
+
+1. Avviare l'app con un'immagine che contiene il supporto h2c (successiva a `sha-66a3f84`) e con `BASHT_PUBLIC_URL` uguale all'URL pubblico: Apache non passa `Host` o `X-Forwarded-Proto` ai comandi stampati. L'app deve essere raggiungibile da Apache sulla porta `BASHT_LISTEN` (stessa rete Docker, oppure porta pubblicata su `127.0.0.1`).
+2. Abilitare i moduli. `proxy_http2` richiede `http2` e la libreria nghttp2 (nei pacchetti Debian/Ubuntu di `apache2`):
+
+   ```bash
+   a2enmod proxy proxy_http proxy_http2 http2 headers ssl
+   ```
+
+3. Nel vhost TLS sostituire le due righe `ProxyPass` e `ProxyPassReverse` che puntavano a `http://`:
+
+   ```apache
+   <VirtualHost *:443>
+       ServerName bashtransfer.mydomain.it
+
+       ProxyRequests     Off
+       ProxyPreserveHost On
+       ProxyPass         / h2c://bash-transfer:8080/ flushpackets=on timeout=600 connectiontimeout=5 retry=0
+       ProxyPassReverse  / h2c://bash-transfer:8080/
+       ProxyIOBufferSize 65536
+       LimitRequestBody  0
+       SetEnv no-gzip    1
+       SetEnv no-brotli  1
+
+       SSLCertificateFile    /etc/letsencrypt/live/bashtransfer.mydomain.it/fullchain.pem
+       SSLCertificateKeyFile /etc/letsencrypt/live/bashtransfer.mydomain.it/privkey.pem
+       Include /etc/letsencrypt/options-ssl-apache.conf
+   </VirtualHost>
+   ```
+
+   Non servono `Protocols h2` né `RequestHeader` verso il backend: il collegamento client-Apache può restare HTTP/1.1. `bash-transfer` è il nome del container sulla rete condivisa con Apache; con l'app su `127.0.0.1` usare `h2c://127.0.0.1:8080/`.
+4. Controllare e ricaricare:
+
+   ```bash
+   apache2ctl configtest && systemctl reload apache2
+   ```
+
+5. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito le tre righe `curl`, `wget`, `aria2c`; eseguendo una di esse da un altro terminale il file passa.
+
+Come si comporta:
+
+- Su HTTP/2 il server invia sempre `100 Continue`: Apache toglie `Expect` e, senza il 100, curl (che lo usa sopra circa 1 MB) scarta il body appena vede la risposta con i comandi.
+- Su HTTP/2 il server non invia `Connection: close`: sarebbe tradotto in un `GOAWAY` che blocca il proxy mentre il body è in attesa.
+- Mentre il mittente attende il ricevente, il server gli scrive un byte `\r` ogni 2 secondi (invisibile nel terminale: i comandi terminano con `\n`). Apache non si accorge da solo di un mittente caduto finché non rilegge il body; la scrittura di quel byte fallisce, Apache chiude lo stream e lo slug si libera entro circa 4 secondi. Un ricevente che prova prima riceve `410` o un abort, mai un file corrotto.
+- Lo stesso traffico azzera il `timeout` del proxy: l'attesa del ricevente è limitata solo da `BASHT_WAIT_TIMEOUT` (verificato con `timeout=5` e un'attesa di 15 secondi). Il `timeout` conta invece durante il trasferimento: un'interruzione di rete più lunga lo chiude.
+- L'app vede solo l'IP di Apache: eventuali limiti per IP vanno impostati in Apache.
+- Verificato con Apache 2.4.69 (immagine `httpd:2.4`) in HTTP in chiaro verso il client; con la versione e il TLS del proprio server conviene ripetere la prova del punto 5 con un file di qualche centinaio di MB.
+
 ## Log
 
 Una riga per evento su stderr, nel formato di `BASHT_LOG_FORMAT`. Ogni riga ha `time`, `level` e `msg` (il nome dell'evento, stabile: usarlo per filtrare). **Slug, nomi di file, path e credenziali non compaiono mai**: una sessione è identificata da `id`, 16 caratteri esadecimali casuali e indipendenti dallo slug, quindi chi legge i log non può scaricare.

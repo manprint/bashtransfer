@@ -15,6 +15,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"runtime"
 	"strings"
 	"sync"
@@ -1549,5 +1551,125 @@ func TestAbortedTransferLogsWarn(t *testing.T) {
 	m := lines[0]
 	if m["level"] != "WARN" || m["outcome"] != "aborted" || m["err"] == nil || m["length"] != float64(1<<20) {
 		t.Fatalf("transfer interrotto: %v", m)
+	}
+}
+
+// TestUploadH2C verifica il relay su HTTP/2 in chiaro (proxy Apache h2c://): il 100 Continue
+// arriva anche senza Expect, i comandi precedono il body e il file passa intatto.
+func TestUploadH2C(t *testing.T) {
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewUnstartedServer(New(reg, relay.NewCopier(64<<10), Options{}))
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetHTTP1(true)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	tr := &http.Transport{Protocols: new(http.Protocols)}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	client := &http.Client{Transport: tr}
+	t.Cleanup(tr.CloseIdleConnections)
+
+	data := randomBytes(t, 4<<20)
+	continued := make(chan struct{}, 1)
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{
+		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+			if code == http.StatusContinue {
+				continued <- struct{}{}
+			}
+			return nil
+		},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/h2.bin", bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := within(t, 5*time.Second, "risposta PUT h2c", func() *http.Response {
+		r, err := client.Do(req)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		return r
+	})
+	if resp == nil {
+		t.FailNow()
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("protocollo %s, atteso HTTP/2", resp.Proto)
+	}
+	select {
+	case <-continued:
+	default:
+		t.Error("100 Continue non ricevuto")
+	}
+	if c := resp.Header.Get("Connection"); c != "" {
+		t.Errorf("header Connection %q su HTTP/2", c)
+	}
+	br := bufio.NewReader(resp.Body)
+	line, _ := br.ReadString('\n')
+
+	dl := get(t, context.Background(), srv.URL+"/"+slugOf(line))
+	defer dl.Body.Close()
+	got := within(t, 10*time.Second, "download", func() []byte {
+		b, _ := io.ReadAll(dl.Body)
+		return b
+	})
+	if sha256.Sum256(got) != sha256.Sum256(data) {
+		t.Errorf("contenuto diverso: %d byte, attesi %d", len(got), len(data))
+	}
+}
+
+// TestUploadH2CHeartbeat verifica che su HTTP/2 un mittente in attesa riceva "\r" periodici
+// dopo i comandi: è la scrittura che fa cadere lo stream quando un proxy h2c ha perso il mittente.
+func TestUploadH2CHeartbeat(t *testing.T) {
+	old := heartbeatInterval
+	heartbeatInterval = 20 * time.Millisecond
+	t.Cleanup(func() { heartbeatInterval = old })
+
+	reg := relay.NewRegistry(100, time.Hour)
+	srv := httptest.NewUnstartedServer(New(reg, relay.NewCopier(64<<10), Options{}))
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetHTTP1(true)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	tr := &http.Transport{Protocols: new(http.Protocols)}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	client := &http.Client{Transport: tr}
+	t.Cleanup(tr.CloseIdleConnections)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/hb.bin", pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := within(t, 5*time.Second, "risposta PUT h2c", func() *http.Response {
+		r, err := client.Do(req)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		return r
+	})
+	if resp == nil {
+		t.FailNow()
+	}
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	for range 3 {
+		br.ReadString('\n')
+	}
+	b := within(t, 5*time.Second, "heartbeat", func() byte {
+		c, _ := br.ReadByte()
+		return c
+	})
+	if b != '\r' {
+		t.Errorf("heartbeat %q, atteso \"\\r\"", b)
 	}
 }

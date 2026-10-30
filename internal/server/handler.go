@@ -203,14 +203,19 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	// curl invia "Expect: 100-continue" per upload grandi. Se la risposta finale arriva prima
 	// del 100 e prima della lettura del body, Go chiude il body (ErrBodyReadAfterClose).
 	// Il 100 viene quindi inviato esplicitamente, prima dei comandi.
-	if expectsContinue(r) {
+	// Dietro un proxy h2c (Apache) l'header Expect non arriva: il proxy lo toglie e curl, vista la
+	// risposta finale senza 100, non invia il body. Su HTTP/2 il 100 va quindi sempre inviato.
+	if expectsContinue(r) || (r.ProtoMajor == 2 && r.ContentLength != 0) {
 		w.WriteHeader(http.StatusContinue)
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	// La connessione del mittente non viene riusata: Stop può lasciarvi una scadenza di lettura
 	// passata, e un upload resta comunque l'unica richiesta di curl -T.
-	w.Header().Set("Connection", "close")
+	// Solo HTTP/1: in HTTP/2 l'header diventa un GOAWAY che blocca i proxy h2c (Apache) con il body in attesa.
+	if r.ProtoMajor == 1 {
+		w.Header().Set("Connection", "close")
+	}
 	io.WriteString(w, commands(name, base+"/"+s.Slug))
 	_ = rc.Flush()
 
@@ -222,6 +227,13 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		t := time.NewTicker(peerCheckInterval)
 		defer t.Stop()
 		peerCheck = t.C
+	}
+
+	var heartbeat <-chan time.Time
+	if r.ProtoMajor == 2 {
+		t := time.NewTicker(heartbeatInterval)
+		defer t.Stop()
+		heartbeat = t.C
 	}
 
 	for {
@@ -255,6 +267,15 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			panic(http.ErrAbortHandler)
 		case <-r.Context().Done():
 			return
+		case <-heartbeat:
+			if _, err := io.WriteString(w, "\r"); err != nil {
+				drain = 0
+				panic(http.ErrAbortHandler)
+			}
+			if err := rc.Flush(); err != nil {
+				drain = 0
+				panic(http.ErrAbortHandler)
+			}
 		case <-peerCheck:
 			if peerClosed(conn) {
 				// outcome resta sender_gone; il defer registra ErrSenderGone e libera lo slug.

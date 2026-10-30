@@ -10,6 +10,12 @@ import (
 // non rileva la sua caduta finché il body non è letto, e il body si legge solo dopo il claim.
 const peerCheckInterval = time.Second
 
+// heartbeatInterval è ogni quanto, su HTTP/2, un mittente in attesa riceve un byte "\r". Un proxy
+// h2c (Apache) non legge il body finché il backend non lo chiede e non si accorge del mittente
+// caduto: scrivendogli, la scrittura fallisce e il proxy chiude lo stream. "\r" non è visibile,
+// perché i comandi terminano con "\n". Variabile per i test.
+var heartbeatInterval = 2 * time.Second
+
 type connKey struct{}
 
 // ConnContext va impostato come http.Server.ConnContext: rende la connessione del mittente

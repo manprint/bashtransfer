@@ -76,6 +76,10 @@ func run() error {
 		ErrorLog: slog.NewLogLogger(logger.With("component", "net/http").Handler(), slog.LevelWarn),
 		// Serve all'handler per rilevare un mittente caduto mentre attende il ricevente.
 		ConnContext: server.ConnContext,
+		// HTTP/1.1 e HTTP/2 in chiaro (h2c): un proxy HTTP/1.1 (Apache mod_proxy_http, nginx http)
+		// invia tutto il body prima di leggere la risposta e blocca il mittente, che non vedrebbe i
+		// comandi. Con h2c (Apache: ProxyPass h2c://) richiesta e risposta scorrono insieme.
+		Protocols: protocols(),
 	}
 	// All'arresto il listener chiude: nessun ricevente può più arrivare, quindi i mittenti in
 	// attesa vengono chiusi subito e il periodo di grazia resta ai trasferimenti in corso.
@@ -164,4 +168,12 @@ func checkHealth(listen string) error {
 		return fmt.Errorf("stato %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// protocols abilita HTTP/1.1 e HTTP/2 senza TLS sulla stessa porta.
+func protocols() *http.Protocols {
+	p := new(http.Protocols)
+	p.SetHTTP1(true)
+	p.SetUnencryptedHTTP2(true)
+	return p
 }
