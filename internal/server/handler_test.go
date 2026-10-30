@@ -97,19 +97,39 @@ func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *up
 		t.FailNow()
 	}
 	br := bufio.NewReader(resp.Body)
-	curl := within(t, 5*time.Second, "riga curl", func() string {
-		l, _ := br.ReadString('\n')
-		return l
-	})
-	wget := within(t, 5*time.Second, "riga wget", func() string {
-		l, _ := br.ReadString('\n')
-		return l
-	})
-	aria2 := within(t, 5*time.Second, "riga aria2c", func() string {
-		l, _ := br.ReadString('\n')
-		return l
+	var curl, wget, aria2 string
+	within(t, 5*time.Second, "righe dei comandi", func() bool {
+		for i := 0; i < 20 && (curl == "" || wget == "" || aria2 == ""); i++ {
+			l, err := br.ReadString('\n')
+			switch {
+			case strings.HasPrefix(l, "curl -o"):
+				curl = l
+			case strings.HasPrefix(l, "wget -O"):
+				wget = l
+			case strings.HasPrefix(l, "aria2c "):
+				aria2 = l
+			}
+			if err != nil {
+				break
+			}
+		}
+		return true
 	})
 	return &upload{resp: resp, br: br, curlLine: curl, wgetLine: wget, aria2Line: aria2, slug: slugOf(curl)}
+}
+
+// readCurlLine legge la risposta del mittente fino alla riga del comando curl, saltando la
+// cornice della tabella dei comandi.
+func readCurlLine(br *bufio.Reader) (string, error) {
+	for {
+		l, err := br.ReadString('\n')
+		if strings.HasPrefix(l, "curl -o") {
+			return l, nil
+		}
+		if err != nil {
+			return l, err
+		}
+	}
 }
 
 // finish legge il resto della risposta del mittente e verifica lo stato 200.
@@ -237,7 +257,7 @@ func TestUploadExpectContinue(t *testing.T) {
 	}
 	br := bufio.NewReader(resp.Body)
 	line := within(t, 5*time.Second, "riga curl con Expect", func() string {
-		l, _ := br.ReadString('\n')
+		l, _ := readCurlLine(br)
 		return l
 	})
 	dl := get(t, ctx, srv.URL+"/"+slugOf(line))
@@ -701,7 +721,7 @@ func TestConcurrentTransfers(t *testing.T) {
 				}
 				defer resp.Body.Close()
 				br := bufio.NewReader(resp.Body)
-				line, err := br.ReadString('\n')
+				line, err := readCurlLine(br)
 				if err != nil {
 					return err
 				}
@@ -870,7 +890,7 @@ func TestNoGoroutineLeak(t *testing.T) {
 			t.Fatal(err)
 		}
 		br := bufio.NewReader(resp.Body)
-		line, err := br.ReadString('\n')
+		line, err := readCurlLine(br)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1097,7 +1117,7 @@ func openRawUpload(t *testing.T, addr string) (net.Conn, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	line, err := readCurlLine(bufio.NewReader(resp.Body))
 	if err != nil {
 		t.Fatalf("riga curl: %v", err)
 	}
@@ -1608,7 +1628,7 @@ func TestUploadH2C(t *testing.T) {
 		t.Errorf("header Connection %q su HTTP/2", c)
 	}
 	br := bufio.NewReader(resp.Body)
-	line, _ := br.ReadString('\n')
+	line, _ := readCurlLine(br)
 
 	dl := get(t, context.Background(), srv.URL+"/"+slugOf(line))
 	defer dl.Body.Close()
@@ -1662,14 +1682,100 @@ func TestUploadH2CHeartbeat(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	br := bufio.NewReader(resp.Body)
-	for range 3 {
-		br.ReadString('\n')
-	}
-	b := within(t, 5*time.Second, "heartbeat", func() byte {
-		c, _ := br.ReadByte()
-		return c
+	// Dopo la tabella dei comandi (che termina con "\n") il primo byte è l'heartbeat.
+	tail := within(t, 5*time.Second, "heartbeat", func() string {
+		s, _ := br.ReadString('\r')
+		return s
 	})
-	if b != '\r' {
-		t.Errorf("heartbeat %q, atteso \"\\r\"", b)
+	if !strings.HasSuffix(tail, "+\n\r") || !strings.Contains(tail, "aria2c") {
+		t.Errorf("dopo la tabella: %q, atteso un heartbeat \"\\r\"", tail)
+	}
+}
+
+// TestHomeBrowser: con Accept text/html la home è la pagina di cortesia, con la base dei comandi
+// e la CSP; senza (curl) resta il testo delle istruzioni.
+func TestHomeBrowser(t *testing.T) {
+	srv, _ := newTestServer(t)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stato %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("Content-Type %q", ct)
+	}
+	if resp.Header.Get("Content-Security-Policy") == "" {
+		t.Error("CSP mancante")
+	}
+	for _, want := range []string{
+		"<title>Bashtransfer</title>",
+		"Relay sicuro per invio file senza persistenza server",
+		"curl -T FILE " + srv.URL,
+		`rel="icon"`,
+		"sudo apt install curl wget aria2",
+		"brew install curl wget aria2",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("la pagina non contiene %q", want)
+		}
+	}
+	if strings.Contains(string(body), "%%BASE%%") {
+		t.Error("segnaposto %%BASE%% non sostituito")
+	}
+
+	plain := get(t, context.Background(), srv.URL+"/")
+	defer plain.Body.Close()
+	if ct := plain.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("senza Accept html: Content-Type %q", ct)
+	}
+}
+
+// TestHomeEscapesBase: la base pubblica finisce nell'HTML solo con escape.
+func TestHomeEscapesBase(t *testing.T) {
+	reg := relay.NewRegistry(10, time.Hour)
+	h := New(reg, relay.NewCopier(64<<10), Options{PublicURL: `https://x.it/"><script>alert(1)</script>`})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept", "text/html")
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "<script>alert(1)") {
+		t.Error("base non escapata nell'HTML")
+	}
+}
+
+// TestCommandsTable: tabella ASCII con le righe di comando a inizio riga e senza spazi finali
+// (copiabili con un triplo clic); le righe di cornice hanno tutte la stessa larghezza.
+func TestCommandsTable(t *testing.T) {
+	out := commands("a b.tgz", "https://h.it/AbC123xY9z")
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	width := -1
+	cmds := 0
+	for _, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "+") || strings.HasPrefix(l, "|"):
+			if width == -1 {
+				width = len(l)
+			}
+			if len(l) != width {
+				t.Errorf("riga di cornice di larghezza %d, attesa %d: %q", len(l), width, l)
+			}
+		default:
+			cmds++
+			if l != strings.TrimSpace(l) {
+				t.Errorf("riga di comando con spazi ai bordi: %q", l)
+			}
+			if !strings.HasPrefix(l, "curl ") && !strings.HasPrefix(l, "wget ") && !strings.HasPrefix(l, "aria2c ") {
+				t.Errorf("riga inattesa: %q", l)
+			}
+		}
+	}
+	if cmds != 3 {
+		t.Errorf("%d righe di comando, attese 3", cmds)
 	}
 }

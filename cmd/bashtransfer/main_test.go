@@ -152,9 +152,13 @@ func waitingUpload(t *testing.T, addr string) (net.Conn, string) {
 	if err != nil {
 		t.Fatalf("risposta dell'upload: %v", err)
 	}
-	line, err := bufio.NewReader(resp.Body).ReadString('\n')
-	if err != nil {
-		t.Fatalf("riga curl: %v", err)
+	// La risposta è una tabella: la riga curl segue l'intestazione.
+	br := bufio.NewReader(resp.Body)
+	var line string
+	for !strings.HasPrefix(line, "curl -o") {
+		if line, err = br.ReadString('\n'); err != nil {
+			t.Fatalf("riga curl: %v", err)
+		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	line = strings.TrimSuffix(strings.TrimSpace(line), `"`)

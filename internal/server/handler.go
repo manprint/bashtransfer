@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"bashtransfer/internal/relay"
 	"bashtransfer/internal/slug"
@@ -139,6 +140,11 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 	base, ok := h.baseURL(r)
 	if !ok {
 		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonInvalidHost, "invalid host")
+		return
+	}
+	w.Header().Add("Vary", "Accept")
+	if wantsHTML(r) {
+		serveHome(w, base)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -306,11 +312,46 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 	return n, err
 }
 
-// commands restituisce le righe di download stampate al mittente. aria2c usa una sola
-// connessione: il relay è un flusso unico e non serve intervalli di byte.
+// commands restituisce la tabella ASCII stampata al mittente, con le righe di download per curl,
+// wget e aria2c. aria2c usa una sola connessione: il relay è un flusso unico e non serve
+// intervalli di byte. Le righe di comando sono a inizio riga, senza bordi, e iniziano sempre con il
+// nome dello strumento.
 func commands(name, u string) string {
-	return fmt.Sprintf("curl -o \"%s\" \"%s\"\nwget -O \"%s\" \"%s\"\naria2c -x1 -s1 -o \"%s\" \"%s\"\n",
-		name, u, name, u, name, u)
+	cmds := []struct{ label, line string }{
+		{"curl", fmt.Sprintf("curl -o \"%s\" \"%s\"", name, u)},
+		{"wget", fmt.Sprintf("wget -O \"%s\" \"%s\"", name, u)},
+		{"aria2c", fmt.Sprintf("aria2c -x1 -s1 -o \"%s\" \"%s\"", name, u)},
+	}
+	const (
+		title = "bashtransfer: comandi per il ricevente"
+		note  = "Un solo ricevente per link. Lascia aperto il terminale fino alla fine."
+	)
+	// Larghezza interna della tabella: i comandi stanno fuori dai bordi, a inizio riga, così la
+	// selezione di una riga (o un triplo clic) copia solo il comando.
+	w := max(utf8.RuneCountInString(title), utf8.RuneCountInString(note), 60)
+	for _, c := range cmds {
+		w = max(w, utf8.RuneCountInString(c.line))
+	}
+	rule := func(label string) string {
+		if label == "" {
+			return "+" + strings.Repeat("-", w+2) + "+\n"
+		}
+		return "+-- " + label + " " + strings.Repeat("-", w+2-len(label)-4) + "+\n"
+	}
+	row := func(text string) string {
+		return "| " + text + strings.Repeat(" ", w-utf8.RuneCountInString(text)) + " |\n"
+	}
+	var b strings.Builder
+	b.WriteString(rule(""))
+	b.WriteString(row(title))
+	for _, c := range cmds {
+		b.WriteString(rule(c.label))
+		b.WriteString(c.line + "\n")
+	}
+	b.WriteString(rule(""))
+	b.WriteString(row(note))
+	b.WriteString(rule(""))
+	return b.String()
 }
 
 // Esiti di un trasferimento (campo outcome dell'evento transfer).

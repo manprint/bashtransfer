@@ -17,13 +17,23 @@ Mittente:
 curl -T myfile.zip https://bashtransfer.mydomain.it
 ```
 
-Risposta immediata (tre righe, una per strumento):
+Risposta immediata: una tabella ASCII con le righe di download, una per strumento:
 
 ```
++------------------------------------------------------------------------------------+
+| bashtransfer: comandi per il ricevente                                             |
++-- curl ---------------------------------------------------------------------------+
 curl -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
++-- wget ---------------------------------------------------------------------------+
 wget -O "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
++-- aria2c -------------------------------------------------------------------------+
 aria2c -x1 -s1 -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
++------------------------------------------------------------------------------------+
+| Un solo ricevente per link. Lascia aperto il terminale fino alla fine.             |
++------------------------------------------------------------------------------------+
 ```
+
+I comandi stanno fuori dai bordi, a inizio riga e senza spazi finali: un triplo clic (o la selezione di una riga) copia solo il comando, pronto da incollare. La larghezza della tabella si adatta alla riga più lunga.
 
 Ricevente: esegue una delle tre righe. Il file viene scaricato mentre il mittente lo invia.
 
@@ -40,6 +50,10 @@ sudo tar -cpzf - mydir | curl -N -T - https://bashtransfer.mydomain.it/mydir.tgz
 Il ricevente riceve `mydir.tgz`. `curl -N` disattiva il buffering dell'output: serve per vedere la riga di comando subito durante l'upload di un pipe. Con un file (scenario 1) non serve.
 
 Senza nome nel path (`... | curl -T - https://bashtransfer.mydomain.it`) il ricevente riceve un file chiamato `download`.
+
+### Pagina di benvenuto
+
+Un `GET /` da browser (header `Accept` con `text/html`) mostra una pagina di cortesia: nome e descrizione, le istruzioni d'uso con il comando di invio e un pulsante Copia, i comandi per installare curl, wget e aria2c sui vari sistemi (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, macOS, FreeBSD, Windows). La pagina è incorporata nel binario (`internal/server/home.html`), non carica risorse esterne (CSP restrittiva) e usa come base dei comandi `BASHT_PUBLIC_URL`. Gli altri client (curl, wget, aria2c) ricevono lo stesso `GET /` in testo semplice, con le istruzioni.
 
 ### Limiti del nome
 
@@ -189,7 +203,7 @@ Cosa fare:
    apache2ctl configtest && systemctl reload apache2
    ```
 
-5. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito le tre righe `curl`, `wget`, `aria2c`; eseguendo una di esse da un altro terminale il file passa.
+5. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito la tabella con le righe `curl`, `wget`, `aria2c`; eseguendo una di esse da un altro terminale il file passa.
 
 Come si comporta:
 
