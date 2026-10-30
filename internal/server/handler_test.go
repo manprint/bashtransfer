@@ -1750,20 +1750,35 @@ func TestHomeEscapesBase(t *testing.T) {
 }
 
 // TestCommandsTable: tabella ASCII con le righe di comando a inizio riga e senza spazi finali
-// (copiabili con un triplo clic); le righe di cornice hanno tutte la stessa larghezza.
+// (copiabili con un triplo clic); le righe di cornice hanno tutte la stessa larghezza, entro 80
+// colonne anche con un comando lunghissimo, e una riga vuota precede ogni sezione.
 func TestCommandsTable(t *testing.T) {
-	out := commands("a b.tgz", "https://h.it/AbC123xY9z")
+	long := strings.Repeat("x", 120) + ".tgz"
+	for _, name := range []string{"a b.tgz", long} {
+		checkCommandsTable(t, commands(name, "https://h.it/AbC123xY9z"))
+	}
+}
+
+func checkCommandsTable(t *testing.T, out string) {
+	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	width := -1
 	cmds := 0
-	for _, l := range lines {
+	for i, l := range lines {
 		switch {
+		case l == "":
 		case strings.HasPrefix(l, "+") || strings.HasPrefix(l, "|"):
 			if width == -1 {
 				width = len(l)
 			}
 			if len(l) != width {
 				t.Errorf("riga di cornice di larghezza %d, attesa %d: %q", len(l), width, l)
+			}
+			if width > 80 {
+				t.Errorf("cornice di %d colonne, oltre 80: %q", width, l)
+			}
+			if strings.HasPrefix(l, "+-- ") && lines[i-1] != "" {
+				t.Errorf("manca la riga vuota prima di %q", l)
 			}
 		default:
 			cmds++

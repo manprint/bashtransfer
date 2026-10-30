@@ -20,20 +20,25 @@ curl -T myfile.zip https://bashtransfer.mydomain.it
 Risposta immediata: una tabella ASCII con le righe di download, una per strumento:
 
 ```
-+------------------------------------------------------------------------------------+
-| bashtransfer: comandi per il ricevente                                             |
-+-- curl ---------------------------------------------------------------------------+
++------------------------------------------------------------------------+
+| bashtransfer: comandi per il ricevente                                 |
++------------------------------------------------------------------------+
+
++-- curl ----------------------------------------------------------------+
 curl -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
-+-- wget ---------------------------------------------------------------------------+
+
++-- wget ----------------------------------------------------------------+
 wget -O "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
-+-- aria2c -------------------------------------------------------------------------+
+
++-- aria2c --------------------------------------------------------------+
 aria2c -x1 -s1 -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
-+------------------------------------------------------------------------------------+
-| Un solo ricevente per link. Lascia aperto il terminale fino alla fine.             |
-+------------------------------------------------------------------------------------+
+
++------------------------------------------------------------------------+
+| Un solo ricevente per link. Lascia aperto il terminale fino alla fine. |
++------------------------------------------------------------------------+
 ```
 
-I comandi stanno fuori dai bordi, a inizio riga e senza spazi finali: un triplo clic (o la selezione di una riga) copia solo il comando, pronto da incollare. La larghezza della tabella si adatta alla riga più lunga.
+I comandi stanno fuori dai bordi, a inizio riga e senza spazi finali: un triplo clic (o la selezione di una riga) copia solo il comando, pronto da incollare. La cornice ha larghezza fissa (74 colonne, entra in un terminale da 80): un comando più lungo sporge a destra e si incolla intero.
 
 Ricevente: esegue una delle tre righe. Il file viene scaricato mentre il mittente lo invia.
 
@@ -169,10 +174,10 @@ Il proxy HTTP/1.1 di Apache (`ProxyPass http://`) non funziona: invia tutto il b
 Cosa fare:
 
 1. Avviare l'app con un'immagine che contiene il supporto h2c (successiva a `sha-66a3f84`) e con `BASHT_PUBLIC_URL` uguale all'URL pubblico: Apache non passa `Host` o `X-Forwarded-Proto` ai comandi stampati. L'app deve essere raggiungibile da Apache sulla porta `BASHT_LISTEN` (stessa rete Docker, oppure porta pubblicata su `127.0.0.1`).
-2. Abilitare i moduli. `proxy_http2` richiede `http2` e la libreria nghttp2 (nei pacchetti Debian/Ubuntu di `apache2`):
+2. Abilitare i moduli. `proxy_http2` usa la libreria nghttp2 (inclusa nei pacchetti Debian/Ubuntu di `apache2`). `mod_http2` (HTTP/2 verso i client) non serve: se `a2enmod` lo abilita come dipendenza, `Protocols http/1.1` nel vhost (vedi sotto) lo esclude per questo sito:
 
    ```bash
-   a2enmod proxy proxy_http proxy_http2 http2 headers ssl
+   a2enmod proxy proxy_http proxy_http2 headers ssl
    ```
 
 3. Nel vhost TLS sostituire le due righe `ProxyPass` e `ProxyPassReverse` che puntavano a `http://`:
@@ -180,6 +185,8 @@ Cosa fare:
    ```apache
    <VirtualHost *:443>
        ServerName bashtransfer.mydomain.it
+
+       Protocols http/1.1
 
        ProxyRequests     Off
        ProxyPreserveHost On
@@ -196,14 +203,15 @@ Cosa fare:
    </VirtualHost>
    ```
 
-   Non servono `Protocols h2` né `RequestHeader` verso il backend: il collegamento client-Apache può restare HTTP/1.1. `bash-transfer` è il nome del container sulla rete condivisa con Apache; con l'app su `127.0.0.1` usare `h2c://127.0.0.1:8080/`.
+   `Protocols http/1.1` tiene il collegamento client-Apache su HTTP/1.1: con HTTP/2 verso il client (se `mod_http2` è caricato e `Protocols` non lo esclude) l'upload è limitato dalla finestra di flusso di Apache e, su una rete con latenza, scende di molto (misurato in locale con 40 ms di RTT simulati: circa 11 MB/s con h2, oltre 200 MB/s con HTTP/1.1; il download non cambia). Il solo `proxy_http2` verso l'app resta h2c. `bash-transfer` è il nome del container sulla rete condivisa con Apache; con l'app su `127.0.0.1` usare `h2c://127.0.0.1:8080/`.
 4. Controllare e ricaricare:
 
    ```bash
    apache2ctl configtest && systemctl reload apache2
    ```
 
-5. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito la tabella con le righe `curl`, `wget`, `aria2c`; eseguendo una di esse da un altro terminale il file passa.
+5. Se Apache risponde `500` e nell'`error.log` compare `AH01144: No protocol handler was valid for the URL ... (scheme 'h2c')`, `mod_proxy_http2` non è caricato. Controllare con `apache2ctl -M | grep http2`: deve comparire `proxy_http2_module`. Con Apache in un container `a2enmod` va eseguito nell'immagine (`RUN a2enmod proxy proxy_http proxy_http2 headers ssl` nel Dockerfile): un `a2enmod` lanciato nel container in esecuzione si perde quando viene ricreato.
+6. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito la tabella con le righe `curl`, `wget`, `aria2c`; eseguendo una di esse da un altro terminale il file passa.
 
 Come si comporta:
 

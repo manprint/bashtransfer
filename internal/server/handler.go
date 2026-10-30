@@ -326,12 +326,11 @@ func commands(name, u string) string {
 		title = "bashtransfer: comandi per il ricevente"
 		note  = "Un solo ricevente per link. Lascia aperto il terminale fino alla fine."
 	)
-	// Larghezza interna della tabella: i comandi stanno fuori dai bordi, a inizio riga, così la
-	// selezione di una riga (o un triplo clic) copia solo il comando.
-	w := max(utf8.RuneCountInString(title), utf8.RuneCountInString(note), 60)
-	for _, c := range cmds {
-		w = max(w, utf8.RuneCountInString(c.line))
-	}
+	// Larghezza interna della cornice: dipende solo da titolo e nota, mai dai comandi. I comandi
+	// stanno fuori dai bordi, a inizio riga, così la selezione di una riga (o un triplo clic) copia
+	// solo il comando; uno più lungo della cornice sporge a destra e si incolla intero, mentre una
+	// cornice più larga del terminale andrebbe a capo e si romperebbe.
+	w := max(utf8.RuneCountInString(title), utf8.RuneCountInString(note))
 	rule := func(label string) string {
 		if label == "" {
 			return "+" + strings.Repeat("-", w+2) + "+\n"
@@ -344,10 +343,14 @@ func commands(name, u string) string {
 	var b strings.Builder
 	b.WriteString(rule(""))
 	b.WriteString(row(title))
+	b.WriteString(rule(""))
+	// Una riga vuota prima di ogni sezione e prima della nota.
 	for _, c := range cmds {
+		b.WriteString("\n")
 		b.WriteString(rule(c.label))
 		b.WriteString(c.line + "\n")
 	}
+	b.WriteString("\n")
 	b.WriteString(rule(""))
 	b.WriteString(row(note))
 	b.WriteString(rule(""))
