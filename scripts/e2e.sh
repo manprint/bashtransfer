@@ -76,14 +76,14 @@ else
 	curl -sf -o /dev/null "$AUTH_BASE/" || fail "il server con auth non risponde su $AUTH_BASE"
 fi
 
-# Attende la prima riga di comandi di un upload e ne estrae lo slug.
+# Attende la riga curl della tabella dei comandi ("| curl   | curl -f -OJ ... |") e ne estrae lo slug.
 wait_slug() {
 	local out="$1"
 	for _ in $(seq 1 100); do
-		if grep -q '^curl -o' "$out" 2>/dev/null; then break; fi
+		if grep -q '^| curl ' "$out" 2>/dev/null; then break; fi
 		sleep 0.1
 	done
-	sed -n 's#^curl -o "[^"]*" ".*/\([0-9A-Za-z]\{10\}\)"$#\1#p' "$out" | head -n 1
+	sed -n 's#^| curl *| curl -f -OJ ".*/\([0-9A-Za-z]\{10\}\)" *|$#\1#p' "$out" | head -n 1
 }
 
 # RS-1: upload da file, nome dal path.
@@ -92,8 +92,8 @@ UP_PID=$!
 UP_PIDS+=("$UP_PID")
 SLUG="$(wait_slug "$TMP/upload.out")"
 [[ -n "$SLUG" ]] || fail "nessuno slug entro 10 s (upload.out: $(cat "$TMP/upload.out"))"
-grep -q '^wget -O "e2e.bin" ' "$TMP/upload.out" || fail "riga wget mancante o nome errato"
-grep -q '^aria2c -x1 -s1 -o "e2e.bin" ' "$TMP/upload.out" || fail "riga aria2c mancante o nome errato"
+grep -qF '| wget -nc -O "e2e.bin" ' "$TMP/upload.out" || fail "riga wget mancante o nome errato"
+grep -qF '| aria2c -x1 -s1 -o "e2e.bin" ' "$TMP/upload.out" || fail "riga aria2c mancante o nome errato"
 
 # Ripresa (curl -C -): 400 senza reclamare lo slug; il download completo successivo riesce.
 printf 'parziale' > "$TMP/received.bin"
@@ -113,6 +113,34 @@ wait "$UP_PID" || fail "upload RS-1 terminato con errore"
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$SLUG")"
 [[ "$CODE" == "410" ]] || fail "secondo download RS-1: $CODE, atteso 410"
 
+# Link già usato, con i comandi stampati, in una cartella con un file omonimo (per esempio quello
+# appena inviato, se il ricevente lavora nella cartella del mittente): il file resta intatto, non
+# compaiono altri file e il comando esce con errore.
+mkdir -p "$TMP/k"
+printf 'ORIGINALE' > "$TMP/k/e2e.bin"
+if (cd "$TMP/k" && curl -s -k -f -OJ "$BASE/$SLUG"); then fail "curl -f -OJ su link usato: uscita 0"; fi
+if command -v wget > /dev/null; then
+	if (cd "$TMP/k" && wget -q --no-check-certificate --tries=1 -nc -O "e2e.bin" "$BASE/$SLUG"); then fail "wget -nc su link usato: uscita 0"; fi
+fi
+if command -v aria2c > /dev/null; then
+	if (cd "$TMP/k" && aria2c -q --check-certificate=false --max-tries=1 -x1 -s1 -o "e2e.bin" "$BASE/$SLUG"); then fail "aria2c su link usato: uscita 0"; fi
+fi
+[[ "$(cat "$TMP/k/e2e.bin")" == "ORIGINALE" ]] || fail "un comando su link usato ha sovrascritto il file"
+[[ "$(ls -A "$TMP/k")" == "e2e.bin" ]] || fail "file inattesi dopo i comandi su link usato: $(ls -A "$TMP/k")"
+
+# Link valido, ricevente nella cartella del mittente: curl -OJ rifiuta di sovrascrivere il file in
+# invio (curl -o lo troncherebbe mentre il mittente lo legge).
+mkdir -p "$TMP/same"
+cp "$TMP/payload.bin" "$TMP/same/same.bin"
+(cd "$TMP/same" && curl -N -sS "${UP_AUTH[@]}" -T same.bin "$BASE/same.bin" > "$TMP/same.out" 2> "$TMP/same.err") &
+SAME_PID=$!
+UP_PIDS+=("$SAME_PID")
+SAME_SLUG="$(wait_slug "$TMP/same.out")"
+[[ -n "$SAME_SLUG" ]] || fail "stessa cartella: nessuno slug entro 10 s"
+if (cd "$TMP/same" && curl -s -k -f -OJ "$BASE/$SAME_SLUG"); then fail "curl -OJ sul file in invio: uscita 0"; fi
+wait "$SAME_PID" || true
+cmp -s "$TMP/same/same.bin" "$TMP/payload.bin" || fail "curl -OJ nella cartella del mittente ha modificato il file in invio"
+
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ABCDEFGHIJ")"
 [[ "$CODE" == "404" ]] || fail "slug sconosciuto: $CODE, atteso 404"
 
@@ -122,12 +150,25 @@ UP2_PID=$!
 UP_PIDS+=("$UP2_PID")
 SLUG2="$(wait_slug "$TMP/upload2.out")"
 [[ -n "$SLUG2" ]] || fail "RS-2: nessuno slug entro 10 s"
-grep -q '^curl -o "mydir.tgz" ' "$TMP/upload2.out" || fail "RS-2: nome mydir.tgz mancante nei comandi"
+grep -qF '| wget -nc -O "mydir.tgz" ' "$TMP/upload2.out" || fail "RS-2: nome mydir.tgz mancante nei comandi"
 
-curl -sS -o "$TMP/mydir.tgz" "$BASE/$SLUG2" || fail "download RS-2 fallito"
-RECV2_SUM="$(sha256sum "$TMP/mydir.tgz" | awk '{print $1}')"
+# Download con la prima riga stampata (curl -f -OJ): il nome viene dall'header Content-Disposition.
+mkdir -p "$TMP/rs2"
+(cd "$TMP/rs2" && curl -sS -k -f -OJ "$BASE/$SLUG2") || fail "download RS-2 fallito"
+RECV2_SUM="$(sha256sum "$TMP/rs2/mydir.tgz" | awk '{print $1}')"
 [[ "$RECV2_SUM" == "$PAYLOAD_SUM" ]] || fail "sha256 RS-2 diverso"
 wait "$UP2_PID" || fail "upload RS-2 terminato con errore"
+
+# Nome non ASCII: curl -OJ legge filename (byte UTF-8), non filename*.
+curl -N -sS "${UP_AUTH[@]}" -T "$TMP/payload.bin" "$BASE/citt%C3%A0%20%C3%A8.bin" > "$TMP/utf8.out" 2> "$TMP/utf8.err" &
+UTF8_PID=$!
+UP_PIDS+=("$UTF8_PID")
+UTF8_SLUG="$(wait_slug "$TMP/utf8.out")"
+[[ -n "$UTF8_SLUG" ]] || fail "nome UTF-8: nessuno slug entro 10 s"
+mkdir -p "$TMP/utf8"
+(cd "$TMP/utf8" && curl -sS -k -f -OJ "$BASE/$UTF8_SLUG") || fail "download con nome UTF-8 fallito"
+cmp -s "$TMP/utf8/città è.bin" "$TMP/payload.bin" || fail "curl -OJ: nome UTF-8 non rispettato: $(ls -A "$TMP/utf8")"
+wait "$UTF8_PID" || fail "upload con nome UTF-8 terminato con errore"
 
 # RS-3: download con wget, come nella seconda riga stampata.
 if command -v wget > /dev/null; then
@@ -215,7 +256,7 @@ s.sendall(("PUT /wait.bin HTTP/1.1\r\nHost: " + u.netloc + "\r\n" + auth +
            "Content-Length: 1048576\r\n\r\n").encode() + b"x" * 1000)
 buf = b""
 deadline = time.time() + 10
-while b"wget -O" not in buf and time.time() < deadline:
+while b"wget -nc -O" not in buf and time.time() < deadline:
     chunk = s.recv(4096)
     if not chunk:
         break
@@ -262,8 +303,8 @@ AUTH_UP_PID=$!
 UP_PIDS+=("$AUTH_UP_PID")
 AUTH_SLUG="$(wait_slug "$TMP/auth.out")"
 [[ -n "$AUTH_SLUG" ]] || fail "auth: nessuno slug entro 10 s (auth.out: $(cat "$TMP/auth.out"))"
-grep -q '^curl -o "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con spazi mancante nel comando curl"
-grep -q '^wget -O "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con spazi mancante nel comando wget"
+grep -qF '| wget -nc -O "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con spazi mancante nel comando wget"
+grep -qF '| aria2c -x1 -s1 -o "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con spazi mancante nel comando aria2c"
 
 # Il download resta pubblico: nessuna credenziale richiesta.
 curl -sS -o "$TMP/auth.dl" "$AUTH_BASE/$AUTH_SLUG" || fail "download pubblico con auth fallito"

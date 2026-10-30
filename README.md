@@ -20,29 +20,45 @@ curl -T myfile.zip https://bashtransfer.mydomain.it
 Risposta immediata: una tabella ASCII con le righe di download, una per strumento:
 
 ```
-+------------------------------------------------------------------------+
-| bashtransfer: comandi per il ricevente                                 |
-+------------------------------------------------------------------------+
-
-+-- curl ----------------------------------------------------------------+
-curl -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
-
-+-- wget ----------------------------------------------------------------+
-wget -O "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
-
-+-- aria2c --------------------------------------------------------------+
-aria2c -x1 -s1 -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"
-
-+------------------------------------------------------------------------+
-| Un solo ricevente per link. Lascia aperto il terminale fino alla fine. |
-+------------------------------------------------------------------------+
++---------------------------------------------------------------------------------------+
+| bashtransfer: comandi per il ricevente                                                |
++--------+------------------------------------------------------------------------------+
+| curl   | curl -f -OJ "https://bashtransfer.mydomain.it/AbC123xY9z"                    |
+| wget   | wget -nc -O "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"       |
+| aria2c | aria2c -x1 -s1 -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z" |
++--------+------------------------------------------------------------------------------+
+| Un solo ricevente per link. Lascia aperto il terminale fino alla fine.                |
++---------------------------------------------------------------------------------------+
 ```
 
-I comandi stanno fuori dai bordi, a inizio riga e senza spazi finali: un triplo clic (o la selezione di una riga) copia solo il comando, pronto da incollare. La cornice ha larghezza fissa (74 colonne, entra in un terminale da 80): un comando più lungo sporge a destra e si incolla intero.
+La colonna dei comandi è larga quanto il comando più lungo: con nomi lunghi la tabella supera gli 80 caratteri e in un terminale stretto le righe vanno a capo. Il triplo clic su una riga seleziona anche i bordi `|`, che la shell non accetta: per copiare un comando selezionalo dall'inizio alla virgoletta finale, oppure usa uno dei modi in [Copiare il comando senza selezionarlo](#copiare-il-comando-senza-selezionarlo).
 
 Ricevente: esegue una delle tre righe. Il file viene scaricato mentre il mittente lo invia.
 
-Il nome del file è preso dal path dell'upload. Con `curl -T myfile.zip https://host` curl invia il nome locale come path e il comando è `-o "myfile.zip"` (verificato). Il nome `download` si usa solo quando il mittente invia da stdin (`-T -`) senza nome nel path.
+Nessuno dei tre comandi sovrascrive un file omonimo già presente. Il caso tipico è il ricevente che lancia il comando nella cartella del mittente, sulla stessa macchina: quel file è proprio quello in invio, e `curl -o` o `wget -O` lo troncherebbero mentre il mittente lo legge. Anche un link già usato o scaduto, che risponde `410` con il testo `gone`, non deve finire nel file.
+
+- `curl -f -OJ`: il nome arriva dall'header `Content-Disposition` e curl rifiuta di sovrascrivere un file esistente (codice 23, il link è consumato e il mittente deve reinviare). Con `-f` un errore HTTP esce con codice 22 senza scrivere nulla. Funziona con qualunque versione di curl; `--no-clobber` farebbe lo stesso con `-o` ma richiede curl 7.83 (Ubuntu 22.04 ha la 7.81).
+- `wget -nc -O`: se il file esiste wget non lo apre ed esce con codice 1.
+- `aria2c -o`: non scrive su un errore; con il file già presente salva con un altro nome (`myfile.1.zip`) e il trasferimento va a buon fine.
+
+L'header `Content-Disposition` contiene il nome sia in `filename*` (UTF-8 codificato, per i browser) sia in `filename` con i byte UTF-8 (per `curl -OJ`, che legge solo `filename`): i nomi con lettere accentate restano corretti.
+
+#### Copiare il comando senza selezionarlo
+
+Su Linux il doppio clic sull'URL lo seleziona tutto e il clic centrale lo incolla subito (selezione primaria, senza Ctrl+C né menu). Per un ricevente con curl basta l'URL: `curl -f -OJ URL`.
+
+Per avere il comando curl già negli appunti, una funzione da mettere nel `~/.bashrc` del mittente (`wl-copy` su Wayland, `xclip -selection clipboard` su X11):
+
+```bash
+bt() {
+  curl -N -T "$1" "https://bashtransfer.mydomain.it/${2:-}" | tee /dev/tty \
+    | sed -nu 's/^| curl *| \(.*[^ ]\) *|$/\1/p' | head -n 1 | wl-copy
+}
+```
+
+`bt myfile.zip` stampa la tabella e copia la riga curl negli appunti appena arriva; `bt - mydir.tgz` legge da stdin. `curl -N` e `sed -u` servono perché la riga arrivi subito, non a fine trasferimento.
+
+Il nome del file è preso dal path dell'upload. Con `curl -T myfile.zip https://host` curl invia il nome locale come path e il file del ricevente si chiama `myfile.zip` (verificato). Il nome `download` si usa solo quando il mittente invia da stdin (`-T -`) senza nome nel path.
 
 ### Scenario 2: stream da comando
 
@@ -62,7 +78,7 @@ Un `GET /` da browser (header `Accept` con `text/html`) mostra una pagina di cor
 
 ### Limiti del nome
 
-Il nome viene ripulito: si tiene solo l'ultimo segmento del path, si tolgono caratteri di controllo (anche C1), virgolette, backslash, separatori di riga e controlli bidirezionali Unicode, si tolgono i punti iniziali (`.bashrc` diventa `bashrc`: il ricevente esegue il comando nella sua directory e non deve sovrascrivere file nascosti), si limita a 128 caratteri. Un `/` codificato (`%2F`) conta come separatore: resta l'ultima parte. `$`, backtick e `!` diventano `_`, perché il nome finisce tra virgolette doppie in una riga che l'utente incolla in una shell. Un nome vuoto, o `-` (che per `curl -o` e `wget -O` è lo stdout), diventa `download`.
+Il nome viene ripulito: si tiene solo l'ultimo segmento del path, si tolgono caratteri di controllo (anche C1), virgolette, backslash, separatori di riga e controlli bidirezionali Unicode, si tolgono i punti iniziali (`.bashrc` diventa `bashrc`: il ricevente esegue il comando nella sua directory e non deve sovrascrivere file nascosti), si limita a 128 caratteri. Un `/` codificato (`%2F`) conta come separatore: resta l'ultima parte. `$`, backtick e `!` diventano `_`, perché il nome finisce tra virgolette doppie in una riga che l'utente incolla in una shell. Un nome vuoto, o `-` (che per `wget -O` è lo stdout), diventa `download`.
 
 ### Download multipart e ripresa
 

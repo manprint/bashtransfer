@@ -312,48 +312,50 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 	return n, err
 }
 
-// commands restituisce la tabella ASCII stampata al mittente, con le righe di download per curl,
-// wget e aria2c. aria2c usa una sola connessione: il relay è un flusso unico e non serve
-// intervalli di byte. Le righe di comando sono a inizio riga, senza bordi, e iniziano sempre con il
-// nome dello strumento.
+// commands restituisce la tabella ASCII stampata al mittente: una riga per strumento (curl, wget,
+// aria2c) con il comando di download. aria2c usa una sola connessione: il relay è un flusso unico
+// e non serve intervalli di byte.
+// Nessun comando deve sovrascrivere un file omonimo del ricevente: se il ricevente lavora nella
+// cartella del mittente, quel file è proprio quello in invio. curl -o lo troncherebbe (anche con
+// un link già usato: senza -f scriverebbe nel file il testo "gone" del 410), wget -O pure.
+// curl -OJ prende il nome da Content-Disposition e rifiuta di sovrascrivere un file esistente
+// (--no-clobber farebbe lo stesso con -o, ma richiede curl 7.83); -f evita di salvare la pagina
+// di errore. wget -nc non tocca un file già presente. aria2c non scrive su un errore e, con il
+// file già presente, salva con un altro nome.
 func commands(name, u string) string {
 	cmds := []struct{ label, line string }{
-		{"curl", fmt.Sprintf("curl -o \"%s\" \"%s\"", name, u)},
-		{"wget", fmt.Sprintf("wget -O \"%s\" \"%s\"", name, u)},
+		{"curl", fmt.Sprintf("curl -f -OJ \"%s\"", u)},
+		{"wget", fmt.Sprintf("wget -nc -O \"%s\" \"%s\"", name, u)},
 		{"aria2c", fmt.Sprintf("aria2c -x1 -s1 -o \"%s\" \"%s\"", name, u)},
 	}
 	const (
 		title = "bashtransfer: comandi per il ricevente"
 		note  = "Un solo ricevente per link. Lascia aperto il terminale fino alla fine."
 	)
-	// Larghezza interna della cornice: dipende solo da titolo e nota, mai dai comandi. I comandi
-	// stanno fuori dai bordi, a inizio riga, così la selezione di una riga (o un triplo clic) copia
-	// solo il comando; uno più lungo della cornice sporge a destra e si incolla intero, mentre una
-	// cornice più larga del terminale andrebbe a capo e si romperebbe.
-	w := max(utf8.RuneCountInString(title), utf8.RuneCountInString(note))
-	rule := func(label string) string {
-		if label == "" {
-			return "+" + strings.Repeat("-", w+2) + "+\n"
-		}
-		return "+-- " + label + " " + strings.Repeat("-", w+2-len(label)-4) + "+\n"
-	}
-	row := func(text string) string {
-		return "| " + text + strings.Repeat(" ", w-utf8.RuneCountInString(text)) + " |\n"
-	}
-	var b strings.Builder
-	b.WriteString(rule(""))
-	b.WriteString(row(title))
-	b.WriteString(rule(""))
-	// Una riga vuota prima di ogni sezione e prima della nota.
+	// Due colonne (strumento, comando) larghe quanto il contenuto più lungo; titolo e nota occupano
+	// tutta la larghezza. Se sono più larghi dei comandi, la colonna dei comandi si allarga.
+	lw, cw := 0, 0
 	for _, c := range cmds {
-		b.WriteString("\n")
-		b.WriteString(rule(c.label))
-		b.WriteString(c.line + "\n")
+		lw = max(lw, len(c.label))
+		cw = max(cw, utf8.RuneCountInString(c.line))
 	}
-	b.WriteString("\n")
-	b.WriteString(rule(""))
-	b.WriteString(row(note))
-	b.WriteString(rule(""))
+	inner := max(lw+3+cw, utf8.RuneCountInString(title), utf8.RuneCountInString(note))
+	cw = inner - lw - 3
+	pad := func(s string, w int) string {
+		return s + strings.Repeat(" ", w-utf8.RuneCountInString(s))
+	}
+	full := "+" + strings.Repeat("-", inner+2) + "+\n"
+	split := "+" + strings.Repeat("-", lw+2) + "+" + strings.Repeat("-", cw+2) + "+\n"
+	var b strings.Builder
+	b.WriteString(full)
+	b.WriteString("| " + pad(title, inner) + " |\n")
+	b.WriteString(split)
+	for _, c := range cmds {
+		b.WriteString("| " + pad(c.label, lw) + " | " + pad(c.line, cw) + " |\n")
+	}
+	b.WriteString(split)
+	b.WriteString("| " + pad(note, inner) + " |\n")
+	b.WriteString(full)
 	return b.String()
 }
 

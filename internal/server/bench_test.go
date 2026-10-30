@@ -62,8 +62,8 @@ func slugPath(br *bufio.Reader) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if strings.HasPrefix(line, "curl -o") {
-			return "/" + slugOf(line), nil
+		if c := cmdOf(line); strings.HasPrefix(c, "curl ") {
+			return "/" + slugOf(c), nil
 		}
 	}
 }

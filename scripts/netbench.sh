@@ -113,7 +113,7 @@ measure() {
 	docker exec "$sender" sh -c 'pkill -x curl; rm -f /tmp/up.out' > /dev/null 2>&1 || true
 	docker exec -d "$sender" sh -c "head -c 1000000000000 /dev/zero | curl -sS -N -T - http://$SRV:8080/nb.bin > /tmp/up.out 2>&1"
 	for _ in $(seq 1 100); do
-		slug="$(docker exec "$sender" sh -c 'cat /tmp/up.out 2>/dev/null' | sed -n 's#^curl -o "[^"]*" ".*/\([0-9A-Za-z]\{10\}\)"$#\1#p' | head -n 1)"
+		slug="$(docker exec "$sender" sh -c 'cat /tmp/up.out 2>/dev/null' | sed -n 's#^| curl *| curl -f -OJ ".*/\([0-9A-Za-z]\{10\}\)" *|$#\1#p' | head -n 1)"
 		[[ -n "$slug" ]] && break
 		sleep 0.1
 	done

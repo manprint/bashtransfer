@@ -18,10 +18,12 @@ import (
 	"net/http/httptrace"
 	"net/textproto"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"bashtransfer/internal/relay"
 )
@@ -55,6 +57,22 @@ func within[T any](t *testing.T, d time.Duration, what string, fn func() T) T {
 	}
 	var zero T
 	return zero
+}
+
+// cmdOf estrae il comando da una riga della tabella ("| curl   | curl -f -OJ ... |"); "" se la
+// riga non è una riga di comando. La prima colonna non contiene "|", quindi il primo "|" dopo il
+// bordo separa le colonne anche se il nome del file contiene "|".
+func cmdOf(line string) string {
+	s := strings.TrimSpace(line)
+	if !strings.HasPrefix(s, "|") || !strings.HasSuffix(s, "|") || len(s) < 2 {
+		return ""
+	}
+	s = s[1 : len(s)-1]
+	i := strings.Index(s, "|")
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(s[i+1:])
 }
 
 // slugOf estrae lo slug dall'ultima parte dell'URL in una riga di comando.
@@ -101,13 +119,13 @@ func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *up
 	within(t, 5*time.Second, "righe dei comandi", func() bool {
 		for i := 0; i < 20 && (curl == "" || wget == "" || aria2 == ""); i++ {
 			l, err := br.ReadString('\n')
-			switch {
-			case strings.HasPrefix(l, "curl -o"):
-				curl = l
-			case strings.HasPrefix(l, "wget -O"):
-				wget = l
-			case strings.HasPrefix(l, "aria2c "):
-				aria2 = l
+			switch c := cmdOf(l); {
+			case strings.HasPrefix(c, "curl "):
+				curl = c
+			case strings.HasPrefix(c, "wget "):
+				wget = c
+			case strings.HasPrefix(c, "aria2c "):
+				aria2 = c
 			}
 			if err != nil {
 				break
@@ -118,13 +136,13 @@ func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *up
 	return &upload{resp: resp, br: br, curlLine: curl, wgetLine: wget, aria2Line: aria2, slug: slugOf(curl)}
 }
 
-// readCurlLine legge la risposta del mittente fino alla riga del comando curl, saltando la
-// cornice della tabella dei comandi.
+// readCurlLine legge la risposta del mittente fino alla riga del comando curl e ne restituisce il
+// comando, senza le colonne della tabella.
 func readCurlLine(br *bufio.Reader) (string, error) {
 	for {
 		l, err := br.ReadString('\n')
-		if strings.HasPrefix(l, "curl -o") {
-			return l, nil
+		if c := cmdOf(l); strings.HasPrefix(c, "curl ") {
+			return c, nil
 		}
 		if err != nil {
 			return l, err
@@ -182,10 +200,10 @@ func TestUploadReturnsCommandsBeforeBody(t *testing.T) {
 	defer pw.Close()
 
 	u := openUpload(t, ctx, srv.URL+"/", pr)
-	if !strings.HasPrefix(u.curlLine, `curl -o "`) {
+	if !strings.HasPrefix(u.curlLine, `curl -f -OJ "`) {
 		t.Errorf("riga curl: %q", u.curlLine)
 	}
-	if !strings.HasPrefix(u.wgetLine, `wget -O "`) {
+	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "`) {
 		t.Errorf("riga wget: %q", u.wgetLine)
 	}
 	if len(u.slug) != 10 {
@@ -337,8 +355,8 @@ func TestSenderAbortFailsReceiver(t *testing.T) {
 		if err != nil {
 			t.Fatalf("lettura comandi: %v", err)
 		}
-		if strings.HasPrefix(strings.TrimSpace(line), "curl -o") {
-			slug = slugOf(line)
+		if c := cmdOf(line); strings.HasPrefix(c, "curl ") {
+			slug = slugOf(c)
 		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -474,10 +492,7 @@ func TestUploadNameFromPath(t *testing.T) {
 	defer pw.Close()
 
 	u := openUpload(t, ctx, srv.URL+"/mydir.tgz", pr)
-	if !strings.HasPrefix(u.curlLine, `curl -o "mydir.tgz" "`) {
-		t.Errorf("riga curl: %q", u.curlLine)
-	}
-	if !strings.HasPrefix(u.wgetLine, `wget -O "mydir.tgz" "`) {
+	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "mydir.tgz" "`) {
 		t.Errorf("riga wget: %q", u.wgetLine)
 	}
 }
@@ -506,8 +521,8 @@ func TestUploadIdleTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("lettura comandi: %v", err)
 		}
-		if strings.HasPrefix(strings.TrimSpace(line), "curl -o") {
-			slug = slugOf(line)
+		if c := cmdOf(line); strings.HasPrefix(c, "curl ") {
+			slug = slugOf(c)
 		}
 	}
 	_ = conn.SetReadDeadline(time.Time{})
@@ -666,7 +681,8 @@ func TestCommandLineHasNoShellExpansion(t *testing.T) {
 	}
 }
 
-// TestDownloadHeadersNonASCII: nome non ASCII codificato con filename* (RFC 6266).
+// TestDownloadHeadersNonASCII: nome non ASCII codificato con filename* (RFC 6266), preceduto da
+// filename con i byte UTF-8 per curl -OJ, che legge solo filename.
 func TestDownloadHeadersNonASCII(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -680,6 +696,9 @@ func TestDownloadHeadersNonASCII(t *testing.T) {
 	_, params, err := mime.ParseMediaType(cd)
 	if err != nil || params["filename"] != "città.zip" {
 		t.Fatalf("Content-Disposition %q: filename %q err %v", cd, params["filename"], err)
+	}
+	if want := `attachment; filename="città.zip"; filename*=utf-8''citt%C3%A0.zip`; cd != want {
+		t.Errorf("Content-Disposition %q, atteso %q", cd, want)
 	}
 	if dl.Header.Get("Cache-Control") != "no-store" || dl.Header.Get("X-Content-Type-Options") != "nosniff" {
 		t.Errorf("header di sicurezza mancanti: %v", dl.Header)
@@ -1050,7 +1069,7 @@ func TestUploadCapacity503(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "curl -o") {
+	if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "curl -f -OJ") {
 		t.Fatalf("PUT oltre capacità: stato %d body %q, atteso 503", resp.StatusCode, body)
 	}
 
@@ -1207,8 +1226,8 @@ func TestUploadNameEncodedSlash(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	u := openUpload(t, ctx, srv.URL+"/a%2Fb.txt", pr)
-	if !strings.HasPrefix(u.curlLine, `curl -o "b.txt" `) {
-		t.Fatalf("riga curl %q, atteso nome b.txt", u.curlLine)
+	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "b.txt" `) {
+		t.Fatalf("riga wget %q, atteso nome b.txt", u.wgetLine)
 	}
 	resp := get(t, ctx, srv.URL+"/AbC%2F12345")
 	resp.Body.Close()
@@ -1228,9 +1247,9 @@ func TestUploadCommands(t *testing.T) {
 	u := openUpload(t, ctx, srv.URL+"/a%20b.tgz", pr)
 	url := srv.URL + "/" + u.slug
 	want := []string{
-		`curl -o "a b.tgz" "` + url + `"` + "\n",
-		`wget -O "a b.tgz" "` + url + `"` + "\n",
-		`aria2c -x1 -s1 -o "a b.tgz" "` + url + `"` + "\n",
+		`curl -f -OJ "` + url + `"`,
+		`wget -nc -O "a b.tgz" "` + url + `"`,
+		`aria2c -x1 -s1 -o "a b.tgz" "` + url + `"`,
 	}
 	for i, got := range []string{u.curlLine, u.wgetLine, u.aria2Line} {
 		if got != want[i] {
@@ -1749,48 +1768,43 @@ func TestHomeEscapesBase(t *testing.T) {
 	}
 }
 
-// TestCommandsTable: tabella ASCII con le righe di comando a inizio riga e senza spazi finali
-// (copiabili con un triplo clic); le righe di cornice hanno tutte la stessa larghezza, entro 80
-// colonne anche con un comando lunghissimo, e una riga vuota precede ogni sezione.
+// TestCommandsTable: tabella ASCII a due colonne (strumento, comando); tutte le righe hanno la
+// stessa larghezza, anche con un nome corto (titolo e nota più larghi dei comandi), con un nome
+// lunghissimo e con caratteri non ASCII; le tre righe di comando restituiscono i comandi interi.
 func TestCommandsTable(t *testing.T) {
 	long := strings.Repeat("x", 120) + ".tgz"
-	for _, name := range []string{"a b.tgz", long} {
-		checkCommandsTable(t, commands(name, "https://h.it/AbC123xY9z"))
+	for _, name := range []string{"a", "a b.tgz", "perché è così.zip", long} {
+		u := "https://h.it/AbC123xY9z"
+		checkCommandsTable(t, commands(name, u), name, u)
 	}
 }
 
-func checkCommandsTable(t *testing.T, out string) {
+func checkCommandsTable(t *testing.T, out, name, u string) {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	width := -1
-	cmds := 0
-	for i, l := range lines {
-		switch {
-		case l == "":
-		case strings.HasPrefix(l, "+") || strings.HasPrefix(l, "|"):
-			if width == -1 {
-				width = len(l)
-			}
-			if len(l) != width {
-				t.Errorf("riga di cornice di larghezza %d, attesa %d: %q", len(l), width, l)
-			}
-			if width > 80 {
-				t.Errorf("cornice di %d colonne, oltre 80: %q", width, l)
-			}
-			if strings.HasPrefix(l, "+-- ") && lines[i-1] != "" {
-				t.Errorf("manca la riga vuota prima di %q", l)
-			}
-		default:
-			cmds++
-			if l != strings.TrimSpace(l) {
-				t.Errorf("riga di comando con spazi ai bordi: %q", l)
-			}
-			if !strings.HasPrefix(l, "curl ") && !strings.HasPrefix(l, "wget ") && !strings.HasPrefix(l, "aria2c ") {
-				t.Errorf("riga inattesa: %q", l)
-			}
+	var cmds []string
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "|") {
+			t.Errorf("riga fuori dalla tabella: %q", l)
+			continue
+		}
+		if width == -1 {
+			width = utf8.RuneCountInString(l)
+		}
+		if n := utf8.RuneCountInString(l); n != width {
+			t.Errorf("riga di larghezza %d, attesa %d: %q", n, width, l)
+		}
+		if c := cmdOf(l); c != "" {
+			cmds = append(cmds, c)
 		}
 	}
-	if cmds != 3 {
-		t.Errorf("%d righe di comando, attese 3", cmds)
+	want := []string{
+		`curl -f -OJ "` + u + `"`,
+		`wget -nc -O "` + name + `" "` + u + `"`,
+		`aria2c -x1 -s1 -o "` + name + `" "` + u + `"`,
+	}
+	if !slices.Equal(cmds, want) {
+		t.Errorf("comandi %q, attesi %q", cmds, want)
 	}
 }

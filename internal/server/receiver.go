@@ -4,6 +4,7 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -68,9 +69,16 @@ func (r *responseReceiver) clearWriteDeadline() {
 }
 
 // contentDisposition codifica il nome (RFC 6266): ASCII tra virgolette, altrimenti filename*.
+// Con filename* aggiunge prima filename="..." con i byte UTF-8 del nome: curl -OJ legge solo
+// filename (senza, salverebbe il file con il nome dello slug), i browser preferiscono filename*.
+// Il nome è già ripulito da SanitizeName: niente virgolette, backslash o caratteri di controllo.
 func contentDisposition(name string) string {
-	if v := mime.FormatMediaType("attachment", map[string]string{"filename": name}); v != "" {
-		return v
+	v := mime.FormatMediaType("attachment", map[string]string{"filename": name})
+	if v == "" {
+		return "attachment"
 	}
-	return "attachment"
+	if rest, ok := strings.CutPrefix(v, "attachment; filename*="); ok {
+		return `attachment; filename="` + name + `"; filename*=` + rest
+	}
+	return v
 }
