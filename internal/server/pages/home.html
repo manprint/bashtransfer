@@ -1,0 +1,366 @@
+{{define "head"}}<meta name="description" content="Bashtransfer: send a file from the browser or with curl; the receiver downloads it at the same time, in a browser or a terminal. Nothing is stored on the server.">
+{{end}}
+{{define "style"}}
+.drop{
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.35rem;
+  min-height:11.5rem; padding:1.5rem 1rem; text-align:center;
+  border:2px dashed var(--line-strong); border-radius:12px; background:var(--code);
+  transition:border-color .15s, background-color .15s;
+}
+.drop.over{border-color:var(--accent); background:var(--accent-soft)}
+.drop svg{width:2.4rem; height:2.4rem; color:var(--muted); margin-bottom:.2rem}
+.drop-title{margin:0; font-weight:600; font-size:1.02rem}
+.drop .primary{margin:.6rem 0 .35rem}
+.drop .muted{margin:0}
+.drop-error{margin:.25rem 0 0; color:var(--err); font-size:.9rem; font-weight:600}
+@media (max-width:40rem){ .drop{min-height:0; padding:1.25rem 1rem} }
+.xfer-head{display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:.25rem}
+.xfer-file{min-width:0}
+.xfer-file strong{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.xfer h3{margin:1.1rem 0 .1rem}
+.bar{height:.55rem; margin:1.1rem 0 .5rem; border-radius:999px; background:var(--line); overflow:hidden}
+.bar span{display:block; width:0; height:100%; border-radius:inherit; background:var(--accent); transition:width .25s linear}
+.bar.ok span{background:var(--ok)}
+.bar.err span{background:var(--err)}
+.stats{display:flex; flex-wrap:wrap; justify-content:space-between; gap:.25rem 1rem; font-size:.9rem; font-variant-numeric:tabular-nums}
+.stats .pct{font-weight:700}
+.status{margin:.35rem 0 0; color:var(--muted); font-size:.9rem}
+.result{display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-top:1rem; padding:.8rem 1rem; border-radius:var(--radius); font-weight:600}
+.result.ok{background:var(--ok-soft); color:var(--ok)}
+.result.err{background:var(--err-soft); color:var(--err)}
+.result button{flex:none}
+@media (max-width:40rem){ .result{flex-direction:column; align-items:stretch} }
+{{end}}
+{{define "content"}}
+<section class="card" aria-labelledby="upload">
+  <h2 id="upload"><span class="role role-send">Sender</span>Send a file</h2>
+  <div class="drop" id="drop">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+    <p class="drop-title">Drag a file here</p>
+    <p class="muted">or</p>
+    <button class="primary" id="pick" type="button">Upload</button>
+    <p class="muted">One file at a time. Keep this page open while the receiver downloads it.</p>
+    <p class="drop-error" id="drop-error" role="alert" hidden></p>
+    <input type="file" id="file" hidden>
+  </div>
+  <div class="xfer" id="xfer" hidden>
+    <div class="xfer-head">
+      <div class="xfer-file"><strong id="x-name"></strong><span class="muted" id="x-size"></span></div>
+      <button class="ghost" id="x-cancel" type="button">Cancel</button>
+    </div>
+    <div id="x-links" hidden>
+      <h3>Send this to the receiver</h3>
+      <div class="rows tools" id="x-rows"></div>
+      <p class="muted">One receiver per link. Keep this page open until the end.</p>
+    </div>
+    <div class="bar" id="x-bar" role="progressbar" aria-label="Transfer" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+    <div class="stats"><span class="pct" id="x-pct">0%</span><span id="x-rate"></span><span id="x-amount"></span></div>
+    <p class="status" id="x-status" role="status"></p>
+    <div class="result" id="x-result" role="alert" hidden><span id="x-result-text"></span><button class="ghost" id="x-again" type="button">Send another file</button></div>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="send">
+  <h2 id="send"><span class="role role-send">Sender</span>Send from a terminal</h2>
+  <p>Replace <code>FILE</code> with the file to send:</p>
+  <div class="cmd"><code class="field" id="c-send">curl {{.Base}} -T FILE</code><button class="copy" type="button" data-copy="c-send">Copy</button></div>
+  <p>To send a folder, or the output of any command, use a pipe: nothing is written to disk.</p>
+  <div class="cmd"><code class="field" id="c-pipe">tar -czf - FOLDER | curl -N {{.Base}}/FOLDER.tgz -T -</code><button class="copy" type="button" data-copy="c-pipe">Copy</button></div>
+  <ol class="notes">
+    <li>curl prints a table with the link and the commands for the receiver: send them to the receiver.</li>
+    <li>Keep the terminal open: the file leaves your computer only while the receiver downloads it.</li>
+    <li>The last line tells you how it went: <code>OK</code> when the receiver got every byte, <code>ERRORE</code> with the reason otherwise.</li>
+  </ol>
+  <p class="muted">Windows: type <code>curl.exe</code>; in Windows PowerShell <code>curl</code> is an alias of <code>Invoke-WebRequest</code>.</p>
+</section>
+
+<section class="card" aria-labelledby="receive">
+  <h2 id="receive"><span class="role role-recv">Receiver</span>Receive a file</h2>
+  <h3>In a browser</h3>
+  <p>Open the link from the sender (the <code>direct</code> row of the table) and press <strong>Download</strong>.</p>
+  <h3>From a terminal</h3>
+  <p>Run one of the commands from the sender's table. Here <code>LINK</code> stands for the link:</p>
+  <div class="rows nocopy">
+    {{- range .Receive}}
+    <span class="label">{{.Label}}</span><code class="field">{{.Line}}</code>
+    {{- end}}
+  </div>
+  <p class="muted">Each link works for one download only and expires if nobody uses it. These commands never overwrite an existing file.</p>
+</section>
+
+<section class="card" aria-labelledby="install">
+  <h2 id="install">Install the tools</h2>
+  <p class="muted">The terminal sender needs curl; the receiver needs a browser, or one of curl, wget and aria2c. Most systems already have curl.</p>
+  <div class="rows">
+    <span class="label">Debian / Ubuntu</span><code class="field" id="i1">sudo apt install curl wget aria2</code><button class="copy" type="button" data-copy="i1">Copy</button>
+    <span class="label">Fedora / RHEL</span><code class="field" id="i2">sudo dnf install curl wget aria2</code><button class="copy" type="button" data-copy="i2">Copy</button>
+    <span class="label">Arch / Manjaro</span><code class="field" id="i3">sudo pacman -S curl wget aria2</code><button class="copy" type="button" data-copy="i3">Copy</button>
+    <span class="label">openSUSE</span><code class="field" id="i4">sudo zypper install curl wget aria2</code><button class="copy" type="button" data-copy="i4">Copy</button>
+    <span class="label">Alpine</span><code class="field" id="i5">apk add curl wget aria2</code><button class="copy" type="button" data-copy="i5">Copy</button>
+    <span class="label">macOS (Homebrew)</span><code class="field" id="i6">brew install curl wget aria2</code><button class="copy" type="button" data-copy="i6">Copy</button>
+    <span class="label">FreeBSD</span><code class="field" id="i7">sudo pkg install curl wget aria2</code><button class="copy" type="button" data-copy="i7">Copy</button>
+    <span class="label">Windows: wget</span><code class="field" id="i8">winget install JernejSimoncic.Wget</code><button class="copy" type="button" data-copy="i8">Copy</button>
+    <span class="label">Windows: aria2</span><code class="field" id="i9">winget install aria2.aria2</code><button class="copy" type="button" data-copy="i9">Copy</button>
+  </div>
+  <p class="muted">Windows 10 and 11 already include <code>curl.exe</code>.</p>
+</section>
+
+<section class="card" aria-labelledby="privacy">
+  <h2 id="privacy">Privacy and security</h2>
+  <ul class="facts">
+    <li><strong>Nothing is stored.</strong> The file streams from the sender to the receiver. Bashtransfer holds only the bytes in transit, in memory, and never writes the file to disk.</li>
+    <li><strong>Single-use links.</strong> Each link is random, works for one download and expires if nobody uses it.</li>
+    {{- if .HTTPS}}
+    <li><strong>Encrypted in transit.</strong> Both connections, sender to server and server to receiver, use HTTPS.</li>
+    <li><strong>Not end-to-end encrypted.</strong> HTTPS protects the file on the network, but the server sees it while relaying it. Encrypt confidential files before sending them.</li>
+    {{- else}}
+    <li><strong>Not encrypted.</strong> This server is reached over plain HTTP, and the server sees the file while relaying it. Encrypt confidential files before sending them.</li>
+    {{- end}}
+  </ul>
+</section>
+{{end}}
+{{define "script"}}<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var drop = $("drop"), input = $("file"), xfer = $("xfer"), bar = $("x-bar");
+  // link è la prenotazione (slug e token), ctl chiude il suo stream, xhr invia il file.
+  var link = null, ctl = null, xhr = null, busy = false, attached = false, total = 0, samples = [], ticker = 0, fallback = 0;
+
+  function size(n) {
+    if (n < 1024) return n + (n === 1 ? " byte" : " bytes");
+    var u = ["KiB", "MiB", "GiB", "TiB"], i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return n.toFixed(1) + " " + u[i];
+  }
+  function duration(s) {
+    s = Math.max(1, Math.round(s));
+    if (s < 60) return s + " s";
+    if (s < 3600) return Math.floor(s / 60) + " min " + (s % 60) + " s";
+    return Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min";
+  }
+  function setError(msg) { var e = $("drop-error"); e.textContent = msg; e.hidden = !msg; }
+  function status(msg) { $("x-status").textContent = msg; }
+
+  // Byte consegnati al ricevente, come li conta il server; velocità media sugli ultimi 3 secondi.
+  function delivered() { return samples.length ? samples[samples.length - 1].b : 0; }
+  function sample(b) {
+    var now = Date.now();
+    samples.push({ t: now, b: b });
+    while (samples.length > 2 && now - samples[0].t > 3000) samples.shift();
+  }
+  function rate() {
+    if (samples.length < 2) return 0;
+    var a = samples[0], b = samples[samples.length - 1];
+    return b.t > a.t ? (b.b - a.b) * 1000 / (b.t - a.t) : 0;
+  }
+  function render() {
+    var n = delivered(), pct = total ? Math.floor(n * 100 / total) : 0;
+    bar.firstElementChild.style.width = (total ? n * 100 / total : 0) + "%";
+    bar.setAttribute("aria-valuenow", pct);
+    $("x-pct").textContent = pct + "%";
+    var r = attached ? rate() : 0;
+    $("x-rate").textContent = r > 0 ? size(r) + "/s" : "";
+    $("x-amount").textContent = size(n) + " of " + size(total) + (r > 0 && n < total ? " · " + duration((total - n) / r) + " left" : "");
+    if (attached) status(n < total ? "Sending to the receiver…" : "Finishing…");
+  }
+
+  var reasons = {
+    receiver_gone: "The receiver disconnected or stopped downloading.",
+    idle: "The upload stalled: no data from this browser for too long.",
+    length_mismatch: "The browser sent fewer bytes than the file size.",
+    sender_gone: "The upload from this browser was interrupted.",
+    expired: "No receiver opened the link in time: the link is closed."
+  };
+  // cancelLink chiude il link sul server. keepalive: la richiesta parte anche mentre la pagina si
+  // chiude. Dietro un proxy la sola chiusura delle connessioni arriva al server in ritardo.
+  function cancelLink() {
+    if (!link) return;
+    try {
+      fetch("/" + encodeURIComponent(link.slug), { method: "DELETE", headers: { "X-Bashtransfer-Token": link.token }, keepalive: true }).catch(function () {});
+    } catch (e) {}
+    link = null;
+  }
+  function finish(ok, msg) {
+    if (!busy) return;
+    busy = false;
+    clearInterval(ticker);
+    clearTimeout(fallback);
+    if (!ok) {
+      if (ctl) ctl.abort();
+      if (xhr) xhr.abort();
+    }
+    $("x-links").hidden = true;
+    $("x-cancel").hidden = true;
+    status("");
+    $("x-rate").textContent = "";
+    $("x-amount").textContent = size(delivered()) + " of " + size(total);
+    bar.classList.add(ok ? "ok" : "err");
+    if (ok) {
+      bar.firstElementChild.style.width = "100%";
+      bar.setAttribute("aria-valuenow", 100);
+      $("x-pct").textContent = "100%";
+    }
+    var res = $("x-result");
+    res.className = "result " + (ok ? "ok" : "err");
+    $("x-result-text").textContent = msg;
+    res.hidden = false;
+    $("x-again").focus();
+  }
+  // shown marca un errore il cui messaggio è per l'utente.
+  function shown(msg) { var e = new Error(msg); e.shown = true; return e; }
+  function outcome(o) {
+    sample(o.bytes);
+    if (o.outcome === "ok") finish(true, "Done: the receiver got the whole file (" + size(o.bytes) + " in " + duration(o.seconds) + ").");
+    else finish(false, reasons[o.outcome] || "The transfer failed.");
+  }
+
+  function start(file) {
+    setError("");
+    busy = true;
+    attached = false;
+    total = file.size;
+    samples = [];
+    drop.hidden = true;
+    xfer.hidden = false;
+    $("x-name").textContent = file.name;
+    $("x-size").textContent = size(file.size);
+    $("x-links").hidden = true;
+    $("x-result").hidden = true;
+    $("x-cancel").hidden = false;
+    bar.className = "bar";
+    sample(0);
+    render();
+    status("Creating the link…");
+    ctl = new AbortController();
+    var reserved = false;
+    // La risposta è uno stream NDJSON aperto per tutto il trasferimento: la prenotazione, poi
+    // attached, progress e infine l'esito. Chiuderlo annulla l'invio.
+    fetch("/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, size: file.size }),
+      signal: ctl.signal
+    }).then(function (r) {
+      if (!r.ok) {
+        throw shown(r.status === 503 ? "The server is busy: try again in a moment."
+          : r.status === 401 ? "This server requires a login to send files."
+          : "Could not create the link (HTTP " + r.status + ").");
+      }
+      var reader = r.body.getReader(), dec = new TextDecoder(), buf = "";
+      function line(l) {
+        var m = JSON.parse(l);
+        if (!reserved) {
+          reserved = true;
+          link = { slug: m.slug, token: m.token };
+          showLinks(m.commands);
+          status("Waiting for the receiver to open the link…");
+          send(file, m);
+        } else if (m.outcome) {
+          link = null;
+          outcome(m);
+        } else if (m.event === "attached") {
+          // La velocità parte dal primo avanzamento: il primo blocco riempie solo i buffer di rete.
+          attached = true;
+          samples = [];
+          render();
+          ticker = setInterval(function () { if (samples.length) sample(delivered()); render(); }, 500);
+        } else if (m.event === "progress") {
+          sample(m.bytes);
+          render();
+        }
+      }
+      function pump() {
+        return reader.read().then(function (c) {
+          if (!busy) return;
+          if (c.done) throw new Error();
+          buf += dec.decode(c.value, { stream: true });
+          for (var i; busy && (i = buf.indexOf("\n")) >= 0; buf = buf.slice(i + 1)) {
+            if (buf.slice(0, i).trim()) line(buf.slice(0, i));
+          }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (e) {
+      if (busy) cancelLink();
+      finish(false, e.shown ? e.message : (reserved
+        ? "The connection to the server was lost: the link no longer works."
+        : "Could not reach the server."));
+    });
+  }
+
+  function showLinks(cmds) {
+    var rows = $("x-rows");
+    rows.textContent = "";
+    cmds.forEach(function (c, i) {
+      var label = document.createElement("span");
+      label.className = "label";
+      label.textContent = c.label;
+      var code = document.createElement("code");
+      code.className = "field";
+      code.id = "x-c" + i;
+      code.textContent = c.line;
+      var btn = document.createElement("button");
+      btn.className = "copy";
+      btn.type = "button";
+      btn.setAttribute("data-copy", code.id);
+      btn.textContent = "Copy";
+      rows.append(label, code, btn);
+    });
+    $("x-links").hidden = false;
+  }
+
+  // L'esito arriva dallo stream. La risposta del PUT lo ripete, ma su HTTP/1 il browser la perde
+  // quando il server chiude prima di aver letto tutto il body (e può ripetere il PUT, che trova il
+  // link già usato): serve solo se lo stream tace, per esempio dietro un proxy che lo trattiene.
+  function send(file, res) {
+    xhr = new XMLHttpRequest();
+    xhr.open("PUT", "/" + encodeURIComponent(res.slug));
+    xhr.setRequestHeader("X-Bashtransfer-Token", res.token);
+    xhr.onload = function () {
+      var lines = xhr.responseText.split("\n").map(function (l) { return l.trim(); }).filter(Boolean), o = null;
+      try { o = JSON.parse(lines[lines.length - 1]); } catch (e) { return; }
+      if (o && o.outcome) fallback = setTimeout(function () { outcome(o); }, 5000);
+    };
+    xhr.send(file);
+  }
+
+  function reset() {
+    xfer.hidden = true;
+    drop.hidden = false;
+    link = ctl = xhr = null;
+    $("pick").focus();
+  }
+
+  function choose(files, items) {
+    if (busy) return;
+    if (!files || files.length === 0) return;
+    if (files.length > 1) { setError("Drop one file at a time."); return; }
+    var entry = items && items[0] && items[0].webkitGetAsEntry ? items[0].webkitGetAsEntry() : null;
+    if (entry && entry.isDirectory) { setError("Folders can't be sent from the browser: compress the folder first, or use tar and curl from a terminal."); return; }
+    start(files[0]);
+  }
+
+  $("pick").addEventListener("click", function () { input.click(); });
+  input.addEventListener("change", function () { choose(input.files); input.value = ""; });
+  $("x-cancel").addEventListener("click", function () { cancelLink(); finish(false, "Cancelled: the link no longer works."); });
+  $("x-again").addEventListener("click", reset);
+
+  var depth = 0;
+  drop.addEventListener("dragenter", function (e) { e.preventDefault(); depth++; drop.classList.add("over"); });
+  drop.addEventListener("dragleave", function () { if (--depth <= 0) { depth = 0; drop.classList.remove("over"); } });
+  drop.addEventListener("dragover", function (e) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; });
+  drop.addEventListener("drop", function (e) {
+    e.preventDefault();
+    depth = 0;
+    drop.classList.remove("over");
+    choose(e.dataTransfer.files, e.dataTransfer.items);
+  });
+  // Un file lasciato fuori dal riquadro non deve aprirsi al posto della pagina.
+  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("drop", function (e) { e.preventDefault(); });
+  window.addEventListener("beforeunload", function (e) { if (busy) { e.preventDefault(); e.returnValue = ""; } });
+  window.addEventListener("pagehide", function () { if (busy) cancelLink(); });
+})();
+</script>
+{{end}}

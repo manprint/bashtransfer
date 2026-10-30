@@ -1,0 +1,145 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+{{if .NoIndex}}<meta name="robots" content="noindex, nofollow">
+{{end}}<title>{{.Title}}</title>
+{{block "head" .}}{{end}}<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1220'/%3E%3Cpath d='M18 21l14 11-14 11' fill='none' stroke='%2338bdf8' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M37 44h13' fill='none' stroke='%23f8fafc' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#f5f7fa; --card:#fff; --fg:#0f172a; --muted:#5b6678; --line:#e2e8f0; --line-strong:#cbd5e1;
+  --code:#f1f5f9; --accent:#0369a1; --accent-fg:#fff; --accent-soft:#e0f2fe;
+  --ok:#15803d; --ok-soft:#dcfce7; --err:#b91c1c; --err-soft:#fee2e2; --send:#0369a1; --recv:#15803d;
+  --btn:6.5rem; --radius:10px;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --shadow:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06);
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --bg:#0b0f14; --card:#111821; --fg:#e5e9f0; --muted:#97a3b6; --line:#1f2a37; --line-strong:#334155;
+    --code:#0b1220; --accent:#38bdf8; --accent-fg:#04121c; --accent-soft:#0c2a3d;
+    --ok:#4ade80; --ok-soft:#0f2e1c; --err:#f87171; --err-soft:#3a1414; --send:#38bdf8; --recv:#4ade80;
+    --shadow:none;
+  }
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 var(--sans)}
+main{max-width:64rem; margin:0 auto; padding:2.5rem 1rem 3rem}
+header{margin-bottom:1.5rem}
+header a{display:inline-flex; align-items:center; gap:.9rem; color:inherit; text-decoration:none}
+header svg{flex:none; width:2.75rem; height:2.75rem}
+h1{margin:0; font-size:1.5rem; line-height:1.2; letter-spacing:-.015em}
+.tag{margin:.15rem 0 0; color:var(--muted); font-size:.95rem}
+.card{background:var(--card); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); padding:1.4rem 1.5rem 1.5rem; margin:0 0 1.25rem}
+h2{display:flex; align-items:center; flex-wrap:wrap; gap:.4rem .7rem; margin:0 0 1rem; font-size:1.1rem; line-height:1.3; letter-spacing:-.005em}
+h3{margin:1.25rem 0 .35rem; font-size:.98rem}
+.role{padding:.1rem .55rem; border:1px solid currentColor; border-radius:999px; font-size:.68rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase; line-height:1.5}
+.role-send{color:var(--send)}
+.role-recv{color:var(--recv)}
+p{margin:.5rem 0}
+a{color:var(--accent)}
+.muted{color:var(--muted); font-size:.9rem}
+code{font-family:var(--mono); font-size:.88em; background:var(--code); border:1px solid var(--line); border-radius:5px; padding:.05em .35em}
+.field{
+  display:block; margin:0; min-width:0; white-space:pre; overflow-x:auto; scrollbar-width:thin;
+  background:var(--code); border:1px solid var(--line); border-radius:var(--radius); padding:.55rem .8rem;
+  font:.88rem/1.5 var(--mono);
+}
+.cmd{display:grid; grid-template-columns:minmax(0,1fr) var(--btn); gap:.5rem; margin:.5rem 0 1rem}
+.rows{display:grid; grid-template-columns:10.5rem minmax(0,1fr) var(--btn); gap:.5rem .75rem; margin:.75rem 0}
+.rows.tools{grid-template-columns:4.5rem minmax(0,1fr) var(--btn)}
+.rows.nocopy{grid-template-columns:4.5rem minmax(0,1fr)}
+.label{align-self:center; font-size:.9rem; font-weight:600}
+.rows.tools .label, .rows.nocopy .label{font-family:var(--mono); font-size:.85rem; font-weight:500; color:var(--muted)}
+button{font:600 .9rem/1.5 var(--sans); border-radius:var(--radius); cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+.copy, .primary{background:var(--accent); color:var(--accent-fg); border:1px solid var(--accent)}
+.copy{width:100%; padding:.55rem 0}
+.copy:hover, .primary:hover{filter:brightness(1.1)}
+.copy.done{background:var(--ok); border-color:var(--ok); color:#fff}
+.primary{min-width:11rem; padding:.65rem 1.5rem; font-size:.98rem}
+.primary:disabled{cursor:default; filter:none; opacity:.6}
+.ghost{background:transparent; color:var(--fg); border:1px solid var(--line-strong); padding:.4rem .9rem}
+.ghost:hover{background:var(--code)}
+.notes{margin:.75rem 0 0; padding-left:1.25rem}
+.notes li{margin:.3rem 0}
+.facts{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem 2rem; margin:0; padding:0; list-style:none}
+.facts strong{display:block}
+.file{display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:.25rem .75rem; margin:0 0 1.25rem}
+.file dt{color:var(--muted)}
+.file dd{margin:0; font-weight:600; overflow-wrap:anywhere}
+footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
+@media (max-width:40rem){
+  main{padding-top:1.5rem}
+  .card{padding:1.1rem 1rem 1.2rem}
+  .rows, .rows.tools{grid-template-columns:minmax(0,1fr) var(--btn); row-gap:.3rem}
+  .rows.nocopy{grid-template-columns:minmax(0,1fr)}
+  .rows .label{grid-column:1/-1; margin-top:.45rem}
+  .facts{grid-template-columns:1fr}
+  .primary{width:100%}
+}
+{{block "style" .}}{{end}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <a href="/">
+    <svg viewBox="0 0 64 64" role="img" aria-label="Bashtransfer"><rect width="64" height="64" rx="14" fill="#0b1220"/><path d="M18 21l14 11-14 11" fill="none" stroke="#38bdf8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M37 44h13" fill="none" stroke="#f8fafc" stroke-width="6" stroke-linecap="round"/></svg>
+    <div>
+      <h1>Bashtransfer</h1>
+      <p class="tag">Send files from the browser or the terminal. Nothing is stored on the server.</p>
+    </div>
+  </a>
+</header>
+{{template "content" .}}
+<footer>bashtransfer · file relay, nothing stored</footer>
+</main>
+<script>
+(function () {
+  function fallbackCopy(text) {
+    var t = document.createElement("textarea");
+    t.value = text;
+    t.setAttribute("readonly", "");
+    t.style.position = "fixed";
+    t.style.opacity = "0";
+    document.body.appendChild(t);
+    t.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    document.body.removeChild(t);
+    return ok;
+  }
+  function copy(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return fallbackCopy(text); });
+    }
+    return Promise.resolve(fallbackCopy(text));
+  }
+  // Delega: vale anche per i pulsanti creati dopo il caricamento (i link dell'upload).
+  document.addEventListener("click", function (ev) {
+    var btn = ev.target.closest("[data-copy]");
+    if (!btn) return;
+    var el = document.getElementById(btn.getAttribute("data-copy"));
+    if (!el) return;
+    copy(el.textContent).then(function (ok) {
+      var old = btn.getAttribute("data-label") || btn.textContent;
+      btn.setAttribute("data-label", old);
+      btn.textContent = ok ? "Copied" : "Error";
+      btn.classList.toggle("done", ok);
+      clearTimeout(btn._t);
+      btn._t = setTimeout(function () { btn.textContent = old; btn.classList.remove("done"); }, 1500);
+    });
+  });
+})();
+</script>
+{{block "script" .}}{{end}}
+</body>
+</html>
+{{end}}

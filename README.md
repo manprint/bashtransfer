@@ -26,6 +26,7 @@ Risposta immediata: una tabella ASCII con le righe di download, una per strument
 | curl   | curl -f -OJ "https://bashtransfer.mydomain.it/X9ZnTRvc5H"                            |
 | wget   | wget --content-disposition "https://bashtransfer.mydomain.it/X9ZnTRvc5H"             |
 | aria2c | aria2c -x1 -s1 --allow-overwrite=false "https://bashtransfer.mydomain.it/X9ZnTRvc5H" |
+| direct | https://bashtransfer.mydomain.it/X9ZnTRvc5H                                          |
 +--------+--------------------------------------------------------------------------------------+
 | Un solo ricevente per link. Lascia aperto il terminale fino alla fine.                        |
 +-----------------------------------------------------------------------------------------------+
@@ -33,7 +34,7 @@ Risposta immediata: una tabella ASCII con le righe di download, una per strument
 
 La colonna dei comandi è larga quanto il comando più lungo. Il triplo clic su una riga seleziona anche i bordi `|`, che la shell non accetta: per copiare un comando selezionalo dall'inizio alla virgoletta finale, oppure usa uno dei modi in [Copiare il comando senza selezionarlo](#copiare-il-comando-senza-selezionarlo).
 
-Ricevente: esegue una delle tre righe. Il file viene scaricato mentre il mittente lo invia e prende il nome originale (`myfile.zip`), che arriva dall'header `Content-Disposition`: le righe non contengono il nome, quindi nessuna di esse può indicare un file da scrivere.
+Ricevente: esegue una delle tre righe di comando, oppure apre nel browser il link della riga `direct` (vedi [Download dal browser](#download-dal-browser)). Il file viene scaricato mentre il mittente lo invia e prende il nome originale (`myfile.zip`), che arriva dall'header `Content-Disposition`: le righe non contengono il nome, quindi nessuna di esse può indicare un file da scrivere.
 
 Quando il ricevente ha finito, il mittente legge l'esito in fondo alla tabella (vedi [Esito per il mittente](#esito-per-il-mittente)).
 
@@ -49,10 +50,12 @@ Il link viene mandato a persone che non conoscono lo strumento e che possono sba
 Come:
 
 - un ricevente su un altro computer non può toccarla: il server non scrive mai sul disco del mittente e `curl -T` apre la sorgente in sola lettura;
-- il rischio esiste solo quando il ricevente lavora nella stessa cartella del mittente (stessa macchina o cartella condivisa). Lì nessuna delle tre righe sovrascrive un file esistente:
+- il rischio esiste solo quando il ricevente lavora nella stessa cartella del mittente (stessa macchina o cartella condivisa). Lì nessuna delle righe sovrascrive un file esistente:
   - `curl -f -OJ` crea il file con `O_EXCL`: se esiste esce con codice 23 senza toccarlo. Con `-f` un errore HTTP esce con codice 22 senza scrivere nulla;
   - `wget --content-disposition` salva `myfile.zip.1`; busybox wget non conosce l'opzione ed esce senza scrivere;
   - `aria2c --allow-overwrite=false` salva `myfile.1.zip`, anche con `allow-overwrite=true` nel suo `aria2.conf`;
+  - il browser (riga `direct`) non sovrascrive un file esistente: salva con un altro nome (`myfile (1).zip`). È il comportamento predefinito dei browser, non verificato dai test;
+- l'invio dal browser legge il file con le API del browser, che non danno accesso in scrittura al file scelto;
 - ogni risposta che non è un download (errori `400`/`404`/`410`, la risposta al mittente) ha un nome proprio, `bashtransfer.txt`: un `curl -OJ` che riceve un errore o la tabella non ripiega sul nome nell'URL.
 
 [`scripts/invariant.py`](scripts/invariant.py), eseguito dall'e2e e dalla CI, lo verifica a ogni modifica. Prova come sorgente un file con nome accentato, un file chiamato `bashtransfer.txt`, una cartella e un link simbolico, e confronta prima e dopo contenuto, dimensione, date e inode.
@@ -110,7 +113,52 @@ ERRORE: download NON avvenuto: nessun ricevente si è collegato in 1h0m0s, il li
 
 ### Pagina di benvenuto
 
-Un `GET /` da browser (header `Accept` con `text/html`) mostra una pagina di cortesia: nome e descrizione, le istruzioni d'uso con il comando di invio e un pulsante Copia, i comandi per installare curl, wget e aria2c sui vari sistemi (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, macOS, FreeBSD, Windows). La pagina è incorporata nel binario (`internal/server/home.html`), non carica risorse esterne (CSP restrittiva) e usa come base dei comandi `BASHT_PUBLIC_URL`. Gli altri client (curl, wget, aria2c) ricevono lo stesso `GET /` in testo semplice, con le istruzioni.
+Un `GET /` da browser (header `Accept` con `text/html`) mostra la pagina di cortesia, in inglese:
+
+- **Sender, Send a file**: l'invio dal browser (vedi [Invio dal browser](#invio-dal-browser));
+- **Sender, Send from a terminal**: `curl URL -T FILE` e la variante da pipe per le cartelle, con il pulsante Copy, e cosa aspettarsi (tabella, terminale aperto, riga `OK`/`ERRORE`);
+- **Receiver, Receive a file**: il link nel browser (riga `direct`) oppure i comandi curl, wget e aria2c;
+- **Install the tools**: i comandi per installare curl, wget e aria2c (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, macOS, FreeBSD, Windows);
+- **Privacy and security**: nulla viene salvato; link casuali e monouso; con `BASHT_PUBLIC_URL` in `https://`, cifratura HTTPS in transito ma non end-to-end, con il consiglio di cifrare i file riservati prima di inviarli (vedi [Limiti e sicurezza](#limiti-e-sicurezza)).
+
+Le pagine sono incorporate nel binario (`internal/server/pages/`), non caricano risorse esterne (CSP restrittiva, `frame-ancestors 'none'`), seguono il tema chiaro o scuro del sistema e usano come base dei comandi `BASHT_PUBLIC_URL`. Gli altri client (curl, wget, aria2c) ricevono lo stesso `GET /` in testo semplice, con le istruzioni.
+
+### Download dal browser
+
+Il link della riga `direct`, aperto in un browser, mostra una pagina con nome e dimensione del file, il pulsante **Download** e i comandi per il terminale. Il download parte solo dal pulsante (un `POST` sulla stessa URL):
+
+- aprire o ricaricare la pagina non consuma il link; neanche le anteprime di chat, social, posta e Office (User-Agent con `bot`, `preview`, `slack`, `whatsapp`, `telegram`, `discord`, `outlook` e simili, anche senza `Accept: text/html`);
+- un link già usato, scaduto o sconosciuto mostra una pagina con il motivo (`410` o `404`); un link il cui download è già in corso lo dice ("Download already started");
+- dopo il clic il pulsante diventa "Download started" e non può partire un secondo download;
+- per un invio da pipe la dimensione è "unknown (streamed by the sender)".
+
+curl, wget e aria2c, che non chiedono `text/html`, ricevono il file direttamente con il `GET`. Un programma sconosciuto che apre i link con `Accept: */*` (per esempio uno scanner di sicurezza della posta che non si dichiara) consuma il link come un download.
+
+### Invio dal browser
+
+Nella pagina di cortesia, sotto il titolo, un riquadro accetta un file trascinato o scelto con il pulsante **Upload** (uno solo: più file trascinati insieme vengono rifiutati). Il browser:
+
+1. chiede il link (`POST /` con `{"name": ..., "size": ...}` in JSON) e mostra subito la tabella per il ricevente, con le righe curl, wget, aria2c e direct e i pulsanti Copy: la stessa del terminale;
+2. invia il file (`PUT /<slug>`) solo quando il ricevente si collega, come `curl -T`;
+3. mostra la barra di avanzamento con percentuale, velocità, byte consegnati e tempo stimato, e alla fine l'esito: "Done: the receiver got the whole file", oppure il motivo (link scaduto, ricevente disconnesso, invio interrotto).
+
+La pagina va tenuta aperta fino alla fine: chiudendola, il browser chiede conferma. **Cancel** e la chiusura della pagina chiudono subito il link: un ricevente che lo apre dopo vede "Link already used or expired", uno che sta scaricando viene interrotto. Se invece cade la rete del mittente, il link si chiude quando il server se ne accorge (vedi sotto e [Limiti e sicurezza](#limiti-e-sicurezza)).
+
+Con `BASHT_AUTH_USER` impostato il browser chiede utente e password con la sua finestra di login; se l'utente annulla, la pagina mostra "This server requires a login to send files.".
+
+Protocollo (per chi scrive un client):
+
+- `POST /`, `Content-Type: application/json`, body `{"name":"file.zip","size":1234}` (al massimo 4096 byte; `size` obbligatorio e non negativo): richiede Basic auth come il `PUT` del terminale. Risponde `200` con uno stream NDJSON (`application/x-ndjson`), una riga JSON per evento, aperto per tutto il trasferimento:
+  - la prenotazione: `{"slug","url","token","commands":[{"label","line"}...]}`;
+  - `{"event":"waiting"}` ogni secondo finché nessun ricevente si collega;
+  - `{"event":"attached"}` quando il ricevente si collega;
+  - `{"event":"progress","bytes":N}` con i byte consegnati al ricevente, ogni 500 ms se cambiano e comunque ogni secondo;
+  - l'esito, ultima riga: `{"outcome":"ok"|"expired"|"receiver_gone"|"idle"|"length_mismatch"|"sender_gone","bytes":N,"seconds":S}`.
+- `PUT /<slug>` con l'header `X-Bashtransfer-Token: <token>` e il body di esattamente `size` byte: va iniziato entro 30 secondi dalla prenotazione. Il token sostituisce la Basic auth. Risponde con lo stesso esito in JSON (su HTTP/1 il browser lo legge solo se ha inviato tutto il body: l'esito affidabile è quello dello stream). Token errato: `404`; lunghezza diversa: `400`.
+- `DELETE /<slug>` con lo stesso header: chiude il link e interrompe il trasferimento (`204`; `404` se il token è errato o la sessione è già conclusa). È quello che fa la pagina con Cancel o alla chiusura (`fetch` con `keepalive`).
+- La chiusura dello stream NDJSON chiude il link. Se il `DELETE` non parte ma il browser chiude la connessione (processo terminato, scheda chiusa senza `pagehide`), il server se ne accorge alla prima scrittura fallita: subito con connessione diretta, in circa 3,5 secondi dietro Apache (misurato con Apache 2.4.69: Apache segnala la chiusura del client al backend solo dopo alcune scritture fallite, per questo lo stream scrive almeno una riga al secondo). Se la rete del mittente cade senza chiudere la connessione (nessun FIN o RST), le righe dello stream restano nei buffer TCP: il link si chiude alla scadenza della ritrasmissione TCP, a `BASHT_WAIT_TIMEOUT` o, durante il trasferimento, a `BASHT_IDLE_TIMEOUT`, come per un mittente curl.
+
+Il token è casuale (128 bit), confrontato in tempo costante, e viaggia in un header e non nella query, che i proxy registrano nei log. `POST /` richiede JSON e `PUT`/`DELETE` del browser un header personalizzato: un altro sito non può inviarli senza un preflight CORS, che il server non autorizza.
 
 ### Limiti del nome
 
@@ -145,7 +193,7 @@ Un valore non valido ferma l'avvio con un messaggio che nomina la variabile.
 
 ## Autenticazione
 
-Se `BASHT_AUTH_USER` e `BASHT_AUTH_PASSWORD` sono impostate, ogni `PUT` richiede Basic auth; senza credenziali o con credenziali errate la risposta è `401` con `WWW-Authenticate`. Il download (`GET`) non richiede credenziali: chi ha lo slug può scaricare.
+Se `BASHT_AUTH_USER` e `BASHT_AUTH_PASSWORD` sono impostate, ogni `PUT` richiede Basic auth; senza credenziali o con credenziali errate la risposta è `401` con `WWW-Authenticate`. Per l'invio dal browser le credenziali servono alla prenotazione (`POST /`, il browser le chiede con la sua finestra di login); il `PUT` e il `DELETE` della pagina usano il token della prenotazione. Il download (`GET`, o `POST` dal pulsante della pagina di download) non richiede credenziali: chi ha lo slug può scaricare.
 
 ```bash
 curl -u utente:password -T myfile.zip https://bashtransfer.mydomain.it
@@ -155,7 +203,7 @@ Se le variabili non sono impostate, l'upload è anonimo.
 
 ## Immagine
 
-Il workflow `.github/workflows/image.yml` esegue `gofmt`, `go vet`, `go test -race` e `scripts/e2e.sh` (con `aria2c`) a ogni pull request e push, e pubblica l'immagine su GitHub Container Registry (`ghcr.io/<owner>/<repo>`, con il token del workflow, senza secret):
+Il workflow `.github/workflows/image.yml` esegue `gofmt`, `go vet`, `go test -race`, `scripts/e2e.sh` (con `aria2c`) e i test frontend `scripts/ui/run.sh` (Playwright, server diretti e Apache) a ogni pull request e push, e pubblica l'immagine su GitHub Container Registry (`ghcr.io/<owner>/<repo>`, con il token del workflow, senza secret):
 
 | Evento | Tag pubblicati |
 |---|---|
@@ -263,7 +311,7 @@ Cosa fare:
    ```
 
 5. Se Apache risponde `500` e nell'`error.log` compare `AH01144: No protocol handler was valid for the URL ... (scheme 'h2c')`, `mod_proxy_http2` non è caricato. Controllare con `apache2ctl -M | grep http2`: deve comparire `proxy_http2_module`. Con Apache in un container `a2enmod` va eseguito nell'immagine (`RUN a2enmod proxy proxy_http proxy_http2 headers ssl` nel Dockerfile): un `a2enmod` lanciato nel container in esecuzione si perde quando viene ricreato.
-6. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito la tabella con le righe `curl`, `wget`, `aria2c`; eseguendo una di esse da un altro terminale il file passa.
+6. Verificare: `curl -T FILE https://bashtransfer.mydomain.it` deve stampare subito la tabella con le righe `curl`, `wget`, `aria2c`, `direct`; eseguendo una di esse da un altro terminale, o aprendo il link `direct` nel browser, il file passa.
 
 Come si comporta:
 
@@ -279,7 +327,16 @@ Come si comporta:
   ```
 
   La condizione lascia intatto il nome dei download. Protegge un mittente che aggiunge per errore `-OJ` all'invio dal `301` e, con curl meno recenti, dal `503`: curl 8.18 ignora l'header sulle risposte `4xx`/`5xx` (verificato con Apache 2.4.59, curl 8.18 e 8.5).
-- Verificato con Apache 2.4.69 (immagine `httpd:2.4`) in HTTP in chiaro verso il client; con la versione e il TLS del proprio server conviene ripetere la prova del punto 5 con un file di qualche centinaio di MB.
+- Invio dal browser: la pagina chiude il link con un `DELETE` esplicito (Cancel, chiusura della pagina), che passa subito. Se non parte e il browser chiude la connessione, Apache segnala al backend la chiusura dello stream NDJSON solo dopo alcune scritture fallite verso il browser: il link si chiude in circa 3,5 secondi.
+- Il log di accesso `combined` di Apache registra la riga della richiesta, cioè lo slug e, per gli invii da terminale, il nome del file (`PUT /myfile.zip`): chi legge il log può scaricare un link ancora attivo. Per non registrarli, nel vhost sostituire la riga `CustomLog ${APACHE_LOG_DIR}/access.log combined` con:
+
+  ```apache
+  LogFormat "%h %t \"%m\" %>s %b %D" bashtransfer
+  CustomLog ${APACHE_LOG_DIR}/access.log bashtransfer
+  ```
+
+  `%D` è la durata della richiesta in microsecondi. Il token dell'invio dal browser viaggia in un header e non compare nei log di Apache.
+- Verificato con Apache 2.4.69 (immagine `httpd:2.4`) in HTTP in chiaro verso il client, comprese le pagine web e l'invio dal browser (test Playwright con Chromium); con la versione e il TLS del proprio server conviene ripetere la prova del punto 6 con un file di qualche centinaio di MB.
 
 ## Log
 
@@ -289,7 +346,9 @@ Una riga per evento su stderr, nel formato di `BASHT_LOG_FORMAT`. Ogni riga ha `
 |---|---|---|---|
 | `server_start` | INFO | avvio | `listen`, `public_url`, `auth` (bool), `wait_timeout`, `idle_timeout`, `max_sessions`, `buf_size`, `log_level`, `go`, `gomaxprocs` |
 | `server_listening` | INFO | porta aperta | `addr` |
-| `upload_accepted` | DEBUG | sessione creata, comandi inviati | `id`, `length` (-1 se ignota) |
+| `upload_reserved` | DEBUG | invio dal browser prenotato (`POST /`) | `id`, `length` |
+| `upload_accepted` | DEBUG | sessione creata, comandi inviati; per il browser, inizio del `PUT` | `id`, `length` (-1 se ignota) |
+| `upload_cancelled` | DEBUG | invio dal browser annullato (`DELETE`) | `id` |
 | `download_claimed` | DEBUG | un ricevente ha reclamato lo slug | `id` |
 | `receiver_attached` | DEBUG | il relay inizia | `id`, `wait_s` |
 | `transfer` | INFO, WARN se `aborted` | fine di ogni sessione, una volta | `id`, `outcome`, `bytes`, `length` (se nota), `wait_s`, `transfer_s` e `rate_mbs` (se un ricevente si è agganciato), `err` (se presente) |
@@ -309,7 +368,7 @@ Una riga per evento su stderr, nel formato di `BASHT_LOG_FORMAT`. Ogni riga ha `
 
 `wait_s` è l'attesa del ricevente, `transfer_s` la durata del relay, `rate_mbs` la velocità media in MB/s (10^6 byte). Le durate sono secondi con tre decimali, numeri anche in JSON.
 
-`reason` di `request_rejected`, con il livello: `unauthorized` (401, WARN), `capacity` (503, WARN: `BASHT_MAX_SESSIONS` raggiunto), `range_not_supported` (400, INFO), `invalid_host` (400, INFO), `gone` (410, INFO), `not_found` (404, DEBUG: slug inesistenti, scansioni), `method_not_allowed` (405, DEBUG), `internal` (500 o 503, ERROR).
+`reason` di `request_rejected`, con il livello: `unauthorized` (401, WARN), `capacity` (503, WARN: `BASHT_MAX_SESSIONS` raggiunto), `range_not_supported` (400, INFO), `invalid_host` (400, INFO), `gone` (410, INFO), `not_found` (404, DEBUG: slug inesistenti, scansioni; INFO per il `PUT` del browser con token errato o prenotazione scaduta), `bad_request` (400: DEBUG per un `POST /` malformato, INFO per un `PUT` del browser di lunghezza diversa da quella prenotata), `unsupported_media_type` (415, DEBUG: `POST /` non JSON), `method_not_allowed` (405, DEBUG), `internal` (500 o 503, ERROR).
 
 Esempio (`json`):
 
@@ -322,13 +381,15 @@ Esempi di analisi in [docs/operazioni.md](docs/operazioni.md#log).
 ## Limiti e sicurezza
 
 - Lo slug è il segreto: chi lo conosce può scaricare finché il trasferimento è attivo. Usare HTTPS.
-- Un solo ricevente per slug. Un secondo `GET` sullo stesso slug riceve `410`.
+- Cosa conserva il server: nulla su disco. Il contenuto attraversa la memoria del processo solo durante il relay (il buffer di copia, `BASHT_BUF_SIZE`, più i buffer TCP del kernel e del proxy); nome, dimensione e slug restano in memoria finché la sessione è attiva, lo slug concluso (senza nome) per 24 ore come tombstone. I log dell'app non contengono slug, nomi né contenuto; quelli del proxy sì, se non configurati (vedi [Dietro Apache](#dietro-apache-mod_proxy_http2)).
+- Cifratura: HTTPS protegge il file tra i client e il proxy (nginx o Apache). Non è cifratura end-to-end: il proxy decifra, e il tratto proxy-app (rete Docker interna; h2c in chiaro dietro Apache) e la memoria dell'app vedono il file in chiaro. Chi controlla il server mentre un trasferimento è in corso può leggerlo; i trasferimenti già conclusi non sono recuperabili dal server. Per i file riservati: cifrarli prima dell'invio (per esempio `gpg -c`, `age -p`, o un archivio 7z con password) e passare la password per un altro canale. La pagina di cortesia lo dice.
+- Un solo ricevente per slug. Un secondo `GET` sullo stesso slug riceve `410`. La pagina di download per i browser non consuma lo slug: lo consuma il pulsante Download (`POST`).
 - Uno slug concluso, scaduto o già reclamato risponde `410` per 24 ore; dopo, `404`.
 - Il mittente deve restare connesso finché il ricevente non ha finito: se cade mentre attende (anche dopo aver inviato tutto il file), lo slug si libera entro circa un secondo e risponde `410`. Se i buffer TCP sono già pieni di dati non letti, la chiusura resta in coda dietro i dati: lo slug si libera quando il kernel del mittente abbandona la connessione (misurato in questo ambiente: circa 6 minuti); dietro nginx vale anche il keepalive verso il client. Su Linux il server controlla la connessione ogni secondo (`POLLRDHUP`), perché net/http non rileva la caduta finché il body non è letto; su altri sistemi la sessione resta fino a `BASHT_WAIT_TIMEOUT`.
 - Il relay non salva nulla su disco: se il mittente o il ricevente cadono a metà, il trasferimento fallisce e il ricevente vede un errore (il download viene interrotto senza chunk finale). Se cade il ricevente, il mittente viene interrotto subito, anche se in quel momento non sta inviando byte.
 - La risposta al mittente ha `Connection: close`: la connessione di un upload non viene riusata.
 - Un mittente fermo più a lungo di `BASHT_IDLE_TIMEOUT` interrompe il trasferimento.
-- Con `BASHT_AUTH_USER` non impostato chiunque può inviare un file. L'app vede solo l'IP di nginx (stream senza PROXY protocol): l'unico limite per IP è `limit_conn` in nginx; non ci sono quote di banda né limiti di frequenza.
+- Con `BASHT_AUTH_USER` non impostato chiunque può inviare un file, da terminale o dalla pagina web. L'app vede solo l'IP di nginx (stream senza PROXY protocol): l'unico limite per IP è `limit_conn` in nginx; non ci sono quote di banda né limiti di frequenza.
 - Le tombstone sono al massimo 100000: sotto un carico molto alto uno slug concluso torna `404` prima delle 24 ore.
 - Un ricevente che resta connesso senza leggere viene interrotto da `BASHT_IDLE_TIMEOUT`.
 - Un arresto del server (SIGTERM) chiude subito i mittenti ancora senza ricevente (lo slug risponde `410` fino al riavvio, poi `404`: le sessioni non sopravvivono al processo) e lascia 10 secondi ai trasferimenti in corso, poi li interrompe. Un secondo SIGINT o SIGTERM termina subito il processo.
@@ -389,7 +450,8 @@ Comando usato: `BASHT_NB_IMAGE=<immagine locale con sh, curl, tc, ethtool, pkill
 ## Stato della verifica
 
 - Test unitari e di integrazione (`go test -race ./...`), compresi concorrenza (40 trasferimenti paralleli), assenza di goroutine residue, ricevente fermo, mittente scaduto e keep-alive: verificati.
-- Script end-to-end locale (`scripts/e2e.sh`: file e stdin, download con `wget`, mittente e ricevente che cadono a metà, mittente che cade in attesa del ricevente, trasferimenti paralleli, con e senza auth, nome con spazi): verificato.
+- Script end-to-end locale (`scripts/e2e.sh`: file e stdin, download con `wget`, mittente e ricevente che cadono a metà, mittente che cade in attesa del ricevente, trasferimenti paralleli, con e senza auth, nome con spazi, riga `direct`, pagina di download che non consuma il link, invio con il protocollo del browser e annullamento con `DELETE`): verificato, con curl 8.18 e 8.5.
+- Pagine web e invio dal browser con Playwright (Chromium 1248 headless), con connessione diretta e attraverso Apache 2.4.69 in h2c: layout della home a 1280 e 390 px in tema chiaro e scuro (allineamento di campi e pulsanti, comandi su una riga, nessuno scroll orizzontale), pulsanti Copy, upload con il pulsante e con il trascinamento, rifiuto di più file, tabella dei link, ricevente curl e ricevente browser dalla pagina di download (sha256 identici, nome con lettere accentate), avanzamento e velocità, esiti (completato, link scaduto, ricevente disconnesso), Cancel e chiusura della pagina (link `410` entro 30 ms), chiusura dello stream senza `DELETE` (link `410` subito con connessione diretta, in circa 3,5 s via Apache), pagina chiusa durante il download (ricevente interrotto), pagina `404` e `410`, invio da pipe (dimensione ignota), Basic auth (login annullato e con credenziali). Script: `scripts/ui/run.sh` (vedi [Sviluppo](#sviluppo)), eseguito anche dalla CI nei due modi. Altri browser non sono stati provati.
 - Immagine Docker e configurazione compose (`docker compose config`, avvio di `app` e risposta a `GET /` dalla rete interna): verificati.
 - Percorso completo attraverso nginx (stack compose, porta 443, certificato di test): `scripts/e2e.sh` esterno con 256 MiB, auth (`BASHT_E2E_AUTH`), 20 trasferimenti paralleli, `wget`, caduta di mittente e ricevente (anche del mittente in attesa), sha256 identici: verificato. Redirect da 80 e `GET /` via HTTPS: verificati. Il certificato di test non è stato verificato con una CA pubblica.
 - Auth attraverso nginx (senza credenziali e con credenziali errate: `401`; con credenziali corrette: trasferimento identico; `GET` dello slug senza credenziali: `410` dopo l'uso): verificata dall'e2e esterno con `BASHT_E2E_AUTH`.
@@ -413,6 +475,12 @@ BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_AUTH=utente:password BASHT_E2E_PARALL
 # solo l'invariante della sorgente (l'e2e locale la esegue alla fine); fallisce se manca uno strumento
 go build -o /tmp/bt ./cmd/bashtransfer
 BASHT_INV_REQUIRE=curl,wget,aria2c,busybox python3 scripts/invariant.py /tmp/bt
+# test frontend con Playwright (Chromium headless); la prima volta, da scripts/ui:
+#   npm ci && npx playwright-core install chromium   (--with-deps se mancano le librerie di sistema)
+bash scripts/ui/run.sh          # server diretti
+bash scripts/ui/run.sh apache   # attraverso Apache 2.4 in Docker (proxy h2c)
 ```
 
 `scripts/invariant.py` usa curl, wget, aria2c e busybox del sistema (quelli assenti vengono saltati, salvo quelli in `BASHT_INV_REQUIRE`), lancia quattro istanze del server su porte libere (normale, attesa breve, con auth, con capacità 1) e scrive l'esito di ogni caso in JSON, una riga per caso, nel file indicato da `BASHT_INV_DUMP`. `BASHT_INV_JOBS` (default 8) è il numero di casi in parallelo.
+
+`scripts/ui/run.sh` compila il binario, avvia tre server (normale, attesa di 3 secondi, Basic auth `u:p`), direttamente su porte libere di `127.0.0.1` oppure in container dietro un Apache 2.4.69 configurato come nel vhost di [Dietro Apache](#dietro-apache-mod_proxy_http2) (`scripts/ui/httpd.conf`, immagine `httpd` fissata per digest), ed esegue `scripts/ui/ui.mjs`: 18 test su layout (1280 e 390 px, tema chiaro e scuro), pulsanti Copy, invio dal browser con il pulsante e con il trascinamento, ricevente curl e browser, esiti, Cancel, chiusura della pagina, link usati e scaduti, Basic auth. Chromium non può collegarsi ad altri host che `127.0.0.1` e `localhost`. `BASHT_UI_OUT` conserva file e screenshot; `ONLY` (regex) sceglie i test.

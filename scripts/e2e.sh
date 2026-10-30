@@ -92,9 +92,11 @@ printed() {
 	sed -n "s#^| $1 *| \(.*[^ ]\) *|\$#\1#p" "$2" | head -n 1
 }
 
-# I tre comandi stampati per l'URL $2/$3, senza nome di file (scripts/invariant.py).
+# I tre comandi stampati per l'URL $2/$3, senza nome di file (scripts/invariant.py), e il link
+# per il browser (riga direct).
 check_commands() {
 	local out="$1" u="$2/$3"
+	[[ "$(printed direct "$out")" == "$u" ]] || fail "riga direct errata: $(printed direct "$out")"
 	[[ "$(printed curl "$out")" == "curl -f -OJ \"$u\"" ]] || fail "riga curl errata: $(printed curl "$out")"
 	[[ "$(printed wget "$out")" == "wget --content-disposition \"$u\"" ]] || fail "riga wget errata: $(printed wget "$out")"
 	[[ "$(printed aria2c "$out")" == "aria2c -x1 -s1 --allow-overwrite=false \"$u\"" ]] ||
@@ -135,6 +137,15 @@ rm -f "$TMP/received.bin"
 if [[ -n "$EXTERNAL" ]]; then
 	grep -qF "\"$BASE/" "$TMP/upload.out" || fail "comandi con base diversa da $BASE: $(cat "$TMP/upload.out")"
 fi
+
+# Browser e anteprime (chat, posta) vedono la pagina di download, che non consuma il link: il
+# download successivo riesce.
+CODE="$(curl -s -H 'Accept: text/html' -o "$TMP/landing.html" -w '%{http_code}' "$BASE/$SLUG")"
+[[ "$CODE" == "200" ]] || fail "pagina di download: $CODE, atteso 200"
+grep -qF 'e2e.bin' "$TMP/landing.html" || fail "pagina di download senza il nome del file"
+grep -q '<form[^>]*method="post"' "$TMP/landing.html" || fail "pagina di download senza il pulsante Download"
+CODE="$(curl -s -A 'Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)' -o /dev/null -w '%{http_code}' "$BASE/$SLUG")"
+[[ "$CODE" == "200" ]] || fail "anteprima di Slack: $CODE, atteso 200 (pagina)"
 
 # Download con la prima riga stampata: il nome viene da Content-Disposition.
 mkdir -p "$TMP/rs1"
@@ -346,6 +357,51 @@ done
 for i in "${!PAR_PIDS[@]}"; do
 	wait "${PAR_PIDS[$i]}" || fail "RS-6: trasferimento parallelo $((i + 1)) fallito"
 done
+
+# RS-8: invio dal browser come lo fa la pagina, rifatto con curl. La prenotazione (POST / in JSON)
+# risponde con uno stream NDJSON: link e token, poi attached, progress e l'esito. Il body va con PUT
+# e il token; il ricevente usa il pulsante Download della pagina (POST /<slug>).
+WEB_SIZE=$((MB * 1048576))
+curl -sS -N "${UP_AUTH[@]}" -H 'Content-Type: application/json' -d "{\"name\":\"web upload.bin\",\"size\":$WEB_SIZE}" \
+	"$BASE/" > "$TMP/web.ndjson" 2> "$TMP/web.err" &
+WEB_STREAM_PID=$!
+UP_PIDS+=("$WEB_STREAM_PID")
+for _ in $(seq 1 100); do
+	[[ -s "$TMP/web.ndjson" ]] && break
+	sleep 0.1
+done
+read -r WEB_SLUG WEB_TOKEN < <(python3 -c 'import json,sys; d=json.loads(open(sys.argv[1]).readline()); print(d["slug"], d["token"])' "$TMP/web.ndjson") ||
+	fail "RS-8: prenotazione senza link: $(cat "$TMP/web.ndjson" "$TMP/web.err")"
+curl -sS -H "X-Bashtransfer-Token: $WEB_TOKEN" -T "$TMP/payload.bin" "$BASE/$WEB_SLUG" > "$TMP/web.put" 2>&1 &
+WEB_PUT_PID=$!
+UP_PIDS+=("$WEB_PUT_PID")
+mkdir -p "$TMP/rs8"
+(cd "$TMP/rs8" && curl -sS -f -OJ -X POST "$BASE/$WEB_SLUG") || fail "RS-8: download POST fallito"
+cmp -s "$TMP/rs8/web upload.bin" "$TMP/payload.bin" || fail "RS-8: contenuto o nome diverso: $(ls -A "$TMP/rs8")"
+wait "$WEB_STREAM_PID" || fail "RS-8: stream della prenotazione terminato con errore"
+wait "$WEB_PUT_PID" || fail "RS-8: PUT terminato con errore"
+grep -qx '{"event":"attached"}' "$TMP/web.ndjson" || fail "RS-8: evento attached mancante: $(cat "$TMP/web.ndjson")"
+tail -n 1 "$TMP/web.ndjson" | grep -q "^{\"outcome\":\"ok\",\"bytes\":$WEB_SIZE," ||
+	fail "RS-8: esito dello stream: $(tail -n 1 "$TMP/web.ndjson")"
+tail -n 1 "$TMP/web.put" | grep -q '^{"outcome":"ok"' || fail "RS-8: esito del PUT: $(tail -n 2 "$TMP/web.put")"
+
+# Annullamento dalla pagina: DELETE col token chiude subito il link, anche con lo stream aperto.
+curl -sS -N "${UP_AUTH[@]}" -H 'Content-Type: application/json' -d '{"name":"x.bin","size":1}' \
+	"$BASE/" > "$TMP/cancel.ndjson" 2>&1 &
+CANCEL_PID=$!
+UP_PIDS+=("$CANCEL_PID")
+for _ in $(seq 1 100); do
+	[[ -s "$TMP/cancel.ndjson" ]] && break
+	sleep 0.1
+done
+read -r C_SLUG C_TOKEN < <(python3 -c 'import json,sys; d=json.loads(open(sys.argv[1]).readline()); print(d["slug"], d["token"])' "$TMP/cancel.ndjson") ||
+	fail "annullamento: prenotazione senza link: $(cat "$TMP/cancel.ndjson")"
+CODE="$(curl -s -X DELETE -H "X-Bashtransfer-Token: $C_TOKEN" -o /dev/null -w '%{http_code}' "$BASE/$C_SLUG")"
+[[ "$CODE" == "204" ]] || fail "annullamento: DELETE $CODE, atteso 204"
+CODE="$(curl -s -H 'Accept: text/html' -o /dev/null -w '%{http_code}' "$BASE/$C_SLUG")"
+[[ "$CODE" == "410" ]] || fail "annullamento: link $CODE, atteso 410"
+wait "$CANCEL_PID" || true
+tail -n 1 "$TMP/cancel.ndjson" | grep -q '^{"outcome":"sender_gone"' || fail "annullamento: esito dello stream: $(tail -n 1 "$TMP/cancel.ndjson")"
 
 if [[ -z "$EXTERNAL" || -n "$AUTH_CRED" ]]; then
 # Auth (D9): solo PUT è protetto; senza credenziali o con password sbagliata: 401.

@@ -3,10 +3,12 @@ package relay
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"bashtransfer/internal/slug"
@@ -45,26 +47,59 @@ type Receiver interface {
 }
 
 // Session è una sessione di upload in attesa di un ricevente.
-// Slug, ID, Name, Length e Created sono immutabili; gli altri campi sono protetti da reg.mu.
+// Slug, ID, Name, Length, Token e Created sono immutabili; gli altri campi sono protetti da reg.mu.
 type Session struct {
 	Slug string
 	// ID identifica la sessione nei log. È casuale e indipendente dallo slug: chi legge i log
 	// non può ricavarne l'URL di download.
-	ID      string
-	Name    string
-	Length  int64 // -1 se ignota
+	ID     string
+	Name   string
+	Length int64 // -1 se ignota
+	// Token autorizza l'invio del body di una sessione prenotata (Reserve); vuoto per Create.
+	Token   string
 	Created time.Time
 
-	reg      *Registry
-	claimed  bool
-	err      error
-	timer    *time.Timer
-	attached chan Receiver
-	expired  chan struct{}
-	finished chan struct{}
-	aborted  chan struct{}
+	reg       *Registry
+	claimed   bool
+	bound     bool // prenotata: il mittente ha agganciato il body (Bind)
+	err       error
+	timer     *time.Timer
+	bindTimer *time.Timer
+	attached  chan Receiver
+	expired   chan struct{}
+	finished  chan struct{}
+	aborted   chan struct{}
 
 	finishOnce sync.Once
+
+	// Avanzamento per il mittente nel browser: inizio del relay, byte consegnati al ricevente,
+	// esito. Senza reg.mu: li scrive la goroutine del mittente e li legge lo stream della
+	// prenotazione.
+	started   chan struct{}
+	startOnce sync.Once
+	delivered atomic.Int64
+	result    atomic.Value // string
+}
+
+// Start segnala che il relay verso il ricevente è iniziato: chiude Started.
+func (s *Session) Start() { s.startOnce.Do(func() { close(s.started) }) }
+
+// Started si chiude quando il relay verso il ricevente inizia.
+func (s *Session) Started() <-chan struct{} { return s.started }
+
+// AddDelivered somma n ai byte consegnati al ricevente.
+func (s *Session) AddDelivered(n int64) { s.delivered.Add(n) }
+
+// Delivered restituisce i byte consegnati al ricevente.
+func (s *Session) Delivered() int64 { return s.delivered.Load() }
+
+// SetResult registra l'esito per il mittente nel browser. Va chiamata prima di Finish.
+func (s *Session) SetResult(res string) { s.result.Store(res) }
+
+// Result restituisce l'esito registrato con SetResult, o "".
+func (s *Session) Result() string {
+	res, _ := s.result.Load().(string)
+	return res
 }
 
 // Attached riceve il ricevente quando uno slug viene reclamato.
@@ -128,6 +163,84 @@ func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry {
 
 // Create apre una sessione per un upload. length è -1 se ignota.
 func (r *Registry) Create(name string, length int64) (*Session, error) {
+	return r.create(name, length, "", 0)
+}
+
+// Reserve apre una sessione il cui body arriva con una seconda richiesta: l'invio dal browser, che
+// deve mostrare il link prima di iniziare l'upload. Il mittente aggancia il body con Bind e il
+// Token della sessione entro bindTimeout; altrimenti la sessione termina come se il mittente fosse
+// caduto (ErrSenderGone), anche con un ricevente già agganciato.
+func (r *Registry) Reserve(name string, length int64, bindTimeout time.Duration) (*Session, error) {
+	token, err := newToken()
+	if err != nil {
+		return nil, err
+	}
+	return r.create(name, length, token, bindTimeout)
+}
+
+// Bind assegna al mittente la sessione prenotata id. Uno slug sconosciuto, un token errato o una
+// sessione già agganciata danno ErrNotFound: chi non ha il token non distingue i casi.
+func (r *Registry) Bind(id, token string) (*Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.sessions[id]
+	if !ok || s.Token == "" || s.bound || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 {
+		return nil, ErrNotFound
+	}
+	s.bound = true
+	s.bindTimer.Stop()
+	return s, nil
+}
+
+// Reserved restituisce la sessione prenotata id, agganciata o no, se token è il suo: serve
+// all'annullamento dal browser. Come per Bind, ogni altro caso è ErrNotFound.
+func (r *Registry) Reserved(id, token string) (*Session, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.sessions[id]
+	if !ok || s.Token == "" || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 {
+		return nil, ErrNotFound
+	}
+	return s, nil
+}
+
+// unbound termina una sessione prenotata senza mittente allo scadere di bindTimeout. Un ricevente
+// agganciato vede la sessione finita con ErrSenderGone. Riporta se ha terminato la sessione: false
+// se il body è già agganciato o la sessione è già finita.
+func (r *Registry) unbound(s *Session) bool {
+	r.mu.Lock()
+	if s.bound || r.sessions[s.Slug] != s {
+		r.mu.Unlock()
+		return false
+	}
+	if s.err == nil {
+		s.err = ErrSenderGone
+		close(s.aborted)
+	}
+	s.timer.Stop()
+	s.bindTimer.Stop()
+	delete(r.sessions, s.Slug)
+	r.bury(s.Slug)
+	r.mu.Unlock()
+	s.finishOnce.Do(func() { close(s.finished) })
+	return true
+}
+
+// Cancel termina la sessione prenotata s perché il mittente nel browser ha chiuso la pagina o
+// annullato: prima del Bind come allo scadere di bindTimeout, dopo con Abort(ErrSenderGone), che
+// sveglia il mittente in attesa del ricevente. Su una sessione finita non fa nulla.
+func (r *Registry) Cancel(s *Session) {
+	select {
+	case <-s.finished:
+		return
+	default:
+	}
+	if !r.unbound(s) {
+		s.Abort(ErrSenderGone)
+	}
+}
+
+func (r *Registry) create(name string, length int64, token string, bindTimeout time.Duration) (*Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prune(time.Now())
@@ -151,15 +264,20 @@ func (r *Registry) Create(name string, length int64) (*Session, error) {
 			ID:       logID,
 			Name:     name,
 			Length:   length,
+			Token:    token,
 			Created:  time.Now(),
 			reg:      r,
 			attached: make(chan Receiver, 1),
 			expired:  make(chan struct{}),
 			finished: make(chan struct{}),
 			aborted:  make(chan struct{}),
+			started:  make(chan struct{}),
 		}
 		r.sessions[id] = s
 		s.timer = time.AfterFunc(r.waitTimeout, func() { r.expire(s) })
+		if token != "" {
+			s.bindTimer = time.AfterFunc(bindTimeout, func() { r.unbound(s) })
+		}
 		return s, nil
 	}
 	return nil, ErrSlugCollision
@@ -168,6 +286,15 @@ func (r *Registry) Create(name string, length int64) (*Session, error) {
 // newLogID genera l'identificativo di sessione per i log: 8 byte casuali in esadecimale.
 func newLogID() (string, error) {
 	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// newToken genera il token di una sessione prenotata: 16 byte casuali in esadecimale.
+func newToken() (string, error) {
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
@@ -195,22 +322,23 @@ func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
 	return s, nil
 }
 
-// Peek riporta lo stato di uno slug senza reclamarlo: nil se attende un ricevente, altrimenti
-// ErrClaimed, ErrGone o ErrNotFound come Claim.
-func (r *Registry) Peek(id string) error {
+// Peek riporta lo stato di uno slug senza reclamarlo: la sessione se attende un ricevente,
+// altrimenti ErrClaimed, ErrGone o ErrNotFound come Claim. Della sessione il chiamante legge solo
+// i campi immutabili (nome e lunghezza per la pagina di download).
+func (r *Registry) Peek(id string) (*Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prune(time.Now())
 	s, ok := r.sessions[id]
 	switch {
 	case !ok && r.isGone(id):
-		return ErrGone
+		return nil, ErrGone
 	case !ok:
-		return ErrNotFound
+		return nil, ErrNotFound
 	case s.claimed:
-		return ErrClaimed
+		return nil, ErrClaimed
 	}
-	return nil
+	return s, nil
 }
 
 // Finish termina la sessione: rimuove dal registry una sola volta e chiude Finished.
@@ -259,6 +387,11 @@ func (r *Registry) expireLocked(s *Session) {
 	delete(r.sessions, s.Slug)
 	r.bury(s.Slug)
 	close(s.expired)
+	// Una prenotazione senza body non ha un mittente che chiami Finish.
+	if s.Token != "" && !s.bound {
+		s.bindTimer.Stop()
+		s.finishOnce.Do(func() { close(s.finished) })
+	}
 }
 
 // bury registra lo slug come terminale per tombstoneTTL (D17), entro maxGone tombstone.

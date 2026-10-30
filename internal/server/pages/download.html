@@ -1,0 +1,40 @@
+{{define "content"}}
+<section class="card" aria-labelledby="dl-title">
+  <h2 id="dl-title"><span class="role role-recv">Receiver</span>Download a file</h2>
+  <dl class="file">
+    <dt>File</dt><dd>{{.Name}}</dd>
+    <dt>Size</dt><dd>{{.Size}}</dd>
+  </dl>
+  <form id="dl" method="post"><button class="primary" type="submit">Download</button></form>
+  <p class="muted" id="dl-status" role="status">This link works for one download only: once you press Download, it is used.</p>
+</section>
+{{- if .Commands}}
+
+<section class="card" aria-labelledby="dl-terminal">
+  <h2 id="dl-terminal">Or from a terminal</h2>
+  <p class="muted">Instead of the button, run one of these commands. Use only one: the link works once.</p>
+  <div class="rows tools">
+    {{- range $i, $c := .Commands}}
+    <span class="label">{{$c.Label}}</span><code class="field" id="c{{$i}}">{{$c.Line}}</code><button class="copy" type="button" data-copy="c{{$i}}">Copy</button>
+    {{- end}}
+  </div>
+</section>
+{{- end}}
+{{end}}
+{{define "script"}}<script>
+(function () {
+  // Il pulsante si disattiva dopo l'invio del form: un secondo POST troverebbe il link già usato.
+  // Il setTimeout lascia partire l'invio prima di disattivarlo.
+  var form = document.getElementById("dl");
+  form.addEventListener("submit", function () {
+    var btn = form.querySelector("button");
+    var status = document.getElementById("dl-status");
+    setTimeout(function () {
+      btn.disabled = true;
+      btn.textContent = "Download started";
+      status.textContent = "Check your browser's downloads. The link is now used; the sender sees OK when the download is complete.";
+    }, 0);
+  });
+})();
+</script>
+{{end}}

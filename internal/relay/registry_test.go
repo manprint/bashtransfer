@@ -2,6 +2,7 @@ package relay
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -263,24 +264,223 @@ func TestRegistryPeek(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("Peek slug in attesa: %v", err)
+	if p, err := r.Peek(s.Slug); err != nil || p != s {
+		t.Fatalf("Peek slug in attesa: %v, %v", p, err)
 	}
-	if err := r.Peek(s.Slug); err != nil {
+	if _, err := r.Peek(s.Slug); err != nil {
 		t.Fatalf("Peek ripetuto: %v, lo slug non deve risultare reclamato", err)
 	}
-	if err := r.Peek("ZZZZZZZZZZ"); !errors.Is(err, ErrNotFound) {
+	if _, err := r.Peek("ZZZZZZZZZZ"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Peek sconosciuto: %v", err)
 	}
 	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Peek(s.Slug); !errors.Is(err, ErrClaimed) {
+	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrClaimed) {
 		t.Fatalf("Peek reclamato: %v", err)
 	}
 	r.Finish(s)
-	if err := r.Peek(s.Slug); !errors.Is(err, ErrGone) {
+	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrGone) {
 		t.Fatalf("Peek concluso: %v", err)
+	}
+}
+
+// TestRegistryReserve: una sessione prenotata si aggancia una sola volta e solo con il suo token.
+func TestRegistryReserve(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, err := r.Reserve("a.bin", 3, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Token) != 32 {
+		t.Fatalf("token %q", s.Token)
+	}
+	if p, err := r.Peek(s.Slug); err != nil || p != s {
+		t.Fatalf("Peek prenotata: %v, %v", p, err)
+	}
+	for _, tok := range []string{"", "x", strings.Repeat("0", 32)} {
+		if _, err := r.Bind(s.Slug, tok); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Bind token %q: %v", tok, err)
+		}
+	}
+	if _, err := r.Bind("ZZZZZZZZZZ", s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind slug sconosciuto: %v", err)
+	}
+	if b, err := r.Bind(s.Slug, s.Token); err != nil || b != s {
+		t.Fatalf("Bind: %v, %v", b, err)
+	}
+	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("secondo Bind: %v", err)
+	}
+	c, err := r.Create("b.bin", -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Bind(c.Slug, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind di una sessione di Create: %v", err)
+	}
+}
+
+// TestRegistryReserveUnbound: senza Bind entro il timeout la sessione termina con ErrSenderGone,
+// anche se un ricevente si è già agganciato; lo slug diventa 410.
+func TestRegistryReserveUnbound(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, err := r.Reserve("a.bin", 3, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.Finished():
+	case <-time.After(5 * time.Second):
+		t.Fatal("sessione senza mittente non terminata")
+	}
+	if !errors.Is(s.Err(), ErrSenderGone) {
+		t.Fatalf("Err %v, atteso ErrSenderGone", s.Err())
+	}
+	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrGone) || r.Len() != 0 {
+		t.Fatalf("Peek %v, sessioni %d", err, r.Len())
+	}
+	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind tardivo: %v", err)
+	}
+
+	// Agganciata in tempo: il timeout non la tocca.
+	s2, _ := r.Reserve("b.bin", 3, 50*time.Millisecond)
+	if _, err := r.Bind(s2.Slug, s2.Token); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if _, err := r.Peek(s2.Slug); err != nil {
+		t.Fatalf("sessione agganciata: %v", err)
+	}
+}
+
+// TestRegistryCancel: prima del Bind Cancel termina la prenotazione come bindTimeout; dopo la
+// interrompe con ErrSenderGone e la lascia al mittente, che chiama Finish. Su una sessione finita
+// non fa nulla.
+func TestRegistryCancel(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, _ := r.Reserve("a.bin", 3, time.Hour)
+	r.Cancel(s)
+	select {
+	case <-s.Finished():
+	default:
+		t.Fatal("prenotazione annullata non terminata")
+	}
+	if !errors.Is(s.Err(), ErrSenderGone) || r.Len() != 0 {
+		t.Fatalf("Err %v, sessioni %d", s.Err(), r.Len())
+	}
+	if _, err := r.Claim(s.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
+		t.Fatalf("Claim dopo Cancel: %v", err)
+	}
+	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind dopo Cancel: %v", err)
+	}
+
+	s2, _ := r.Reserve("b.bin", 3, time.Hour)
+	if _, err := r.Bind(s2.Slug, s2.Token); err != nil {
+		t.Fatal(err)
+	}
+	r.Cancel(s2)
+	select {
+	case <-s2.Aborted():
+	default:
+		t.Fatal("sessione agganciata non interrotta")
+	}
+	select {
+	case <-s2.Finished():
+		t.Fatal("sessione agganciata terminata senza Finish")
+	default:
+	}
+	if !errors.Is(s2.Err(), ErrSenderGone) {
+		t.Fatalf("Err %v", s2.Err())
+	}
+	r.Finish(s2)
+	r.Cancel(s2)
+	if r.Len() != 0 {
+		t.Fatalf("sessioni %d", r.Len())
+	}
+}
+
+// TestRegistryReserved: la prenotazione si trova solo con il suo token, agganciata o no; un upload
+// da curl (senza token) mai.
+func TestRegistryReserved(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, _ := r.Reserve("a.bin", 3, time.Hour)
+	for _, tok := range []string{"", "x", strings.Repeat("0", 32)} {
+		if _, err := r.Reserved(s.Slug, tok); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Reserved token %q: %v", tok, err)
+		}
+	}
+	if got, err := r.Reserved(s.Slug, s.Token); err != nil || got != s {
+		t.Fatalf("Reserved: %v, %v", got, err)
+	}
+	if _, err := r.Bind(s.Slug, s.Token); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := r.Reserved(s.Slug, s.Token); err != nil || got != s {
+		t.Fatalf("Reserved agganciata: %v, %v", got, err)
+	}
+	c, _ := r.Create("b.bin", 3)
+	if _, err := r.Reserved(c.Slug, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Reserved su upload da curl: %v", err)
+	}
+	r.Finish(s)
+	if _, err := r.Reserved(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Reserved dopo Finish: %v", err)
+	}
+}
+
+// TestRegistryExpireReservation: una prenotazione senza body scade come un upload e, senza un
+// mittente che chiami Finish, termina; agganciata la termina il mittente.
+func TestRegistryExpireReservation(t *testing.T) {
+	r := NewRegistry(10, 50*time.Millisecond)
+	s, _ := r.Reserve("a.bin", 3, time.Hour)
+	select {
+	case <-s.Finished():
+	case <-time.After(5 * time.Second):
+		t.Fatal("prenotazione scaduta non terminata")
+	}
+	select {
+	case <-s.Expired():
+	default:
+		t.Fatal("Expired non chiuso")
+	}
+	s2, _ := r.Reserve("b.bin", 3, time.Hour)
+	if _, err := r.Bind(s2.Slug, s2.Token); err != nil {
+		t.Fatal(err)
+	}
+	<-s2.Expired()
+	select {
+	case <-s2.Finished():
+		t.Fatal("sessione agganciata terminata alla scadenza senza Finish")
+	default:
+	}
+}
+
+// TestSessionProgress: avanzamento ed esito per lo stream della prenotazione.
+func TestSessionProgress(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, _ := r.Reserve("a.bin", 3, time.Hour)
+	select {
+	case <-s.Started():
+		t.Fatal("Started chiuso prima di Start")
+	default:
+	}
+	s.Start()
+	s.Start()
+	<-s.Started()
+	s.AddDelivered(2)
+	s.AddDelivered(1)
+	if s.Delivered() != 3 || s.Result() != "" {
+		t.Fatalf("Delivered %d, Result %q", s.Delivered(), s.Result())
+	}
+	s.SetResult("ok")
+	if s.Result() != "ok" {
+		t.Fatalf("Result %q", s.Result())
 	}
 }
 

@@ -1,5 +1,5 @@
 # Test e pubblicazione dell'immagine su GitHub Container Registry (ghcr.io/<owner>/<repo>).
-#   pull request:   test (vet, race, e2e); l'immagine viene costruita ma non pubblicata.
+#   pull request:   test (vet, race, e2e) e ui (Playwright); l'immagine viene costruita ma non pubblicata.
 #   push su main:   test, poi immagine con tag main e sha-<commit>.
 #   tag vX.Y.Z:     test, poi immagine con tag X.Y.Z, X.Y e latest.
 # Immagine multi-architettura (linux/amd64, linux/arm64) con cross-compilazione Go, SBOM e
@@ -59,8 +59,51 @@ jobs:
           sudo apt-get install -y -qq aria2 busybox
           bash scripts/e2e.sh
 
+  # Test frontend con Playwright (Chromium headless, playwright-core fissato in scripts/ui): pagine
+  # web, invio dal browser e download dalla pagina, con server diretti e attraverso Apache 2.4 in
+  # h2c (immagine httpd fissata per digest in scripts/ui/run.sh). Screenshot e file come artifact
+  # se un test fallisce.
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: "24"
+
+      - name: playwright
+        working-directory: scripts/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright-core install --with-deps --no-shell chromium
+
+      - name: ui (diretto)
+        env:
+          BASHT_UI_OUT: ${{ runner.temp }}/ui
+        run: bash scripts/ui/run.sh direct
+
+      - name: ui (Apache)
+        env:
+          BASHT_UI_OUT: ${{ runner.temp }}/ui
+        run: bash scripts/ui/run.sh apache
+
+      - name: artifact
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui
+          path: ${{ runner.temp }}/ui
+          retention-days: 7
+
   image:
-    needs: test
+    needs: [test, ui]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

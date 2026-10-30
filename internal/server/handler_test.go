@@ -439,13 +439,14 @@ func TestReceiverAbortCleansSession(t *testing.T) {
 
 func TestUploadMethodNotAllowed(t *testing.T) {
 	srv, _ := newTestServer(t)
-	resp, err := http.Post(srv.URL+"/", "text/plain", strings.NewReader("x"))
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/", strings.NewReader("x"))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("POST stato %d, atteso 405", resp.StatusCode)
+		t.Fatalf("DELETE stato %d, atteso 405", resp.StatusCode)
 	}
 	if !strings.Contains(resp.Header.Get("Allow"), "PUT") {
 		t.Fatalf("Allow %q, atteso PUT", resp.Header.Get("Allow"))
@@ -1748,18 +1749,24 @@ func TestHomeBrowser(t *testing.T) {
 	}
 	for _, want := range []string{
 		"<title>Bashtransfer</title>",
-		"Relay sicuro per invio file senza persistenza server",
-		"curl -T FILE " + srv.URL,
+		`<html lang="en">`,
+		"Nothing is stored on the server",
+		"curl " + srv.URL + " -T FILE",
+		"tar -czf - FOLDER | curl -N " + srv.URL + "/FOLDER.tgz -T -",
+		`curl -f -OJ &#34;LINK&#34;`,
+		`aria2c -x1 -s1 --allow-overwrite=false &#34;LINK&#34;`,
 		`rel="icon"`,
 		"sudo apt install curl wget aria2",
 		"brew install curl wget aria2",
+		// Base http: la pagina non promette HTTPS.
+		"Not encrypted.",
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("la pagina non contiene %q", want)
 		}
 	}
-	if strings.Contains(string(body), "%%BASE%%") {
-		t.Error("segnaposto %%BASE%% non sostituito")
+	if strings.Contains(string(body), "Encrypted in transit") {
+		t.Error("base http: la pagina dichiara la cifratura HTTPS")
 	}
 
 	plain := get(t, context.Background(), srv.URL+"/")
@@ -1816,6 +1823,7 @@ func checkCommandsTable(t *testing.T, out, u string) {
 		`curl -f -OJ "` + u + `"`,
 		`wget --content-disposition "` + u + `"`,
 		`aria2c -x1 -s1 --allow-overwrite=false "` + u + `"`,
+		u,
 	}
 	if !slices.Equal(cmds, want) {
 		t.Errorf("comandi %q, attesi %q", cmds, want)
@@ -1840,9 +1848,11 @@ func TestDefaultDisposition(t *testing.T) {
 	})
 	u.resp.Body.Close()
 
+	accept := "*/*"
 	check := func(method, path string, status int, want string) {
 		t.Helper()
 		req, _ := http.NewRequestWithContext(ctx, method, srv.URL+path, nil)
+		req.Header.Set("Accept", accept)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -1853,12 +1863,16 @@ func TestDefaultDisposition(t *testing.T) {
 				method, path, resp.StatusCode, resp.Header.Get("Content-Disposition"), status, want)
 		}
 	}
-	check(http.MethodGet, "/"+u.slug, http.StatusGone, defaultDisposition)
-	check(http.MethodGet, "/AbC123xY9z", http.StatusNotFound, defaultDisposition)
-	check(http.MethodGet, "/x.bin", http.StatusNotFound, defaultDisposition)
-	check(http.MethodGet, "/"+u.slug+"/x.bin", http.StatusNotFound, defaultDisposition)
-	check(http.MethodDelete, "/x.bin", http.StatusMethodNotAllowed, defaultDisposition)
-	check(http.MethodGet, "/", http.StatusOK, "")
+	// Anche le pagine HTML (download ed errori) portano il nome innocuo.
+	for _, accept = range []string{"*/*", "text/html"} {
+		check(http.MethodGet, "/"+u.slug, http.StatusGone, defaultDisposition)
+		check(http.MethodPost, "/"+u.slug, http.StatusGone, defaultDisposition)
+		check(http.MethodGet, "/AbC123xY9z", http.StatusNotFound, defaultDisposition)
+		check(http.MethodGet, "/x.bin", http.StatusNotFound, defaultDisposition)
+		check(http.MethodGet, "/"+u.slug+"/x.bin", http.StatusNotFound, defaultDisposition)
+		check(http.MethodDelete, "/x.bin", http.StatusMethodNotAllowed, defaultDisposition)
+		check(http.MethodGet, "/", http.StatusOK, "")
+	}
 }
 
 // newConnServer è il server di produzione per i test dell'esito: ConnContext come in main, HTTP/1

@@ -3,11 +3,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -70,14 +72,37 @@ const (
 	reasonNotFound         = "not_found"
 	reasonGone             = "gone"
 	reasonRangeUnsupported = "range_not_supported"
+	reasonBadRequest       = "bad_request"
+	reasonMediaType        = "unsupported_media_type"
 )
 
-// reject registra il rifiuto di una richiesta e risponde con status e msg. Il path non compare
-// nel log: contiene slug o nome del file.
+// tokenHeader porta il token di una sessione prenotata (reserve) nel PUT del browser: un header e
+// non la query, che i proxy registrano nei log con la riga della richiesta.
+const tokenHeader = "X-Bashtransfer-Token"
+
+// Ritmo dello stream di una prenotazione (reserve): avanzamento ogni progressInterval, una riga
+// di keepalive ogni keepaliveTicks intervalli senza novità. Dietro Apache la chiusura della pagina
+// arriva al server solo dopo alcune scritture fallite verso il browser: il keepalive frequente la
+// fa arrivare in pochi secondi se l'annullamento esplicito (cancel) non parte.
+const (
+	progressInterval = 500 * time.Millisecond
+	keepaliveTicks   = 2
+)
+
+// bindTimeout è il tempo entro cui il browser deve iniziare il PUT dopo la prenotazione: lo fa
+// subito, e una prenotazione senza upload non deve occupare una sessione. Variabile per i test.
+var bindTimeout = 30 * time.Second
+
+// reject registra il rifiuto di una richiesta e risponde con status e msg (ai browser con la pagina
+// del motivo, writeError). Il path non compare nel log: contiene slug o nome del file.
 func (h *handler) reject(w http.ResponseWriter, r *http.Request, level slog.Level, status int, reason, msg string) {
+	h.logReject(r, level, status, reason)
+	writeError(w, r, status, reason, msg)
+}
+
+func (h *handler) logReject(r *http.Request, level slog.Level, status int, reason string) {
 	h.opts.Logger.LogAttrs(r.Context(), level, "request_rejected",
 		slog.String("method", r.Method), slog.Int("status", status), slog.String("reason", reason))
-	http.Error(w, msg, status)
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -95,17 +120,29 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
-		if seg == "" {
-			h.usage(w, r)
-			return
-		}
+	if seg != "" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+		// La stessa URL dà la pagina di download o il file: le cache non devono confonderli, e lo
+		// stato del link cambia a ogni richiesta.
+		w.Header().Set("Vary", "Accept, User-Agent")
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	switch {
+	case r.Method == http.MethodGet && seg == "":
+		h.usage(w, r)
+	case r.Method == http.MethodPost && seg == "":
+		h.reserve(w, r)
+	case r.Method == http.MethodGet && (wantsHTML(r) || isPreviewAgent(r)):
+		// Un browser, o un'anteprima di chat e posta, vede la pagina di download: solo il pulsante
+		// (POST) reclama il link, così aprirlo o incollarlo in una chat non lo consuma.
+		h.landing(w, r, seg)
+	case r.Method == http.MethodGet, r.Method == http.MethodPost && seg != "":
 		h.download(w, r, seg)
-	case http.MethodPut:
+	case r.Method == http.MethodPut:
 		h.upload(w, r, seg)
+	case r.Method == http.MethodDelete && seg != "" && r.Header.Get(tokenHeader) != "":
+		h.cancel(w, r, seg)
 	default:
-		w.Header().Set("Allow", "GET, PUT")
+		w.Header().Set("Allow", "GET, POST, PUT")
 		h.reject(w, r, slog.LevelDebug, http.StatusMethodNotAllowed, reasonMethod, "method not allowed")
 	}
 }
@@ -165,12 +202,168 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "bashtransfer: relay di file senza salvataggio su disco.\n"+
-		"Invio:     curl -T FILE %s\n"+
-		"Ricezione: esegui il comando curl, wget o aria2c ricevuto dal mittente.\n", base)
+	fmt.Fprintf(w, "bashtransfer: file relay, nothing is written to disk.\n"+
+		"Send:    curl %s -T FILE\n"+
+		"Receive: open the sender's link in a browser, or run the curl, wget or aria2c command\n"+
+		"         from the sender's table.\n", base)
+}
+
+// authorized riporta se la richiesta può aprire un invio; altrimenti risponde 401.
+func (h *handler) authorized(w http.ResponseWriter, r *http.Request) bool {
+	if h.opts.Authorize == nil || h.opts.Authorize(r) {
+		return true
+	}
+	w.Header().Set("WWW-Authenticate", `Basic realm="bashtransfer"`)
+	h.reject(w, r, slog.LevelWarn, http.StatusUnauthorized, reasonUnauthorized, "unauthorized")
+	return false
+}
+
+// rejectCreate risponde all'errore di Create o Reserve.
+func (h *handler) rejectCreate(w http.ResponseWriter, r *http.Request, err error) {
+	level, reason := slog.LevelWarn, reasonCapacity
+	if !errors.Is(err, relay.ErrCapacity) {
+		level, reason = slog.LevelError, reasonInternal
+		h.opts.Logger.Error("session_create_failed", "err", err)
+	}
+	h.reject(w, r, level, http.StatusServiceUnavailable, reason, "service unavailable")
+}
+
+// reservation è la risposta di reserve: il link, i comandi della tabella e il token del PUT.
+type reservation struct {
+	Slug     string    `json:"slug"`
+	URL      string    `json:"url"`
+	Token    string    `json:"token"`
+	Commands []command `json:"commands"`
+}
+
+// reserve prenota una sessione per un invio dal browser: POST / con JSON {"name": ..., "size": ...}.
+// Il browser invia poi il body con PUT /<slug> e il token (upload). Solo JSON: un altro sito non può
+// inviarlo senza un preflight CORS, che il relay non autorizza.
+//
+// La risposta è uno stream NDJSON aperto per tutto il trasferimento: la prenotazione (link, comandi,
+// token), {"event":"attached"} quando il ricevente si aggancia, {"event":"progress","bytes":N} con i
+// byte consegnati al ricevente e infine l'esito, come nella risposta del PUT. L'esito non può
+// viaggiare solo sul PUT: su HTTP/1 il browser legge la risposta solo dopo aver inviato tutto il
+// body, e quella di un trasferimento interrotto si perde nel reset della connessione. La chiusura
+// dello stream (pagina chiusa, Cancel) termina la sessione: dietro il body non letto del PUT il
+// server non vedrebbe andare via il mittente.
+func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
+	if !h.authorized(w, r) {
+		return
+	}
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		h.reject(w, r, slog.LevelDebug, http.StatusUnsupportedMediaType, reasonMediaType, "unsupported media type")
+		return
+	}
+	base, ok := h.baseURL(r)
+	if !ok {
+		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonInvalidHost, "invalid host")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		Size *int64 `json:"size"`
+	}
+	// Il body va letto fino in fondo: solo dopo net/http rileva la chiusura della connessione e
+	// annulla il contesto della richiesta.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	if err != nil || json.Unmarshal(body, &req) != nil || req.Size == nil || *req.Size < 0 {
+		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
+		return
+	}
+	s, err := h.reg.Reserve(SanitizeName(req.Name), *req.Size, bindTimeout)
+	if err != nil {
+		h.rejectCreate(w, r, err)
+		return
+	}
+	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_reserved",
+		slog.String("id", s.ID), slog.Int64("length", s.Length))
+	u := base + "/" + s.Slug
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	rc := http.NewResponseController(w)
+	enc := json.NewEncoder(w)
+	send := func(v any) bool { return enc.Encode(v) == nil && rc.Flush() == nil }
+	if !send(reservation{
+		Slug: s.Slug, URL: u, Token: s.Token, Commands: append(receiverCommands(u), command{"direct", u}),
+	}) {
+		h.reg.Cancel(s)
+		return
+	}
+
+	type event struct {
+		Event string `json:"event"`
+		Bytes *int64 `json:"bytes,omitempty"`
+	}
+	tick := time.NewTicker(progressInterval)
+	defer tick.Stop()
+	started := s.Started()
+	attached := false
+	var last int64 = -1
+	for ticks := 0; ; {
+		select {
+		case <-s.Finished():
+			res := s.Result()
+			if res == "" {
+				// Sessione finita senza un esito del PUT: scaduta prima del body, chiusa per bindTimeout
+				// o mittente caduto.
+				select {
+				case <-s.Expired():
+					res = webOutcome(outcomeExpired, 0, time.Since(s.Created))
+				default:
+					res = webOutcome(failReason(s.Err()), s.Delivered(), 0)
+				}
+			}
+			_, _ = io.WriteString(w, strings.TrimLeft(res, "\n"))
+			_ = rc.Flush()
+			return
+		case <-started:
+			started, attached = nil, true
+			if !send(event{Event: "attached"}) {
+				h.reg.Cancel(s)
+				return
+			}
+		case <-tick.C:
+			// L'avanzamento quando cambia; senza novità una riga ogni keepaliveTicks: una scrittura
+			// fallita rivela il mittente caduto anche se la chiusura non arriva al server (proxy).
+			ticks++
+			ok := true
+			switch n := s.Delivered(); {
+			case attached && (n != last || ticks%keepaliveTicks == 0):
+				last = n
+				ok = send(event{Event: "progress", Bytes: &n})
+			case !attached && ticks%keepaliveTicks == 0:
+				ok = send(event{Event: "waiting"})
+			}
+			if !ok {
+				h.reg.Cancel(s)
+				return
+			}
+		case <-r.Context().Done():
+			h.reg.Cancel(s)
+			return
+		}
+	}
+}
+
+// cancel annulla un invio dal browser: DELETE /<slug> con il token della prenotazione. La pagina lo
+// invia al Cancel e alla chiusura (fetch keepalive): la chiusura dello stream della prenotazione
+// basta solo senza proxy, perché Apache la inoltra al server con ritardo. Prima del ricevente il
+// link diventa 410; durante il download il ricevente vede il trasferimento interrotto.
+func (h *handler) cancel(w http.ResponseWriter, r *http.Request, seg string) {
+	s, err := h.reg.Reserved(seg, r.Header.Get(tokenHeader))
+	if err != nil {
+		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
+		return
+	}
+	h.reg.Cancel(s)
+	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_cancelled", slog.String("id", s.ID))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // upload apre la sessione, scrive subito i comandi e legge il body solo quando il ricevente si aggancia.
+// Con tokenHeader è il body di una sessione prenotata dal browser (reserve): seg è lo slug, il token
+// sostituisce le credenziali, e la risposta contiene solo l'esito finale in JSON (webOutcome).
 func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	rc := http.NewResponseController(w)
 	ok := false
@@ -180,9 +373,9 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			_ = rc.SetReadDeadline(time.Now().Add(drain))
 		}
 	}()
-	if h.opts.Authorize != nil && !h.opts.Authorize(r) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="bashtransfer"`)
-		h.reject(w, r, slog.LevelWarn, http.StatusUnauthorized, reasonUnauthorized, "unauthorized")
+	token := r.Header.Get(tokenHeader)
+	web := token != ""
+	if !web && !h.authorized(w, r) {
 		return
 	}
 	base, baseOK := h.baseURL(r)
@@ -195,17 +388,21 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		h.reject(w, r, slog.LevelError, http.StatusInternalServerError, reasonInternal, "internal error")
 		return
 	}
-	name := SanitizeName(seg)
-	s, err := h.reg.Create(name, r.ContentLength)
-	if err != nil {
-		level, reason := slog.LevelWarn, reasonCapacity
-		if !errors.Is(err, relay.ErrCapacity) {
-			level, reason = slog.LevelError, reasonInternal
-			h.opts.Logger.Error("session_create_failed", "err", err)
+	var s *relay.Session
+	if web {
+		var err error
+		if s, err = h.reg.Bind(seg, token); err != nil {
+			h.reject(w, r, slog.LevelInfo, http.StatusNotFound, reasonNotFound, "404 page not found")
+			return
 		}
-		h.reject(w, r, level, http.StatusServiceUnavailable, reason, "service unavailable")
-		return
+	} else {
+		var err error
+		if s, err = h.reg.Create(SanitizeName(seg), r.ContentLength); err != nil {
+			h.rejectCreate(w, r, err)
+			return
+		}
 	}
+	name := s.Name
 	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_accepted",
 		slog.String("id", s.ID), slog.Int64("length", s.Length))
 	tr := transferLog{session: s}
@@ -223,6 +420,14 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		tr.log(h.opts.Logger, err)
 	}()
 
+	// La lunghezza annunciata alla prenotazione è quella che il ricevente vedrà in Content-Length.
+	if web && r.ContentLength >= 0 && r.ContentLength != s.Length {
+		s.Abort(relay.ErrLengthMismatch)
+		s.SetResult(webOutcome(failLengthMismatch, 0, 0))
+		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonBadRequest, "length mismatch")
+		return
+	}
+
 	// curl invia "Expect: 100-continue" per upload grandi. Se la risposta finale arriva prima
 	// del 100 e prima della lettura del body, Go chiude il body (ErrBodyReadAfterClose).
 	// Il 100 viene quindi inviato esplicitamente, prima dei comandi.
@@ -239,8 +444,10 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	if r.ProtoMajor == 1 {
 		w.Header().Set("Connection", "close")
 	}
-	io.WriteString(w, commands(base+"/"+s.Slug))
-	_ = rc.Flush()
+	if !web {
+		io.WriteString(w, commands(base+"/"+s.Slug))
+		_ = rc.Flush()
+	}
 
 	// Con il body non letto net/http non vede la caduta del mittente: la connessione viene
 	// controllata a intervalli finché il ricevente non si aggancia.
@@ -250,6 +457,13 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		t := time.NewTicker(peerCheckInterval)
 		defer t.Stop()
 		peerCheck = t.C
+	}
+
+	// Solo per il browser: per curl un'interruzione prima della copia (ricevente caduto appena
+	// agganciato) passa dalla copia, che scrive al mittente il motivo.
+	var cancelled <-chan struct{}
+	if web {
+		cancelled = s.Aborted()
 	}
 
 	var heartbeat <-chan time.Time
@@ -267,6 +481,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "receiver_attached",
 				slog.String("id", s.ID), seconds("wait_s", tr.attached.Sub(s.Created)))
 			rr.start(name, s.Length)
+			s.Start()
 			body := relay.NewIdleReader(r.Body, h.opts.IdleTimeout, rc.SetReadDeadline)
 			n, err := h.copyUntilAbort(s, rr, body)
 			tr.bytes = n
@@ -277,12 +492,23 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 				tr.outcome = outcomeAborted
 				s.Abort(err)
 				drain = 0
+				if web {
+					res := webOutcome(failReason(s.Err()), n, time.Since(tr.attached))
+					s.SetResult(res)
+					writeWebOutcome(w, res)
+					return
+				}
 				abortSender(w, r, failedMessage(s.Err(), n, s.Length, h.opts.IdleTimeout))
 				return
 			}
 			tr.outcome = outcomeOK
 			ok = true
-			io.WriteString(w, doneMessage(n, time.Since(tr.attached)))
+			msg := doneMessage(n, time.Since(tr.attached))
+			if web {
+				msg = webOutcome(outcomeOK, n, time.Since(tr.attached))
+				s.SetResult(msg)
+			}
+			io.WriteString(w, msg)
 			_ = rc.Flush()
 			return
 		case <-s.Expired():
@@ -290,8 +516,19 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			// Prima dell'Abort differito con ErrSenderGone: il log deve dire scadenza, non mittente caduto.
 			s.Abort(relay.ErrExpired)
 			drain = 0
+			if web {
+				res := webOutcome(outcomeExpired, 0, time.Since(s.Created))
+				s.SetResult(res)
+				writeWebOutcome(w, res)
+				return
+			}
 			abortSender(w, r, fmt.Sprintf("\nERRORE: download NON avvenuto: nessun ricevente si è collegato "+
 				"in %s, il link è stato chiuso.\n", roundDuration(time.Since(s.Created))))
+			return
+		case <-cancelled:
+			// Il mittente nel browser ha chiuso la pagina o annullato (Cancel dallo stream della
+			// prenotazione): il body non letto non va più atteso. L'esito lo scrive lo stream.
+			drain = 0
 			return
 		case <-r.Context().Done():
 			return
@@ -320,16 +557,37 @@ func doneMessage(n int64, d time.Duration) string {
 	return fmt.Sprintf("\nOK: download completato, %s consegnati al ricevente in %s.\n", sizeText(n), roundDuration(d))
 }
 
+// Motivi di un relay interrotto (failReason), nell'esito per il browser.
+const (
+	failReceiverGone   = "receiver_gone"
+	failIdle           = "idle"
+	failLengthMismatch = "length_mismatch"
+	failSenderGone     = "sender_gone"
+)
+
+// failReason classifica il primo errore della sessione di un relay interrotto.
+func failReason(err error) string {
+	switch {
+	case errors.Is(err, relay.ErrReceiverGone):
+		return failReceiverGone
+	case errors.Is(err, relay.ErrIdle):
+		return failIdle
+	case errors.Is(err, relay.ErrLengthMismatch):
+		return failLengthMismatch
+	}
+	return failSenderGone
+}
+
 // failedMessage è l'ultima riga per il mittente quando il relay si interrompe dopo n byte. err è
 // il primo errore della sessione.
 func failedMessage(err error, n, length int64, idle time.Duration) string {
 	var why string
-	switch {
-	case errors.Is(err, relay.ErrReceiverGone):
+	switch failReason(err) {
+	case failReceiverGone:
 		why = "il ricevente si è disconnesso o ha smesso di ricevere"
-	case errors.Is(err, relay.ErrIdle):
+	case failIdle:
 		why = "nessun dato dal mittente per " + idle.String()
-	case errors.Is(err, relay.ErrLengthMismatch):
+	case failLengthMismatch:
 		why = "il mittente ha inviato meno byte di quelli dichiarati"
 	default:
 		why = "connessione con il mittente interrotta"
@@ -339,6 +597,18 @@ func failedMessage(err error, n, length int64, idle time.Duration) string {
 		done += " di " + strconv.FormatInt(length, 10)
 	}
 	return fmt.Sprintf("\nERRORE: download NON completato dopo %s byte: %s.\n", done, why)
+}
+
+// webOutcome è l'ultima riga della risposta a un invio dal browser: l'esito in JSON, che la pagina
+// mostra nella sua lingua. outcome è outcomeOK, outcomeExpired o un motivo di failReason; seconds è
+// la durata del relay (dell'attesa per outcomeExpired).
+func webOutcome(outcome string, n int64, d time.Duration) string {
+	b, _ := json.Marshal(struct {
+		Outcome string  `json:"outcome"`
+		Bytes   int64   `json:"bytes"`
+		Seconds float64 `json:"seconds"`
+	}{outcome, n, math.Round(d.Seconds()*10) / 10})
+	return "\n" + string(b) + "\n"
 }
 
 // abortSender scrive msg al mittente e chiude la risposta. Su HTTP/1 la interrompe senza chunk
@@ -361,6 +631,15 @@ func abortSender(w http.ResponseWriter, r *http.Request, msg string) {
 		}
 	}
 	panic(http.ErrAbortHandler)
+}
+
+// writeWebOutcome scrive l'esito di un upload dal browser e lascia terminare la risposta
+// regolarmente anche su HTTP/1: per XMLHttpRequest una risposta troncata è solo un errore di rete,
+// senza l'esito. Con il body non letto net/http chiude poi la connessione in scrittura e attende
+// prima del reset, come abortSender.
+func writeWebOutcome(w http.ResponseWriter, msg string) {
+	_, _ = io.WriteString(w, msg)
+	_ = http.NewResponseController(w).Flush()
 }
 
 // sizeText rende n come "3000000 byte (2.9 MiB)".
@@ -399,15 +678,34 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 		case <-copied:
 		}
 	}()
-	n, err := h.copier.Copy(rr, body)
+	n, err := h.copier.Copy(deliveredCounter{rr, s}, body)
 	close(copied)
 	<-watched
 	return n, err
 }
 
-// commands restituisce la tabella ASCII stampata al mittente: una riga per strumento (curl, wget,
-// aria2c) con il comando di download. aria2c usa una sola connessione: il relay è un flusso unico
-// e non serve intervalli di byte.
+// deliveredCounter conta nella sessione i byte scritti al ricevente, per l'avanzamento che lo stream
+// della prenotazione mostra al mittente nel browser.
+type deliveredCounter struct {
+	relay.Receiver
+	s *relay.Session
+}
+
+func (c deliveredCounter) Write(p []byte) (int, error) {
+	n, err := c.Receiver.Write(p)
+	c.s.AddDelivered(int64(n))
+	return n, err
+}
+
+// command è un comando di download: lo strumento e la riga da eseguire.
+type command struct {
+	Label string `json:"label"`
+	Line  string `json:"line"`
+}
+
+// receiverCommands restituisce i comandi di download per il link u, uno per strumento (curl, wget,
+// aria2c): la tabella del mittente e le pagine HTML li prendono da qui. aria2c usa una sola
+// connessione: il relay è un flusso unico e non serve intervalli di byte.
 // Invariante: la sorgente non viene mai alterata. Se il ricevente lavora nella cartella del
 // mittente, il file omonimo è proprio quello in invio, e nessun comando, né alcuna sua variante con
 // meno flag, deve sovrascriverlo (scripts/invariant.py lo verifica). Per questo i comandi non
@@ -416,12 +714,19 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 // sovrascrivere, wget --content-disposition e aria2c salvano con un altro nome (.1). Senza -J o
 // --content-disposition il nome è lo slug, senza -O curl scrive sullo stdout. -f evita di salvare
 // la pagina di errore; --allow-overwrite=false prevale su un aria2.conf che chiede di sovrascrivere.
-func commands(u string) string {
-	cmds := []struct{ label, line string }{
+func receiverCommands(u string) []command {
+	return []command{
 		{"curl", fmt.Sprintf("curl -f -OJ \"%s\"", u)},
 		{"wget", fmt.Sprintf("wget --content-disposition \"%s\"", u)},
 		{"aria2c", fmt.Sprintf("aria2c -x1 -s1 --allow-overwrite=false \"%s\"", u)},
 	}
+}
+
+// commands restituisce la tabella ASCII stampata al mittente: una riga per strumento con il
+// comando di download (receiverCommands) e la riga direct con il solo link, senza virgolette, da
+// incollare nel browser: apre la pagina di download, e il file parte solo dal suo pulsante.
+func commands(u string) string {
+	cmds := append(receiverCommands(u), command{"direct", u})
 	const (
 		title = "bashtransfer: comandi per il ricevente"
 		note  = "Un solo ricevente per link. Lascia aperto il terminale fino alla fine."
@@ -430,8 +735,8 @@ func commands(u string) string {
 	// tutta la larghezza. Se sono più larghi dei comandi, la colonna dei comandi si allarga.
 	lw, cw := 0, 0
 	for _, c := range cmds {
-		lw = max(lw, len(c.label))
-		cw = max(cw, utf8.RuneCountInString(c.line))
+		lw = max(lw, len(c.Label))
+		cw = max(cw, utf8.RuneCountInString(c.Line))
 	}
 	inner := max(lw+3+cw, utf8.RuneCountInString(title), utf8.RuneCountInString(note))
 	cw = inner - lw - 3
@@ -445,7 +750,7 @@ func commands(u string) string {
 	b.WriteString("| " + pad(title, inner) + " |\n")
 	b.WriteString(split)
 	for _, c := range cmds {
-		b.WriteString("| " + pad(c.label, lw) + " | " + pad(c.line, cw) + " |\n")
+		b.WriteString("| " + pad(c.Label, lw) + " | " + pad(c.Line, cw) + " |\n")
 	}
 	b.WriteString(split)
 	b.WriteString("| " + pad(note, inner) + " |\n")
@@ -532,7 +837,12 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 	case errors.Is(err, relay.ErrNotFound):
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
-	case errors.Is(err, relay.ErrClaimed), errors.Is(err, relay.ErrGone):
+	case errors.Is(err, relay.ErrClaimed):
+		// Nel log resta gone; il browser (pulsante premuto due volte) vede che il download è partito.
+		h.logReject(r, slog.LevelInfo, http.StatusGone, reasonGone)
+		writeError(w, r, http.StatusGone, pageClaimed, "gone")
+		return
+	case errors.Is(err, relay.ErrGone):
 		h.reject(w, r, slog.LevelInfo, http.StatusGone, reasonGone, "gone")
 		return
 	case err != nil:
@@ -559,7 +869,7 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 			// Interrompe la risposta senza chunk finale: il client vede un errore (D8).
 			panic(http.ErrAbortHandler)
 		}
-		http.Error(w, "transfer aborted", http.StatusServiceUnavailable)
+		writeError(w, r, http.StatusServiceUnavailable, pageAborted, "transfer aborted")
 	}
 }
 
@@ -618,7 +928,7 @@ func rangeFromStart(h http.Header) bool {
 // concluso o già reclamato risponde come un GET normale. Non 416: curl -C - lo tratta come file
 // già completo ed esce con successo lasciando il file parziale.
 func (h *handler) rejectRange(w http.ResponseWriter, r *http.Request, id string) {
-	switch err := h.reg.Peek(id); {
+	switch _, err := h.reg.Peek(id); {
 	case errors.Is(err, relay.ErrNotFound):
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 	case err != nil:
