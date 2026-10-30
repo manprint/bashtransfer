@@ -159,6 +159,9 @@ for tool in curl wget aria2c; do
 	if run_printed "$tool" "$TMP/upload.out" "$TMP/k"; then fail "$tool su link usato: uscita 0"; fi
 done
 [[ "$(cat "$TMP/k/e2e.bin")" == "ORIGINALE" ]] || fail "un comando su link usato ha sovrascritto il file"
+# curl 8.5 (non la 8.18) crea il file di Content-Disposition (bashtransfer.txt) prima che -f fermi il
+# download: resta vuoto.
+if [[ -f "$TMP/k/bashtransfer.txt" && ! -s "$TMP/k/bashtransfer.txt" ]]; then rm "$TMP/k/bashtransfer.txt"; fi
 [[ "$(ls -A "$TMP/k")" == "e2e.bin" ]] || fail "file inattesi dopo i comandi su link usato: $(ls -A "$TMP/k")"
 
 # Link valido, ricevente nella cartella del mittente con il comando stampato: il file omonimo è
