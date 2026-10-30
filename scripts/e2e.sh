@@ -21,6 +21,7 @@ trap cleanup EXIT
 
 fail() {
 	echo "E2E FAIL: $*" >&2
+	if [[ -f "$TMP/rx.err" ]]; then echo "--- stderr dell'ultimo comando stampato ---" >&2; cat "$TMP/rx.err" >&2; fi
 	if [[ -f "$TMP/server.log" ]]; then echo "--- server.log ---" >&2; cat "$TMP/server.log" >&2; fi
 	exit 1
 }
@@ -86,14 +87,44 @@ wait_slug() {
 	sed -n 's#^| curl *| curl -f -OJ ".*/\([0-9A-Za-z]\{10\}\)" *|$#\1#p' "$out" | head -n 1
 }
 
+# Comando stampato per uno strumento (curl, wget, aria2c) nella tabella in $2.
+printed() {
+	sed -n "s#^| $1 *| \(.*[^ ]\) *|\$#\1#p" "$2" | head -n 1
+}
+
+# I tre comandi stampati per l'URL $2/$3, senza nome di file (scripts/invariant.py).
+check_commands() {
+	local out="$1" u="$2/$3"
+	[[ "$(printed curl "$out")" == "curl -f -OJ \"$u\"" ]] || fail "riga curl errata: $(printed curl "$out")"
+	[[ "$(printed wget "$out")" == "wget --content-disposition \"$u\"" ]] || fail "riga wget errata: $(printed wget "$out")"
+	[[ "$(printed aria2c "$out")" == "aria2c -x1 -s1 --allow-overwrite=false \"$u\"" ]] ||
+		fail "riga aria2c errata: $(printed aria2c "$out")"
+}
+
+# HOME del ricevente: nessuna configurazione dell'utente (.curlrc, .wgetrc, aria2.conf) cambia
+# l'esito dei comandi stampati; solo certificato di test accettato e un solo tentativo.
+RXHOME="$TMP/rxhome"
+mkdir -p "$RXHOME/.aria2"
+printf 'insecure\n' > "$RXHOME/.curlrc"
+printf 'check_certificate = off\ntries = 1\n' > "$RXHOME/.wgetrc"
+printf 'check-certificate=false\nmax-tries=1\n' > "$RXHOME/.aria2/aria2.conf"
+
+# Esegue in $3 il comando stampato per lo strumento $1 nella tabella in $2, così come lo incolla
+# il ricevente. Lo stderr resta in $TMP/rx.err, mostrato da fail.
+run_printed() {
+	local line
+	line="$(printed "$1" "$2")"
+	[[ -n "$line" ]] || fail "riga $1 mancante in $2"
+	(cd "$3" && HOME="$RXHOME" XDG_CONFIG_HOME="$RXHOME/.config" bash -c "$line" > /dev/null 2> "$TMP/rx.err")
+}
+
 # RS-1: upload da file, nome dal path.
 curl -N -sS "${UP_AUTH[@]}" -T "$TMP/payload.bin" "$BASE/e2e.bin" > "$TMP/upload.out" 2> "$TMP/upload.err" &
 UP_PID=$!
 UP_PIDS+=("$UP_PID")
 SLUG="$(wait_slug "$TMP/upload.out")"
 [[ -n "$SLUG" ]] || fail "nessuno slug entro 10 s (upload.out: $(cat "$TMP/upload.out"))"
-grep -qF '| wget -nc -O "e2e.bin" ' "$TMP/upload.out" || fail "riga wget mancante o nome errato"
-grep -qF '| aria2c -x1 -s1 -o "e2e.bin" ' "$TMP/upload.out" || fail "riga aria2c mancante o nome errato"
+check_commands "$TMP/upload.out" "$BASE" "$SLUG"
 
 # Ripresa (curl -C -): 400 senza reclamare lo slug; il download completo successivo riesce.
 printf 'parziale' > "$TMP/received.bin"
@@ -105,10 +136,15 @@ if [[ -n "$EXTERNAL" ]]; then
 	grep -qF "\"$BASE/" "$TMP/upload.out" || fail "comandi con base diversa da $BASE: $(cat "$TMP/upload.out")"
 fi
 
-curl -sS -o "$TMP/received.bin" "$BASE/$SLUG" || fail "download RS-1 fallito"
-RECV_SUM="$(sha256sum "$TMP/received.bin" | awk '{print $1}')"
+# Download con la prima riga stampata: il nome viene da Content-Disposition.
+mkdir -p "$TMP/rs1"
+run_printed curl "$TMP/upload.out" "$TMP/rs1" || fail "download RS-1 fallito"
+RECV_SUM="$(sha256sum "$TMP/rs1/e2e.bin" | awk '{print $1}')"
 [[ "$RECV_SUM" == "$PAYLOAD_SUM" ]] || fail "sha256 RS-1 diverso"
 wait "$UP_PID" || fail "upload RS-1 terminato con errore"
+# Esito finale per il mittente.
+grep -qF "OK: download completato, $((MB * 1048576)) byte" "$TMP/upload.out" ||
+	fail "RS-1: esito OK mancante per il mittente: $(tail -n 2 "$TMP/upload.out")"
 
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$SLUG")"
 [[ "$CODE" == "410" ]] || fail "secondo download RS-1: $CODE, atteso 410"
@@ -118,28 +154,40 @@ CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$SLUG")"
 # compaiono altri file e il comando esce con errore.
 mkdir -p "$TMP/k"
 printf 'ORIGINALE' > "$TMP/k/e2e.bin"
-if (cd "$TMP/k" && curl -s -k -f -OJ "$BASE/$SLUG"); then fail "curl -f -OJ su link usato: uscita 0"; fi
-if command -v wget > /dev/null; then
-	if (cd "$TMP/k" && wget -q --no-check-certificate --tries=1 -nc -O "e2e.bin" "$BASE/$SLUG"); then fail "wget -nc su link usato: uscita 0"; fi
-fi
-if command -v aria2c > /dev/null; then
-	if (cd "$TMP/k" && aria2c -q --check-certificate=false --max-tries=1 -x1 -s1 -o "e2e.bin" "$BASE/$SLUG"); then fail "aria2c su link usato: uscita 0"; fi
-fi
+for tool in curl wget aria2c; do
+	command -v "$tool" > /dev/null || continue
+	if run_printed "$tool" "$TMP/upload.out" "$TMP/k"; then fail "$tool su link usato: uscita 0"; fi
+done
 [[ "$(cat "$TMP/k/e2e.bin")" == "ORIGINALE" ]] || fail "un comando su link usato ha sovrascritto il file"
 [[ "$(ls -A "$TMP/k")" == "e2e.bin" ]] || fail "file inattesi dopo i comandi su link usato: $(ls -A "$TMP/k")"
 
-# Link valido, ricevente nella cartella del mittente: curl -OJ rifiuta di sovrascrivere il file in
-# invio (curl -o lo troncherebbe mentre il mittente lo legge).
-mkdir -p "$TMP/same"
-cp "$TMP/payload.bin" "$TMP/same/same.bin"
-(cd "$TMP/same" && curl -N -sS "${UP_AUTH[@]}" -T same.bin "$BASE/same.bin" > "$TMP/same.out" 2> "$TMP/same.err") &
-SAME_PID=$!
-UP_PIDS+=("$SAME_PID")
-SAME_SLUG="$(wait_slug "$TMP/same.out")"
-[[ -n "$SAME_SLUG" ]] || fail "stessa cartella: nessuno slug entro 10 s"
-if (cd "$TMP/same" && curl -s -k -f -OJ "$BASE/$SAME_SLUG"); then fail "curl -OJ sul file in invio: uscita 0"; fi
-wait "$SAME_PID" || true
-cmp -s "$TMP/same/same.bin" "$TMP/payload.bin" || fail "curl -OJ nella cartella del mittente ha modificato il file in invio"
+# Link valido, ricevente nella cartella del mittente con il comando stampato: il file omonimo è
+# proprio quello in invio. curl -OJ rifiuta di sovrascriverlo; wget e aria2c salvano la copia con
+# un altro nome (same.bin.1, same.1.bin).
+for tool in curl wget aria2c; do
+	command -v "$tool" > /dev/null || continue
+	rm -rf "$TMP/same"
+	mkdir -p "$TMP/same"
+	cp "$TMP/payload.bin" "$TMP/same/same.bin"
+	(cd "$TMP/same" && curl -N -sS "${UP_AUTH[@]}" -T same.bin "$BASE/same.bin" > "$TMP/same.out" 2> "$TMP/same.err") &
+	SAME_PID=$!
+	UP_PIDS+=("$SAME_PID")
+	SAME_SLUG="$(wait_slug "$TMP/same.out")"
+	[[ -n "$SAME_SLUG" ]] || fail "stessa cartella ($tool): nessuno slug entro 10 s"
+	if run_printed "$tool" "$TMP/same.out" "$TMP/same"; then rc=0; else rc=$?; fi
+	wait "$SAME_PID" || true
+	cmp -s "$TMP/same/same.bin" "$TMP/payload.bin" || fail "$tool nella cartella del mittente ha modificato il file in invio"
+	if [[ "$tool" == curl ]]; then
+		[[ "$rc" != 0 ]] || fail "curl -OJ sul file in invio: uscita 0"
+		[[ "$(ls -A "$TMP/same")" == "same.bin" ]] || fail "curl -OJ sul file in invio: file inattesi: $(ls -A "$TMP/same")"
+	else
+		[[ "$rc" == 0 ]] || fail "$tool nella cartella del mittente: uscita $rc"
+		[[ "$(find "$TMP/same" -type f | wc -l)" == 2 ]] || fail "$tool nella cartella del mittente: file: $(ls -A "$TMP/same")"
+		for f in "$TMP/same"/*; do
+			cmp -s "$f" "$TMP/payload.bin" || fail "$tool nella cartella del mittente: $(basename "$f") diverso"
+		done
+	fi
+done
 
 CODE="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/ABCDEFGHIJ")"
 [[ "$CODE" == "404" ]] || fail "slug sconosciuto: $CODE, atteso 404"
@@ -150,14 +198,17 @@ UP2_PID=$!
 UP_PIDS+=("$UP2_PID")
 SLUG2="$(wait_slug "$TMP/upload2.out")"
 [[ -n "$SLUG2" ]] || fail "RS-2: nessuno slug entro 10 s"
-grep -qF '| wget -nc -O "mydir.tgz" ' "$TMP/upload2.out" || fail "RS-2: nome mydir.tgz mancante nei comandi"
+check_commands "$TMP/upload2.out" "$BASE" "$SLUG2"
 
 # Download con la prima riga stampata (curl -f -OJ): il nome viene dall'header Content-Disposition.
 mkdir -p "$TMP/rs2"
-(cd "$TMP/rs2" && curl -sS -k -f -OJ "$BASE/$SLUG2") || fail "download RS-2 fallito"
+run_printed curl "$TMP/upload2.out" "$TMP/rs2" || fail "download RS-2 fallito"
 RECV2_SUM="$(sha256sum "$TMP/rs2/mydir.tgz" | awk '{print $1}')"
 [[ "$RECV2_SUM" == "$PAYLOAD_SUM" ]] || fail "sha256 RS-2 diverso"
 wait "$UP2_PID" || fail "upload RS-2 terminato con errore"
+# Esito finale anche per la pipe, di lunghezza ignota.
+grep -qF "OK: download completato, $((MB * 1048576)) byte" "$TMP/upload2.out" ||
+	fail "RS-2: esito OK mancante per il mittente: $(tail -n 2 "$TMP/upload2.out")"
 
 # Nome non ASCII: curl -OJ legge filename (byte UTF-8), non filename*.
 curl -N -sS "${UP_AUTH[@]}" -T "$TMP/payload.bin" "$BASE/citt%C3%A0%20%C3%A8.bin" > "$TMP/utf8.out" 2> "$TMP/utf8.err" &
@@ -166,7 +217,7 @@ UP_PIDS+=("$UTF8_PID")
 UTF8_SLUG="$(wait_slug "$TMP/utf8.out")"
 [[ -n "$UTF8_SLUG" ]] || fail "nome UTF-8: nessuno slug entro 10 s"
 mkdir -p "$TMP/utf8"
-(cd "$TMP/utf8" && curl -sS -k -f -OJ "$BASE/$UTF8_SLUG") || fail "download con nome UTF-8 fallito"
+run_printed curl "$TMP/utf8.out" "$TMP/utf8" || fail "download con nome UTF-8 fallito"
 cmp -s "$TMP/utf8/città è.bin" "$TMP/payload.bin" || fail "curl -OJ: nome UTF-8 non rispettato: $(ls -A "$TMP/utf8")"
 wait "$UTF8_PID" || fail "upload con nome UTF-8 terminato con errore"
 
@@ -177,8 +228,9 @@ if command -v wget > /dev/null; then
 	UP_PIDS+=("$UP3_PID")
 	SLUG3="$(wait_slug "$TMP/upload3.out")"
 	[[ -n "$SLUG3" ]] || fail "RS-3: nessuno slug entro 10 s"
-	wget -q --no-check-certificate --tries=1 -O "$TMP/w.bin" "$BASE/$SLUG3" || fail "download wget fallito"
-	cmp -s "$TMP/w.bin" "$TMP/payload.bin" || fail "download wget: contenuto diverso"
+	mkdir -p "$TMP/rs3"
+	run_printed wget "$TMP/upload3.out" "$TMP/rs3" || fail "download wget fallito"
+	cmp -s "$TMP/rs3/w.bin" "$TMP/payload.bin" || fail "download wget: contenuto o nome diverso: $(ls -A "$TMP/rs3")"
 	wait "$UP3_PID" || fail "upload RS-3 terminato con errore"
 fi
 
@@ -189,8 +241,9 @@ if command -v aria2c > /dev/null; then
 	UP_PIDS+=("$UP3B_PID")
 	SLUG3B="$(wait_slug "$TMP/upload3b.out")"
 	[[ -n "$SLUG3B" ]] || fail "RS-3b: nessuno slug entro 10 s"
-	(cd "$TMP" && aria2c -q --check-certificate=false --max-tries=1 -x1 -s1 -o a.dl "$BASE/$SLUG3B") || fail "download aria2c fallito"
-	cmp -s "$TMP/a.dl" "$TMP/payload.bin" || fail "download aria2c: contenuto diverso"
+	mkdir -p "$TMP/rs3b"
+	run_printed aria2c "$TMP/upload3b.out" "$TMP/rs3b" || fail "download aria2c fallito"
+	cmp -s "$TMP/rs3b/a.bin" "$TMP/payload.bin" || fail "download aria2c: contenuto o nome diverso: $(ls -A "$TMP/rs3b")"
 	wait "$UP3B_PID" || fail "upload RS-3b terminato con errore"
 fi
 
@@ -230,6 +283,8 @@ if timeout 30 tail --pid="$UP5_PID" -f /dev/null; then
 else
 	fail "RS-5: il mittente non termina entro 30 s dopo la caduta del ricevente"
 fi
+grep -qF "ERRORE: download NON completato dopo " "$TMP/upload5.out" ||
+	fail "RS-5: esito ERRORE mancante per il mittente: $(tail -n 2 "$TMP/upload5.out")"
 rm -f "$TMP/zero.bin"
 
 head -c 1048576 /dev/urandom > "$TMP/par.bin"
@@ -256,7 +311,7 @@ s.sendall(("PUT /wait.bin HTTP/1.1\r\nHost: " + u.netloc + "\r\n" + auth +
            "Content-Length: 1048576\r\n\r\n").encode() + b"x" * 1000)
 buf = b""
 deadline = time.time() + 10
-while b"wget -nc -O" not in buf and time.time() < deadline:
+while b"| aria2c " not in buf and time.time() < deadline:
     chunk = s.recv(4096)
     if not chunk:
         break
@@ -303,13 +358,19 @@ AUTH_UP_PID=$!
 UP_PIDS+=("$AUTH_UP_PID")
 AUTH_SLUG="$(wait_slug "$TMP/auth.out")"
 [[ -n "$AUTH_SLUG" ]] || fail "auth: nessuno slug entro 10 s (auth.out: $(cat "$TMP/auth.out"))"
-grep -qF '| wget -nc -O "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con spazi mancante nel comando wget"
-grep -qF '| aria2c -x1 -s1 -o "strano nome.zip" ' "$TMP/auth.out" || fail "auth: nome con spazi mancante nel comando aria2c"
+check_commands "$TMP/auth.out" "$AUTH_BASE" "$AUTH_SLUG"
 
 # Il download resta pubblico: nessuna credenziale richiesta.
-curl -sS -o "$TMP/auth.dl" "$AUTH_BASE/$AUTH_SLUG" || fail "download pubblico con auth fallito"
-cmp -s "$TMP/auth.dl" "$TMP/small.bin" || fail "download con auth: contenuto diverso"
+mkdir -p "$TMP/authdl"
+run_printed curl "$TMP/auth.out" "$TMP/authdl" || fail "download pubblico con auth fallito"
+cmp -s "$TMP/authdl/strano nome.zip" "$TMP/small.bin" || fail "download con auth: contenuto o nome diverso: $(ls -A "$TMP/authdl")"
 wait "$AUTH_UP_PID" || fail "upload autorizzato terminato con errore"
+fi
+
+# Invariante: nessun comando di ricezione o di invio, né una sua variante sbagliata, altera la
+# sorgente (solo con il server locale: lo script avvia istanze con configurazioni proprie).
+if [[ -z "$EXTERNAL" ]]; then
+	python3 "$ROOT/scripts/invariant.py" "$TMP/bashtransfer" || fail "invariante della sorgente violata"
 fi
 
 echo "E2E OK"

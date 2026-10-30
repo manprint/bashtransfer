@@ -148,6 +148,7 @@ docker compose logs --no-log-prefix app | jq -c 'select(.msg=="request_rejected"
 |---|---|---|
 | `go test -race ./...` | test unitari e di integrazione | sviluppo |
 | `scripts/e2e.sh` | e2e con curl, wget, aria2c (se installato), cadute, paralleli, auth; locale o contro uno stack (`BASHT_E2E_BASE`) | sviluppo, VM |
+| `scripts/invariant.py` | la sorgente non viene mai alterata: ogni variante dei comandi di ricevente e mittente, configurazioni ostili, link in ogni stato (eseguito dall'e2e locale) | sviluppo, CI |
 | `scripts/bench.sh` | throughput del relay su loopback contro una baseline a due hop | sviluppo |
 | `scripts/netbench.sh` | effetto di algoritmo di congestione e buffer TCP con netem in Docker (richiede `sudo modprobe sch_netem` e un'immagine locale con `tc`) | sviluppo |
 

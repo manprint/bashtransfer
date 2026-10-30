@@ -24,6 +24,14 @@ import (
 // connessione all'infinito: l'handler è già finito ma net/http legge il body prima di chiudere.
 const drainTimeout = 2 * time.Second
 
+// abortLinger è l'attesa tra l'esito negativo scritto al mittente HTTP/1 e la chiusura della
+// connessione: con il body non letto la chiusura invia un RST, che arrivato prima della lettura di
+// curl cancellerebbe il messaggio. Variabile per i test.
+var abortLinger = 500 * time.Millisecond
+
+// defaultDisposition è il Content-Disposition di ogni risposta che non è un download.
+const defaultDisposition = `inline; filename="bashtransfer.txt"`
+
 // Options configura il gestore HTTP.
 type Options struct {
 	// PublicURL, se non vuoto, è la base dei comandi generati (D12).
@@ -73,6 +81,13 @@ func (h *handler) reject(w http.ResponseWriter, r *http.Request, level slog.Leve
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Ogni risposta porta un nome di file. curl -J apre il file con O_EXCL (rifiuta di sovrascrivere)
+	// solo se trova Content-Disposition; senza, ripiega sul nome nell'URL e lo tronca. Un mittente
+	// che aggiunge -OJ a curl -T src URL/src scriverebbe così la risposta dentro la sorgente. Il
+	// download lo sostituisce con il nome vero. curl recenti (8.18) ignorano l'header sulle
+	// risposte 4xx/5xx: lì protegge solo le versioni meno recenti (README, "La sorgente non viene
+	// mai alterata").
+	w.Header().Set("Content-Disposition", defaultDisposition)
 	// Il path ancora codificato: un %2F nel nome resta parte del segmento invece di diventare
 	// un separatore (SanitizeName ne tiene poi l'ultima parte).
 	seg, ok := singleSegment(r.URL.EscapedPath())
@@ -142,6 +157,8 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonInvalidHost, "invalid host")
 		return
 	}
+	// "/" non ha un nome di file: curl -OJ non ha nulla da sovrascrivere, e il browser mostra la pagina.
+	w.Header().Del("Content-Disposition")
 	w.Header().Add("Vary", "Accept")
 	if wantsHTML(r) {
 		serveHome(w, base)
@@ -222,7 +239,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	if r.ProtoMajor == 1 {
 		w.Header().Set("Connection", "close")
 	}
-	io.WriteString(w, commands(name, base+"/"+s.Slug))
+	io.WriteString(w, commands(base+"/"+s.Slug))
 	_ = rc.Flush()
 
 	// Con il body non letto net/http non vede la caduta del mittente: la connessione viene
@@ -260,17 +277,22 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 				tr.outcome = outcomeAborted
 				s.Abort(err)
 				drain = 0
-				panic(http.ErrAbortHandler)
+				abortSender(w, r, failedMessage(s.Err(), n, s.Length, h.opts.IdleTimeout))
+				return
 			}
 			tr.outcome = outcomeOK
 			ok = true
+			io.WriteString(w, doneMessage(n, time.Since(tr.attached)))
+			_ = rc.Flush()
 			return
 		case <-s.Expired():
 			tr.outcome = outcomeExpired
 			// Prima dell'Abort differito con ErrSenderGone: il log deve dire scadenza, non mittente caduto.
 			s.Abort(relay.ErrExpired)
 			drain = 0
-			panic(http.ErrAbortHandler)
+			abortSender(w, r, fmt.Sprintf("\nERRORE: download NON avvenuto: nessun ricevente si è collegato "+
+				"in %s, il link è stato chiuso.\n", roundDuration(time.Since(s.Created))))
+			return
 		case <-r.Context().Done():
 			return
 		case <-heartbeat:
@@ -290,6 +312,77 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			}
 		}
 	}
+}
+
+// doneMessage è l'ultima riga per il mittente a trasferimento riuscito: tutti i byte sono stati
+// scritti verso il ricevente. Il salvataggio su disco lo verifica il programma del ricevente.
+func doneMessage(n int64, d time.Duration) string {
+	return fmt.Sprintf("\nOK: download completato, %s consegnati al ricevente in %s.\n", sizeText(n), roundDuration(d))
+}
+
+// failedMessage è l'ultima riga per il mittente quando il relay si interrompe dopo n byte. err è
+// il primo errore della sessione.
+func failedMessage(err error, n, length int64, idle time.Duration) string {
+	var why string
+	switch {
+	case errors.Is(err, relay.ErrReceiverGone):
+		why = "il ricevente si è disconnesso o ha smesso di ricevere"
+	case errors.Is(err, relay.ErrIdle):
+		why = "nessun dato dal mittente per " + idle.String()
+	case errors.Is(err, relay.ErrLengthMismatch):
+		why = "il mittente ha inviato meno byte di quelli dichiarati"
+	default:
+		why = "connessione con il mittente interrotta"
+	}
+	done := strconv.FormatInt(n, 10)
+	if length >= 0 {
+		done += " di " + strconv.FormatInt(length, 10)
+	}
+	return fmt.Sprintf("\nERRORE: download NON completato dopo %s byte: %s.\n", done, why)
+}
+
+// abortSender scrive msg al mittente e chiude la risposta. Su HTTP/1 la interrompe senza chunk
+// finale, così curl esce con errore: chiude prima il lato in scrittura (curl legge il messaggio e
+// poi la fine del flusso) e attende abortLinger prima del RST. Su HTTP/2 lo stream termina
+// regolarmente: un proxy h2c (Apache) che riceve un reset aggiunge al messaggio una sua pagina 502
+// e chiude comunque la risposta al client senza errore.
+func abortSender(w http.ResponseWriter, r *http.Request, msg string) {
+	rc := http.NewResponseController(w)
+	_, err := io.WriteString(w, msg)
+	if err == nil {
+		err = rc.Flush()
+	}
+	if r.ProtoMajor != 1 && err == nil {
+		return
+	}
+	if err == nil {
+		if cw, ok := connFrom(r.Context()).(interface{ CloseWrite() error }); ok && cw.CloseWrite() == nil {
+			time.Sleep(abortLinger)
+		}
+	}
+	panic(http.ErrAbortHandler)
+}
+
+// sizeText rende n come "3000000 byte (2.9 MiB)".
+func sizeText(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return strconv.FormatInt(n, 10) + " byte"
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%d byte (%.1f %ciB)", n, float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// roundDuration arrotonda d ai millisecondi sotto il secondo, ai decimi di secondo sopra.
+func roundDuration(d time.Duration) time.Duration {
+	if d < time.Second {
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(100 * time.Millisecond)
 }
 
 // copyUntilAbort copia il body verso il ricevente. Se la sessione viene interrotta durante la
@@ -315,18 +408,19 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 // commands restituisce la tabella ASCII stampata al mittente: una riga per strumento (curl, wget,
 // aria2c) con il comando di download. aria2c usa una sola connessione: il relay è un flusso unico
 // e non serve intervalli di byte.
-// Nessun comando deve sovrascrivere un file omonimo del ricevente: se il ricevente lavora nella
-// cartella del mittente, quel file è proprio quello in invio. curl -o lo troncherebbe (anche con
-// un link già usato: senza -f scriverebbe nel file il testo "gone" del 410), wget -O pure.
-// curl -OJ prende il nome da Content-Disposition e rifiuta di sovrascrivere un file esistente
-// (--no-clobber farebbe lo stesso con -o, ma richiede curl 7.83); -f evita di salvare la pagina
-// di errore. wget -nc non tocca un file già presente. aria2c non scrive su un errore e, con il
-// file già presente, salva con un altro nome.
-func commands(name, u string) string {
+// Invariante: la sorgente non viene mai alterata. Se il ricevente lavora nella cartella del
+// mittente, il file omonimo è proprio quello in invio, e nessun comando, né alcuna sua variante con
+// meno flag, deve sovrascriverlo (scripts/invariant.py lo verifica). Per questo i comandi non
+// contengono il nome: un nome esplicito (curl -o, wget -O) tronca il file prima di ogni controllo,
+// e busybox wget ignora -nc. Il nome arriva da Content-Disposition: curl -OJ rifiuta di
+// sovrascrivere, wget --content-disposition e aria2c salvano con un altro nome (.1). Senza -J o
+// --content-disposition il nome è lo slug, senza -O curl scrive sullo stdout. -f evita di salvare
+// la pagina di errore; --allow-overwrite=false prevale su un aria2.conf che chiede di sovrascrivere.
+func commands(u string) string {
 	cmds := []struct{ label, line string }{
 		{"curl", fmt.Sprintf("curl -f -OJ \"%s\"", u)},
-		{"wget", fmt.Sprintf("wget -nc -O \"%s\" \"%s\"", name, u)},
-		{"aria2c", fmt.Sprintf("aria2c -x1 -s1 -o \"%s\" \"%s\"", name, u)},
+		{"wget", fmt.Sprintf("wget --content-disposition \"%s\"", u)},
+		{"aria2c", fmt.Sprintf("aria2c -x1 -s1 --allow-overwrite=false \"%s\"", u)},
 	}
 	const (
 		title = "bashtransfer: comandi per il ricevente"

@@ -203,7 +203,7 @@ func TestUploadReturnsCommandsBeforeBody(t *testing.T) {
 	if !strings.HasPrefix(u.curlLine, `curl -f -OJ "`) {
 		t.Errorf("riga curl: %q", u.curlLine)
 	}
-	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "`) {
+	if !strings.HasPrefix(u.wgetLine, `wget --content-disposition "`) {
 		t.Errorf("riga wget: %q", u.wgetLine)
 	}
 	if len(u.slug) != 10 {
@@ -492,9 +492,22 @@ func TestUploadNameFromPath(t *testing.T) {
 	defer pw.Close()
 
 	u := openUpload(t, ctx, srv.URL+"/mydir.tgz", pr)
-	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "mydir.tgz" "`) {
-		t.Errorf("riga wget: %q", u.wgetLine)
+	if name := downloadName(t, ctx, srv.URL, u.slug); name != "mydir.tgz" {
+		t.Errorf("nome scaricato %q, atteso mydir.tgz", name)
 	}
+}
+
+// downloadName reclama lo slug e restituisce il nome del file indicato da Content-Disposition.
+func downloadName(t *testing.T, ctx context.Context, base, slug string) string {
+	t.Helper()
+	resp := get(t, ctx, base+"/"+slug)
+	defer resp.Body.Close()
+	cd := resp.Header.Get("Content-Disposition")
+	typ, params, err := mime.ParseMediaType(cd)
+	if err != nil || typ != "attachment" {
+		t.Fatalf("Content-Disposition %q: %v", cd, err)
+	}
+	return params["filename"]
 }
 
 // TestUploadIdleTimeout: il mittente scrive 1 KiB di 1 MiB dichiarato e si ferma.
@@ -1226,8 +1239,8 @@ func TestUploadNameEncodedSlash(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	u := openUpload(t, ctx, srv.URL+"/a%2Fb.txt", pr)
-	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "b.txt" `) {
-		t.Fatalf("riga wget %q, atteso nome b.txt", u.wgetLine)
+	if name := downloadName(t, ctx, srv.URL, u.slug); name != "b.txt" {
+		t.Fatalf("nome scaricato %q, atteso b.txt", name)
 	}
 	resp := get(t, ctx, srv.URL+"/AbC%2F12345")
 	resp.Body.Close()
@@ -1236,8 +1249,9 @@ func TestUploadNameEncodedSlash(t *testing.T) {
 	}
 }
 
-// TestUploadCommands: le tre righe usano lo stesso nome e lo stesso URL; aria2c usa una sola
-// connessione. La risposta al mittente chiude la connessione.
+// TestUploadCommands: le tre righe usano lo stesso URL e nessuna contiene il nome del file (arriva
+// da Content-Disposition); aria2c usa una sola connessione. La risposta al mittente chiude la
+// connessione.
 func TestUploadCommands(t *testing.T) {
 	srv, _ := newTestServerWait(t, 200*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1248,8 +1262,8 @@ func TestUploadCommands(t *testing.T) {
 	url := srv.URL + "/" + u.slug
 	want := []string{
 		`curl -f -OJ "` + url + `"`,
-		`wget -nc -O "a b.tgz" "` + url + `"`,
-		`aria2c -x1 -s1 -o "a b.tgz" "` + url + `"`,
+		`wget --content-disposition "` + url + `"`,
+		`aria2c -x1 -s1 --allow-overwrite=false "` + url + `"`,
 	}
 	for i, got := range []string{u.curlLine, u.wgetLine, u.aria2Line} {
 		if got != want[i] {
@@ -1769,17 +1783,16 @@ func TestHomeEscapesBase(t *testing.T) {
 }
 
 // TestCommandsTable: tabella ASCII a due colonne (strumento, comando); tutte le righe hanno la
-// stessa larghezza, anche con un nome corto (titolo e nota più larghi dei comandi), con un nome
+// stessa larghezza, anche con un URL corto (titolo e nota più larghi dei comandi), con un URL
 // lunghissimo e con caratteri non ASCII; le tre righe di comando restituiscono i comandi interi.
 func TestCommandsTable(t *testing.T) {
-	long := strings.Repeat("x", 120) + ".tgz"
-	for _, name := range []string{"a", "a b.tgz", "perché è così.zip", long} {
-		u := "https://h.it/AbC123xY9z"
-		checkCommandsTable(t, commands(name, u), name, u)
+	for _, u := range []string{"http://h/AbC123xY9z", "https://h.it/AbC123xY9z",
+		"https://perché.è.così.it/AbC123xY9z", "https://" + strings.Repeat("x", 120) + ".it/AbC123xY9z"} {
+		checkCommandsTable(t, commands(u), u)
 	}
 }
 
-func checkCommandsTable(t *testing.T, out, name, u string) {
+func checkCommandsTable(t *testing.T, out, u string) {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	width := -1
@@ -1801,10 +1814,204 @@ func checkCommandsTable(t *testing.T, out, name, u string) {
 	}
 	want := []string{
 		`curl -f -OJ "` + u + `"`,
-		`wget -nc -O "` + name + `" "` + u + `"`,
-		`aria2c -x1 -s1 -o "` + name + `" "` + u + `"`,
+		`wget --content-disposition "` + u + `"`,
+		`aria2c -x1 -s1 --allow-overwrite=false "` + u + `"`,
 	}
 	if !slices.Equal(cmds, want) {
 		t.Errorf("comandi %q, attesi %q", cmds, want)
+	}
+}
+
+// TestDefaultDisposition: ogni risposta che non è un download porta un Content-Disposition con un
+// nome innocuo, così curl -J apre il file con O_EXCL invece di troncare il nome preso dall'URL. La
+// home non ne ha, il download porta il nome vero.
+func TestDefaultDisposition(t *testing.T) {
+	srv, _ := newTestServerWait(t, 200*time.Millisecond)
+	ctx := context.Background()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	u := openUpload(t, ctx, srv.URL+"/x.bin", pr)
+	if cd := u.resp.Header.Get("Content-Disposition"); cd != defaultDisposition {
+		t.Errorf("PUT: Content-Disposition %q, atteso %q", cd, defaultDisposition)
+	}
+	within(t, 5*time.Second, "scadenza dell'attesa", func() error {
+		_, err := io.ReadAll(u.br)
+		return err
+	})
+	u.resp.Body.Close()
+
+	check := func(method, path string, status int, want string) {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(ctx, method, srv.URL+path, nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != status || resp.Header.Get("Content-Disposition") != want {
+			t.Errorf("%s %s: stato %d, Content-Disposition %q; attesi %d, %q",
+				method, path, resp.StatusCode, resp.Header.Get("Content-Disposition"), status, want)
+		}
+	}
+	check(http.MethodGet, "/"+u.slug, http.StatusGone, defaultDisposition)
+	check(http.MethodGet, "/AbC123xY9z", http.StatusNotFound, defaultDisposition)
+	check(http.MethodGet, "/x.bin", http.StatusNotFound, defaultDisposition)
+	check(http.MethodGet, "/"+u.slug+"/x.bin", http.StatusNotFound, defaultDisposition)
+	check(http.MethodDelete, "/x.bin", http.StatusMethodNotAllowed, defaultDisposition)
+	check(http.MethodGet, "/", http.StatusOK, "")
+}
+
+// newConnServer è il server di produzione per i test dell'esito: ConnContext come in main, HTTP/1
+// e h2c.
+func newConnServer(t *testing.T, wait time.Duration) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(New(relay.NewRegistry(100, wait), relay.NewCopier(64<<10), Options{}))
+	srv.Config.ConnContext = ConnContext
+	srv.Config.Protocols = new(http.Protocols)
+	srv.Config.Protocols.SetHTTP1(true)
+	srv.Config.Protocols.SetUnencryptedHTTP2(true)
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// outcomeClients sono i client dei test dell'esito: HTTP/1 diretto e h2c (come Apache).
+func outcomeClients() map[string]*http.Client {
+	tr := &http.Transport{Protocols: new(http.Protocols)}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	return map[string]*http.Client{"http1": http.DefaultClient, "h2c": {Transport: tr}}
+}
+
+// putOutcome invia il PUT con client e restituisce la risposta, il suo reader dopo la riga curl e
+// lo slug.
+func putOutcome(t *testing.T, client *http.Client, url string, body io.Reader, length int64) (*http.Response, *bufio.Reader, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, url, body)
+	req.ContentLength = length
+	resp := within(t, 5*time.Second, "risposta PUT", func() *http.Response {
+		r, err := client.Do(req)
+		if err != nil {
+			t.Error(err)
+			return nil
+		}
+		return r
+	})
+	if resp == nil {
+		t.FailNow()
+	}
+	br := bufio.NewReader(resp.Body)
+	line, err := readCurlLine(br)
+	if err != nil {
+		t.Fatalf("riga curl: %v", err)
+	}
+	return resp, br, slugOf(line)
+}
+
+// readOutcome legge il resto della risposta del mittente: il testo e l'errore di lettura.
+func readOutcome(t *testing.T, br *bufio.Reader) (string, error) {
+	t.Helper()
+	type res struct {
+		s   string
+		err error
+	}
+	r := within(t, 5*time.Second, "esito al mittente", func() res {
+		b, err := io.ReadAll(br)
+		return res{string(b), err}
+	})
+	return r.s, r.err
+}
+
+// TestSenderOutcomeOK: a trasferimento riuscito l'ultima riga per il mittente è l'esito, con
+// lunghezza nota e ignota (pipe), e la risposta termina regolarmente.
+func TestSenderOutcomeOK(t *testing.T) {
+	srv := newConnServer(t, time.Hour)
+	for proto, client := range outcomeClients() {
+		for _, length := range []int64{300000, -1} {
+			t.Run(fmt.Sprint(proto, " length=", length), func(t *testing.T) {
+				data := randomBytes(t, 300000)
+				var body io.Reader = bytes.NewReader(data)
+				if length < 0 {
+					body = io.MultiReader(body)
+				}
+				resp, br, slug := putOutcome(t, client, srv.URL+"/x.bin", body, length)
+				defer resp.Body.Close()
+				dl := get(t, context.Background(), srv.URL+"/"+slug)
+				got, err := io.ReadAll(dl.Body)
+				dl.Body.Close()
+				if err != nil || !bytes.Equal(got, data) {
+					t.Fatalf("download: %d byte, err %v", len(got), err)
+				}
+				out, err := readOutcome(t, br)
+				want := "+\n\nOK: download completato, 300000 byte (293.0 KiB) consegnati al ricevente in "
+				if err != nil || !strings.Contains(out, want) || !strings.HasSuffix(out, ".\n") {
+					t.Fatalf("esito %q (err %v), atteso %q...", out, err, want)
+				}
+			})
+		}
+	}
+}
+
+// TestSenderOutcomeReceiverGone: il ricevente cade dopo 4096 byte. Il mittente legge l'errore come
+// ultima riga; su HTTP/1 la risposta resta troncata (curl esce con errore), su HTTP/2 termina
+// regolarmente (un proxy h2c aggiungerebbe una sua pagina 502 a un reset).
+func TestSenderOutcomeReceiverGone(t *testing.T) {
+	srv := newConnServer(t, time.Hour)
+	for proto, client := range outcomeClients() {
+		for _, length := range []int64{1 << 20, -1} {
+			t.Run(fmt.Sprint(proto, " length=", length), func(t *testing.T) {
+				pr, pw := io.Pipe()
+				defer pw.Close()
+				resp, br, slug := putOutcome(t, client, srv.URL+"/x.bin", pr, length)
+				defer resp.Body.Close()
+				dctx, dcancel := context.WithCancel(context.Background())
+				dl := get(t, dctx, srv.URL+"/"+slug)
+				data := randomBytes(t, 4096)
+				go func() { _, _ = pw.Write(data) }()
+				if _, err := io.ReadFull(dl.Body, make([]byte, len(data))); err != nil {
+					t.Fatalf("download: %v", err)
+				}
+				dcancel()
+				dl.Body.Close()
+				out, err := readOutcome(t, br)
+				done := "4096"
+				if length >= 0 {
+					done += " di 1048576"
+				}
+				want := "\nERRORE: download NON completato dopo " + done + " byte: il ricevente si è disconnesso o ha smesso di ricevere.\n"
+				if (err == nil) != (proto == "h2c") || !strings.HasSuffix(out, want) {
+					t.Fatalf("esito %q (err %v), atteso %q, troncato solo su HTTP/1", out, err, want)
+				}
+			})
+		}
+	}
+}
+
+// TestSenderOutcomeExpired: nessun ricevente entro l'attesa. Il mittente legge l'errore; la
+// risposta resta troncata solo su HTTP/1.
+func TestSenderOutcomeExpired(t *testing.T) {
+	srv := newConnServer(t, 200*time.Millisecond)
+	for proto, client := range outcomeClients() {
+		t.Run(proto, func(t *testing.T) {
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			resp, br, _ := putOutcome(t, client, srv.URL+"/x.bin", pr, 1<<20)
+			defer resp.Body.Close()
+			out, err := readOutcome(t, br)
+			want := "\nERRORE: download NON avvenuto: nessun ricevente si è collegato in "
+			if (err == nil) != (proto == "h2c") || !strings.Contains(out, want) || !strings.HasSuffix(out, ", il link è stato chiuso.\n") {
+				t.Fatalf("esito %q (err %v), atteso %q..., troncato solo su HTTP/1", out, err, want)
+			}
+		})
+	}
+}
+
+func TestSizeText(t *testing.T) {
+	for n, want := range map[int64]string{
+		0: "0 byte", 1023: "1023 byte", 1024: "1024 byte (1.0 KiB)",
+		3000000: "3000000 byte (2.9 MiB)", 5 << 30: "5368709120 byte (5.0 GiB)",
+	} {
+		if got := sizeText(n); got != want {
+			t.Errorf("sizeText(%d) = %q, atteso %q", n, got, want)
+		}
 	}
 }

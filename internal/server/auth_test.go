@@ -104,7 +104,7 @@ func TestUploadRequiresAuth(t *testing.T) {
 	}
 	withAuth.SetBasicAuth("alice", "s3cret")
 	u := openUploadRequest(t, ctx, withAuth)
-	if !strings.HasPrefix(u.wgetLine, `wget -nc -O "x.bin" "`) {
+	if !strings.HasPrefix(u.wgetLine, `wget --content-disposition "`) {
 		t.Fatalf("con credenziali: riga wget %q", u.wgetLine)
 	}
 }

@@ -29,7 +29,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -48,11 +48,15 @@ jobs:
       - name: test (race)
         run: go test -race -count=1 ./...
 
-      # aria2c esercita la terza riga dei comandi stampati; curl, wget e python3 sono già sul runner.
+      # aria2c esercita la terza riga dei comandi stampati, busybox il wget dei sistemi minimali;
+      # curl, wget e python3 sono già sul runner. Alla fine l'e2e esegue scripts/invariant.py
+      # (la sorgente non viene mai alterata), che con BASHT_INV_REQUIRE fallisce se ne manca uno.
       - name: e2e
+        env:
+          BASHT_INV_REQUIRE: curl,wget,aria2c,busybox
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2
+          sudo apt-get install -y -qq aria2 busybox
           bash scripts/e2e.sh
 
   image:

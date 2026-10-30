@@ -1,11 +1,14 @@
 package server
 
 import (
+	"fmt"
 	"mime"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"bashtransfer/internal/relay"
 )
 
 // responseReceiver adatta la risposta HTTP del ricevente a relay.Receiver.
@@ -47,7 +50,12 @@ func (r *responseReceiver) start(name string, length int64) {
 
 func (r *responseReceiver) Write(p []byte) (int, error) {
 	r.armWriteDeadline()
-	return r.w.Write(p)
+	n, err := r.w.Write(p)
+	if err != nil {
+		// Una scrittura fallita dipende sempre dal ricevente: disconnesso, o fermo oltre writeTimeout.
+		err = fmt.Errorf("%w: %w", relay.ErrReceiverGone, err)
+	}
+	return n, err
 }
 
 func (r *responseReceiver) Flush() {

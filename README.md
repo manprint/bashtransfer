@@ -20,28 +20,50 @@ curl -T myfile.zip https://bashtransfer.mydomain.it
 Risposta immediata: una tabella ASCII con le righe di download, una per strumento:
 
 ```
-+---------------------------------------------------------------------------------------+
-| bashtransfer: comandi per il ricevente                                                |
-+--------+------------------------------------------------------------------------------+
-| curl   | curl -f -OJ "https://bashtransfer.mydomain.it/AbC123xY9z"                    |
-| wget   | wget -nc -O "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z"       |
-| aria2c | aria2c -x1 -s1 -o "myfile.zip" "https://bashtransfer.mydomain.it/AbC123xY9z" |
-+--------+------------------------------------------------------------------------------+
-| Un solo ricevente per link. Lascia aperto il terminale fino alla fine.                |
-+---------------------------------------------------------------------------------------+
++-----------------------------------------------------------------------------------------------+
+| bashtransfer: comandi per il ricevente                                                        |
++--------+--------------------------------------------------------------------------------------+
+| curl   | curl -f -OJ "https://bashtransfer.mydomain.it/X9ZnTRvc5H"                            |
+| wget   | wget --content-disposition "https://bashtransfer.mydomain.it/X9ZnTRvc5H"             |
+| aria2c | aria2c -x1 -s1 --allow-overwrite=false "https://bashtransfer.mydomain.it/X9ZnTRvc5H" |
++--------+--------------------------------------------------------------------------------------+
+| Un solo ricevente per link. Lascia aperto il terminale fino alla fine.                        |
++-----------------------------------------------------------------------------------------------+
 ```
 
-La colonna dei comandi è larga quanto il comando più lungo: con nomi lunghi la tabella supera gli 80 caratteri e in un terminale stretto le righe vanno a capo. Il triplo clic su una riga seleziona anche i bordi `|`, che la shell non accetta: per copiare un comando selezionalo dall'inizio alla virgoletta finale, oppure usa uno dei modi in [Copiare il comando senza selezionarlo](#copiare-il-comando-senza-selezionarlo).
+La colonna dei comandi è larga quanto il comando più lungo. Il triplo clic su una riga seleziona anche i bordi `|`, che la shell non accetta: per copiare un comando selezionalo dall'inizio alla virgoletta finale, oppure usa uno dei modi in [Copiare il comando senza selezionarlo](#copiare-il-comando-senza-selezionarlo).
 
-Ricevente: esegue una delle tre righe. Il file viene scaricato mentre il mittente lo invia.
+Ricevente: esegue una delle tre righe. Il file viene scaricato mentre il mittente lo invia e prende il nome originale (`myfile.zip`), che arriva dall'header `Content-Disposition`: le righe non contengono il nome, quindi nessuna di esse può indicare un file da scrivere.
 
-Nessuno dei tre comandi sovrascrive un file omonimo già presente. Il caso tipico è il ricevente che lancia il comando nella cartella del mittente, sulla stessa macchina: quel file è proprio quello in invio, e `curl -o` o `wget -O` lo troncherebbero mentre il mittente lo legge. Anche un link già usato o scaduto, che risponde `410` con il testo `gone`, non deve finire nel file.
-
-- `curl -f -OJ`: il nome arriva dall'header `Content-Disposition` e curl rifiuta di sovrascrivere un file esistente (codice 23, il link è consumato e il mittente deve reinviare). Con `-f` un errore HTTP esce con codice 22 senza scrivere nulla. Funziona con qualunque versione di curl; `--no-clobber` farebbe lo stesso con `-o` ma richiede curl 7.83 (Ubuntu 22.04 ha la 7.81).
-- `wget -nc -O`: se il file esiste wget non lo apre ed esce con codice 1.
-- `aria2c -o`: non scrive su un errore; con il file già presente salva con un altro nome (`myfile.1.zip`) e il trasferimento va a buon fine.
+Quando il ricevente ha finito, il mittente legge l'esito in fondo alla tabella (vedi [Esito per il mittente](#esito-per-il-mittente)).
 
 L'header `Content-Disposition` contiene il nome sia in `filename*` (UTF-8 codificato, per i browser) sia in `filename` con i byte UTF-8 (per `curl -OJ`, che legge solo `filename`): i nomi con lettere accentate restano corretti.
+
+#### La sorgente non viene mai alterata
+
+Il link viene mandato a persone che non conoscono lo strumento e che possono sbagliare comando o dimenticare un flag. Cosa garantisce il sistema, senza contare su istruzioni:
+
+- **ricevente**: la riga stampata, con qualunque flag omesso o tra quelli comuni aggiunto e con file di configurazione ostili, non modifica il file o la cartella in invio, su link valido, usato, scaduto o sconosciuto;
+- **mittente**: ogni forma di `curl -T` senza `-O`/`-o` (file, pipe, stdin, cartelle con `tar`) non modifica la sorgente, qualunque sia l'esito; con `-OJ` la sorgente resta intatta sulle risposte `2xx`/`3xx` (vedi sotto per gli errori).
+
+Come:
+
+- un ricevente su un altro computer non può toccarla: il server non scrive mai sul disco del mittente e `curl -T` apre la sorgente in sola lettura;
+- il rischio esiste solo quando il ricevente lavora nella stessa cartella del mittente (stessa macchina o cartella condivisa). Lì nessuna delle tre righe sovrascrive un file esistente:
+  - `curl -f -OJ` crea il file con `O_EXCL`: se esiste esce con codice 23 senza toccarlo. Con `-f` un errore HTTP esce con codice 22 senza scrivere nulla;
+  - `wget --content-disposition` salva `myfile.zip.1`; busybox wget non conosce l'opzione ed esce senza scrivere;
+  - `aria2c --allow-overwrite=false` salva `myfile.1.zip`, anche con `allow-overwrite=true` nel suo `aria2.conf`;
+- ogni risposta che non è un download (errori `400`/`404`/`410`, la risposta al mittente) ha un nome proprio, `bashtransfer.txt`: un `curl -OJ` che riceve un errore o la tabella non ripiega sul nome nell'URL.
+
+[`scripts/invariant.py`](scripts/invariant.py), eseguito dall'e2e e dalla CI, lo verifica a ogni modifica. Prova come sorgente un file con nome accentato, un file chiamato `bashtransfer.txt`, una cartella e un link simbolico, e confronta prima e dopo contenuto, dimensione, date e inode.
+
+- Ricevente: la riga stampata e ogni sua variante con flag omessi o aggiunti (`curl` senza `-f`/`-O`/`-J`, `-C -`, `-L`; `wget` senza `--content-disposition`, `-c`, `-N`, `-nc`; busybox `wget`; `aria2c` senza `-x1`/`-s1`/`--allow-overwrite=false`, `-c`, `-x4 -s4`), con configurazione vuota e con `.curlrc`, `.wgetrc` e `aria2.conf` ostili, su link valido, sconosciuto, già usato, scaduto e con mittente caduto.
+- Mittente: le forme comuni di `curl -T` (con e senza nome nell'URL, `/` finale, `-N`, `-f`, `-J`, `-OJ`, `-L`, da pipe e da stdin, `tar | curl` per le cartelle) con download riuscito, ricevente caduto, link scaduto, Ctrl+C, `401` e `503`.
+
+Restano scoperti, e vengono eseguiti dal test senza pretenderne l'esito:
+
+- il ricevente che indica il nome della sorgente come uscita (`curl -o myfile.zip`, `wget -O myfile.zip`, `> myfile.zip`) o chiede di sovrascrivere (`curl --clobber` o `clobber` nel `.curlrc`, `aria2c --allow-overwrite=true`, oppure `allow-overwrite=true` nel suo `aria2.conf` con la riga stampata privata di `--allow-overwrite=false`), o estrae un archivio sopra la cartella in invio;
+- il mittente che aggiunge `-O` o `-o` a `curl -T`: curl scrive la risposta nel file con il nome dell'URL, cioè la sorgente (lo crea vuoto anche se la risposta non ha body). La risposta deve contenere i comandi per il ricevente, quindi il server non può impedirlo. Con `-OJ` la sorgente è protetta dalle risposte `2xx`/`3xx`; curl recenti (8.18) ignorano `Content-Disposition` sulle risposte `4xx`/`5xx` e troncano la sorgente anche con una risposta senza body, quindi un `401` (credenziali errate), un `503` (server pieno) o un `503` di Apache durante un riavvio del container la troncano. curl 8.5 usa l'header anche sugli errori e la lascia intatta. `-O` e `-OJ` servono solo per scaricare: nell'invio non vanno usati.
 
 #### Copiare il comando senza selezionarlo
 
@@ -72,13 +94,27 @@ Il ricevente riceve `mydir.tgz`. `curl -N` disattiva il buffering dell'output: s
 
 Senza nome nel path (`... | curl -T - https://bashtransfer.mydomain.it`) il ricevente riceve un file chiamato `download`.
 
+### Esito per il mittente
+
+Quando il trasferimento finisce, il server scrive al mittente, sotto la tabella, una riga con l'esito. Vale per i file e per gli stream da pipe (di cui non conosce la lunghezza):
+
+```
+OK: download completato, 104857600 byte (100.0 MiB) consegnati al ricevente in 3.2s.
+ERRORE: download NON completato dopo 52428800 di 104857600 byte: <motivo>.
+ERRORE: download NON avvenuto: nessun ricevente si è collegato in 1h0m0s, il link è stato chiuso.
+```
+
+- `ERRORE` è affidabile: il ricevente non ha il file intero (connessione caduta, comando interrotto, file non salvato), e il mittente deve reinviare.
+- `OK` significa che tutti i byte sono stati consegnati alla connessione del ricevente. Per file molto piccoli (pochi KB) curl del ricevente può avere già letto tutto quando rifiuta di salvare (file omonimo presente, disco pieno): in quel caso l'errore compare solo sul terminale del ricevente.
+- Con connessione diretta curl del mittente esce con codice 18 in caso di errore; dietro Apache (HTTP/2 verso il backend) esce con 0. Conta la riga `OK`/`ERRORE`.
+
 ### Pagina di benvenuto
 
 Un `GET /` da browser (header `Accept` con `text/html`) mostra una pagina di cortesia: nome e descrizione, le istruzioni d'uso con il comando di invio e un pulsante Copia, i comandi per installare curl, wget e aria2c sui vari sistemi (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, macOS, FreeBSD, Windows). La pagina è incorporata nel binario (`internal/server/home.html`), non carica risorse esterne (CSP restrittiva) e usa come base dei comandi `BASHT_PUBLIC_URL`. Gli altri client (curl, wget, aria2c) ricevono lo stesso `GET /` in testo semplice, con le istruzioni.
 
 ### Limiti del nome
 
-Il nome viene ripulito: si tiene solo l'ultimo segmento del path, si tolgono caratteri di controllo (anche C1), virgolette, backslash, separatori di riga e controlli bidirezionali Unicode, si tolgono i punti iniziali (`.bashrc` diventa `bashrc`: il ricevente esegue il comando nella sua directory e non deve sovrascrivere file nascosti), si limita a 128 caratteri. Un `/` codificato (`%2F`) conta come separatore: resta l'ultima parte. `$`, backtick e `!` diventano `_`, perché il nome finisce tra virgolette doppie in una riga che l'utente incolla in una shell. Un nome vuoto, o `-` (che per `wget -O` è lo stdout), diventa `download`.
+Il nome viene ripulito: si tiene solo l'ultimo segmento del path, si tolgono caratteri di controllo (anche C1), virgolette, backslash, separatori di riga e controlli bidirezionali Unicode, si tolgono i punti iniziali (`.bashrc` diventa `bashrc`: il ricevente esegue il comando nella sua directory e non deve sovrascrivere file nascosti), si limita a 128 caratteri. Un `/` codificato (`%2F`) conta come separatore: resta l'ultima parte. `$`, backtick e `!` diventano `_`: il ricevente può riusare il nome in una riga di shell. Un nome vuoto, o `-` (lo stdout per molti strumenti), diventa `download`.
 
 ### Download multipart e ripresa
 
@@ -236,6 +272,13 @@ Come si comporta:
 - Mentre il mittente attende il ricevente, il server gli scrive un byte `\r` ogni 2 secondi (invisibile nel terminale: i comandi terminano con `\n`). Apache non si accorge da solo di un mittente caduto finché non rilegge il body; la scrittura di quel byte fallisce, Apache chiude lo stream e lo slug si libera entro circa 4 secondi. Un ricevente che prova prima riceve `410` o un abort, mai un file corrotto.
 - Lo stesso traffico azzera il `timeout` del proxy: l'attesa del ricevente è limitata solo da `BASHT_WAIT_TIMEOUT` (verificato con `timeout=5` e un'attesa di 15 secondi). Il `timeout` conta invece durante il trasferimento: un'interruzione di rete più lunga lo chiude.
 - L'app vede solo l'IP di Apache: eventuali limiti per IP vanno impostati in Apache.
+- Le risposte generate da Apache (il redirect `301` del vhost :80, il `503` con l'app ferma durante un riavvio) non passano dall'app e non hanno il nome `bashtransfer.txt` (vedi [La sorgente non viene mai alterata](#la-sorgente-non-viene-mai-alterata)). Facoltativo, nei vhost :443 e :80, con il modulo `headers`:
+
+  ```apache
+  Header always set Content-Disposition "inline; filename=\"bashtransfer.txt\"" "expr=-z resp('Content-Disposition')"
+  ```
+
+  La condizione lascia intatto il nome dei download. Protegge un mittente che aggiunge per errore `-OJ` all'invio dal `301` e, con curl meno recenti, dal `503`: curl 8.18 ignora l'header sulle risposte `4xx`/`5xx` (verificato con Apache 2.4.59, curl 8.18 e 8.5).
 - Verificato con Apache 2.4.69 (immagine `httpd:2.4`) in HTTP in chiaro verso il client; con la versione e il TLS del proprio server conviene ripetere la prova del punto 5 con un file di qualche centinaio di MB.
 
 ## Log
@@ -354,7 +397,8 @@ Comando usato: `BASHT_NB_IMAGE=<immagine locale con sh, curl, tc, ethtool, pkill
 - Stack di produzione con isolamento (nginx 1.30 in sola lettura con capability ridotte, rete `backend` interna senza uscita verso l'esterno): e2e esterno con auth e 20 trasferimenti paralleli, redirect da 80, arresto di nginx con un trasferimento in corso (atteso fino alla fine, file integro): verificati.
 - Immagine multi-architettura: build `linux/amd64` e `linux/arm64` verificata in locale (binario arm64 statico). Il workflow GitHub è validato con `actionlint` ma non eseguito (nessun remote).
 - `aria2c` 1.37 contro il relay: download da file e da pipe con sha256 identico; anche con `-x4` usa una sola connessione e completa.
-- Riga `aria2c`, rifiuto della ripresa (`curl -C -`: `400`, slug ancora scaricabile), interruzione immediata del mittente quando il ricevente cade, chiusura dei mittenti in attesa all'arresto: verificati da test Go e `scripts/e2e.sh` locale. Il download con `aria2c` dell'e2e gira nel workflow (qui `aria2c` non è installato sull'host).
+- Riga `aria2c`, rifiuto della ripresa (`curl -C -`: `400`, slug ancora scaricabile), interruzione immediata del mittente quando il ricevente cade, chiusura dei mittenti in attesa all'arresto: verificati da test Go e `scripts/e2e.sh` locale, compreso il download con `aria2c` 1.37.
+- La sorgente non viene mai alterata (`scripts/invariant.py`, eseguito dall'e2e locale e dalla CI): 2488 casi con curl 8.18, GNU wget 1.25, busybox wget 1.37 e aria2c 1.37; 2060 casi del ricevente e 178 del mittente senza nessuna sorgente alterata, il resto sono i limiti elencati in [La sorgente non viene mai alterata](#la-sorgente-non-viene-mai-alterata). Tre build volutamente difettose vengono rilevate: righe stampate `curl -f -o "nome"` (36 casi) e `wget -nc -O "nome"` (3 casi, busybox ignora `-nc`), risposte senza `Content-Disposition` (16 casi del mittente con `-OJ`).
 - Effetto di algoritmo di congestione e buffer TCP: misurato con `scripts/netbench.sh` e attraverso lo stack compose con netem (vedi "Prestazioni di rete"). Stack compose con i sysctl di nginx: `scripts/e2e.sh` esterno con 256 MiB, auth e 20 trasferimenti paralleli verificato.
 
 ## Sviluppo
@@ -366,4 +410,9 @@ bash scripts/e2e.sh
 BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_MB=256 bash scripts/e2e.sh
 # stack con Basic auth: ogni PUT usa le credenziali e si verificano i 401
 BASHT_E2E_BASE=https://127.0.0.1 BASHT_E2E_AUTH=utente:password BASHT_E2E_PARALLEL=20 bash scripts/e2e.sh
+# solo l'invariante della sorgente (l'e2e locale la esegue alla fine); fallisce se manca uno strumento
+go build -o /tmp/bt ./cmd/bashtransfer
+BASHT_INV_REQUIRE=curl,wget,aria2c,busybox python3 scripts/invariant.py /tmp/bt
 ```
+
+`scripts/invariant.py` usa curl, wget, aria2c e busybox del sistema (quelli assenti vengono saltati, salvo quelli in `BASHT_INV_REQUIRE`), lancia quattro istanze del server su porte libere (normale, attesa breve, con auth, con capacità 1) e scrive l'esito di ogni caso in JSON, una riga per caso, nel file indicato da `BASHT_INV_DUMP`. `BASHT_INV_JOBS` (default 8) è il numero di casi in parallelo.
