@@ -525,7 +525,11 @@ await test('sender grace: a browser receiver pressing Download while the sender 
     // Diretto: l'header parte subito, il download del browser inizia con il mittente ancora assente.
     // Dietro Apache il proxy può trattenere l'header fino ai primi dati: si sblocca il mittente subito.
     const early = TAG === 'direct';
-    const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: early ? 5000 : 30000 }), rp.click('#dl button').then(() => { if (!early) px.block = false; })]);
+    // noWaitAfter: con l'header trattenuto la navigazione resta in attesa e click non tornerebbe.
+    const downloaded = rp.waitForEvent('download', { timeout: early ? 5000 : 30000 });
+    await rp.click('#dl button', { noWaitAfter: true });
+    if (!early) px.block = false;
+    const dl = await downloaded;
     px.block = false;
     const saved = path.join(OUT, 'recv-grace2.bin');
     await dl.saveAs(saved);
