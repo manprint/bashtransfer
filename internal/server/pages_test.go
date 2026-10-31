@@ -161,6 +161,64 @@ func TestLandingClaimed(t *testing.T) {
 	u.finish(t)
 }
 
+// TestLandingGoneReasons: un link chiuso senza ricevente dice perché. Il mittente che annulla o
+// cade non deve sembrare un link "già usato" (il ricevente non ha scaricato nulla), e la scadenza
+// ha il suo messaggio; per curl il corpo resta "gone".
+func TestLandingGoneReasons(t *testing.T) {
+	check := func(t *testing.T, link, heading string) {
+		t.Helper()
+		for _, m := range []string{http.MethodGet, http.MethodPost} {
+			resp, body := browserDo(t, m, link)
+			if resp.StatusCode != http.StatusGone {
+				t.Errorf("%s: stato %d, atteso 410", m, resp.StatusCode)
+			}
+			wantContains(t, m, body, heading)
+			if strings.Contains(body, "Link already used") {
+				t.Errorf("%s: la pagina dice link usato: %q", m, body)
+			}
+		}
+		resp := get(t, context.Background(), link)
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusGone || strings.TrimSpace(string(b)) != "gone" {
+			t.Errorf("curl: stato %d, corpo %q", resp.StatusCode, b)
+		}
+	}
+	t.Run("sender cancelled", func(t *testing.T) {
+		srv, reg := newWebServer(t, time.Hour)
+		client := &http.Client{}
+		res := reserveUpload(t, client, srv.URL, "a.bin", 10)
+		if st := cancelUpload(t, client, srv.URL, res.Slug, res.Token); st != http.StatusNoContent {
+			t.Fatalf("DELETE: stato %d", st)
+		}
+		waitLen(t, reg, 0)
+		check(t, srv.URL+"/"+res.Slug, "Sender stopped")
+	})
+	t.Run("sender gone while waiting", func(t *testing.T) {
+		// newWebServer: il server vede la connessione del mittente caduto solo con ConnContext.
+		srv, reg := newWebServer(t, time.Hour)
+		ctx, cancel := context.WithCancel(context.Background())
+		pr, pw := io.Pipe()
+		defer pw.Close()
+		u := openUpload(t, ctx, srv.URL+"/a.bin", pr)
+		link := srv.URL + "/" + u.slug
+		cancel()
+		u.resp.Body.Close()
+		waitLen(t, reg, 0)
+		check(t, link, "Sender stopped")
+	})
+	t.Run("expired", func(t *testing.T) {
+		srv, reg := newTestServerWait(t, 200*time.Millisecond)
+		pr, pw := io.Pipe()
+		defer pw.Close()
+		u := openUpload(t, context.Background(), srv.URL+"/a.bin", pr)
+		defer u.resp.Body.Close()
+		link := srv.URL + "/" + u.slug
+		waitLen(t, reg, 0)
+		check(t, link, "Link expired")
+	})
+}
+
 // TestLandingDetails: nome con markup (escape), lunghezza ignota (pipe), base pubblica nei comandi.
 func TestLandingDetails(t *testing.T) {
 	// Attesa breve: il mittente non invia mai il body e Close attende la scadenza della sessione.

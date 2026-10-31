@@ -203,6 +203,9 @@ await test('upload button + curl receiver from the table', async () => {
   assert(rows[1].line === `wget --content-disposition "${url}"`, `riga wget ${rows[1].line}`);
   assert(rows[2].line === `aria2c -x1 -s1 --allow-overwrite=false "${url}"`, `riga aria2c ${rows[2].line}`);
   assert((await page.textContent('#x-name')) === 'upload.bin' && (await page.textContent('#x-size')) === '24.0 MiB', 'nome/dimensione');
+  // Su un telefono passare a un'altra app ferma l'invio: l'avviso lo dice accanto ai link.
+  const hint = await page.textContent('#x-links');
+  assert(/Keep this page open and in the foreground until the end/.test(hint) && /split screen/.test(hint), `avviso primo piano: ${hint}`);
   // Copia del link diretto.
   await page.click('[data-copy="x-c3"]');
   await page.waitForFunction(() => document.querySelector('[data-copy="x-c3"]').textContent === 'Copied', null, { timeout: 2000 });
@@ -325,6 +328,11 @@ await test('cancel closes the link', async () => {
   const ms = await waitGone(url, 1000);
   assert(ms >= 0, 'link ancora valido 1 s dopo Cancel');
   console.log(`     link 410 ${ms} ms dopo Cancel`);
+  // Il ricevente che apre il link dopo Cancel non vede "già usato": nessuno ha scaricato nulla.
+  const rp = await newPage();
+  const rr = await rp.goto(url);
+  assert(rr.status() === 410 && (await rp.textContent('h2')) === 'Sender stopped', `ricevente dopo Cancel ${rr.status()} ${await rp.textContent('h2')}`);
+  await rp.context().close();
   await page.screenshot({ path: path.join(OUT, 'upload-cancelled.png'), fullPage: true });
   noErrors(page, 'cancel', PUT_FAILED);
   await page.context().close();
@@ -407,8 +415,14 @@ await test('expired link reported to the browser sender', async () => {
   const page = await newPage();
   await page.goto(BASE_SHORT + '/');
   await page.setInputFiles('#file', src);
+  await page.waitForSelector('#x-links:not([hidden])');
+  const url = (await linkRows(page))[3].line;
   const res = await waitResult(page, 20000);
   assert(res.cls === 'result err' && res.text === 'No receiver opened the link in time: the link is closed.', `esito ${JSON.stringify(res)}`);
+  const rp = await newPage();
+  const rr = await rp.goto(url);
+  assert(rr.status() === 410 && (await rp.textContent('h2')) === 'Link expired', `ricevente dopo la scadenza ${rr.status()} ${await rp.textContent('h2')}`);
+  await rp.context().close();
   await page.screenshot({ path: path.join(OUT, 'upload-expired.png'), fullPage: true });
   noErrors(page, 'expired', PUT_FAILED);
   await page.context().close();

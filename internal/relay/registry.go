@@ -29,6 +29,21 @@ var (
 	ErrInterrupted = errors.New("relay interrupted")
 )
 
+// Motivi per cui uno slug è terminale (GoneError): il ricevente vede un messaggio diverso per
+// ciascuno, e il log distingue un link usato da uno perso per colpa del mittente.
+const (
+	GoneUsed       = "used"        // reclamato da un ricevente: trasferimento concluso o interrotto
+	GoneExpired    = "expired"     // nessun ricevente entro BASHT_WAIT_TIMEOUT, o arresto del server
+	GoneSenderGone = "sender_gone" // il mittente è caduto o ha annullato prima che un ricevente arrivasse
+)
+
+// GoneError è ErrGone con il motivo: errors.Is(err, ErrGone) vale per ogni GoneError.
+type GoneError struct{ Reason string }
+
+func (e *GoneError) Error() string { return ErrGone.Error() }
+
+func (e *GoneError) Is(target error) bool { return target == ErrGone }
+
 const (
 	slugAttempts = 5
 	// tombstoneTTL: per quanto uno slug terminale resta 410 (D17).
@@ -136,7 +151,7 @@ func (s *Session) Abort(err error) {
 type Registry struct {
 	mu          sync.Mutex
 	sessions    map[string]*Session
-	gone        map[string]struct{}
+	gone        map[string]string // slug terminale -> motivo (Gone*)
 	goneQ       []tombstone
 	maxGone     int
 	maxSessions int
@@ -153,7 +168,7 @@ type tombstone struct {
 func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry {
 	return &Registry{
 		sessions:    make(map[string]*Session),
-		gone:        make(map[string]struct{}),
+		gone:        make(map[string]string),
 		maxGone:     maxTombstones,
 		maxSessions: maxSessions,
 		waitTimeout: waitTimeout,
@@ -220,7 +235,7 @@ func (r *Registry) unbound(s *Session) bool {
 	s.timer.Stop()
 	s.bindTimer.Stop()
 	delete(r.sessions, s.Slug)
-	r.bury(s.Slug)
+	r.bury(s.Slug, GoneSenderGone)
 	r.mu.Unlock()
 	s.finishOnce.Do(func() { close(s.finished) })
 	return true
@@ -252,7 +267,8 @@ func (r *Registry) create(name string, length int64, token string, bindTimeout t
 		if err != nil {
 			return nil, err
 		}
-		if _, live := r.sessions[id]; live || r.isGone(id) {
+		_, gone := r.goneReason(id)
+		if _, live := r.sessions[id]; live || gone {
 			continue
 		}
 		logID, err := newLogID()
@@ -308,8 +324,8 @@ func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
 	r.prune(time.Now())
 	s, ok := r.sessions[id]
 	if !ok {
-		if r.isGone(id) {
-			return nil, ErrGone
+		if reason, gone := r.goneReason(id); gone {
+			return nil, &GoneError{reason}
 		}
 		return nil, ErrNotFound
 	}
@@ -323,19 +339,20 @@ func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
 }
 
 // Peek riporta lo stato di uno slug senza reclamarlo: la sessione se attende un ricevente,
-// altrimenti ErrClaimed, ErrGone o ErrNotFound come Claim. Della sessione il chiamante legge solo
+// altrimenti ErrClaimed, un GoneError (ErrGone) o ErrNotFound come Claim. Della sessione il chiamante legge solo
 // i campi immutabili (nome e lunghezza per la pagina di download).
 func (r *Registry) Peek(id string) (*Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prune(time.Now())
 	s, ok := r.sessions[id]
-	switch {
-	case !ok && r.isGone(id):
-		return nil, ErrGone
-	case !ok:
+	if !ok {
+		if reason, gone := r.goneReason(id); gone {
+			return nil, &GoneError{reason}
+		}
 		return nil, ErrNotFound
-	case s.claimed:
+	}
+	if s.claimed {
 		return nil, ErrClaimed
 	}
 	return s, nil
@@ -347,7 +364,7 @@ func (r *Registry) Finish(s *Session) {
 	r.mu.Lock()
 	if r.sessions[s.Slug] == s {
 		delete(r.sessions, s.Slug)
-		r.bury(s.Slug)
+		r.bury(s.Slug, finishReason(s))
 		s.timer.Stop()
 	}
 	r.mu.Unlock()
@@ -385,7 +402,7 @@ func (r *Registry) expireLocked(s *Session) {
 	}
 	s.timer.Stop()
 	delete(r.sessions, s.Slug)
-	r.bury(s.Slug)
+	r.bury(s.Slug, GoneExpired)
 	close(s.expired)
 	// Una prenotazione senza body non ha un mittente che chiami Finish.
 	if s.Token != "" && !s.bound {
@@ -394,9 +411,22 @@ func (r *Registry) expireLocked(s *Session) {
 	}
 }
 
+// finishReason è il motivo della tombstone di una sessione che termina (r.mu preso). Uno slug
+// reclamato vale sempre GoneUsed, anche se poi il mittente è caduto: il ricevente ha già avuto il
+// link. Senza ricevente, la scadenza è GoneExpired e ogni altra fine è un mittente caduto.
+func finishReason(s *Session) string {
+	switch {
+	case s.claimed:
+		return GoneUsed
+	case errors.Is(s.err, ErrExpired):
+		return GoneExpired
+	}
+	return GoneSenderGone
+}
+
 // bury registra lo slug come terminale per tombstoneTTL (D17), entro maxGone tombstone.
-func (r *Registry) bury(id string) {
-	r.gone[id] = struct{}{}
+func (r *Registry) bury(id, reason string) {
+	r.gone[id] = reason
 	r.goneQ = append(r.goneQ, tombstone{slug: id, at: time.Now()})
 	for len(r.goneQ) > r.maxGone {
 		r.dropOldest()
@@ -410,9 +440,10 @@ func (r *Registry) dropOldest() {
 	r.goneQ = r.goneQ[1:]
 }
 
-func (r *Registry) isGone(id string) bool {
-	_, ok := r.gone[id]
-	return ok
+// goneReason riporta il motivo della tombstone di id, se c'è.
+func (r *Registry) goneReason(id string) (string, bool) {
+	reason, ok := r.gone[id]
+	return reason, ok
 }
 
 // prune rimuove le tombstone scadute dalla testa della coda (FIFO per data).

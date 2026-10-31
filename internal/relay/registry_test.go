@@ -518,3 +518,59 @@ func TestRegistryExpireWaiting(t *testing.T) {
 		t.Fatalf("Claim dopo ExpireWaiting: %v, atteso ErrGone", err)
 	}
 }
+
+// TestRegistryGoneReason: la tombstone ricorda perché lo slug è terminale; ogni GoneError è anche
+// ErrGone.
+func TestRegistryGoneReason(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	reason := func(id string) string {
+		t.Helper()
+		_, err := r.Peek(id)
+		var g *GoneError
+		if !errors.Is(err, ErrGone) || !errors.As(err, &g) {
+			t.Fatalf("Peek: %v, atteso GoneError", err)
+		}
+		if _, err := r.Claim(id, fakeRcv{}); !errors.Is(err, ErrGone) {
+			t.Fatalf("Claim: %v, atteso ErrGone", err)
+		}
+		return g.Reason
+	}
+
+	sent, _ := r.Create("a", -1)
+	sent.Abort(ErrSenderGone)
+	r.Finish(sent)
+	if got := reason(sent.Slug); got != GoneSenderGone {
+		t.Errorf("mittente caduto senza ricevente: %q", got)
+	}
+
+	used, _ := r.Create("b", -1)
+	if _, err := r.Claim(used.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	r.Finish(used)
+	if got := reason(used.Slug); got != GoneUsed {
+		t.Errorf("reclamato e concluso: %q", got)
+	}
+
+	cut, _ := r.Create("c", -1)
+	if _, err := r.Claim(cut.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	cut.Abort(ErrSenderGone)
+	r.Finish(cut)
+	if got := reason(cut.Slug); got != GoneUsed {
+		t.Errorf("reclamato, poi mittente caduto: %q", got)
+	}
+
+	late, _ := r.Create("d", -1)
+	r.ExpireWaiting()
+	if got := reason(late.Slug); got != GoneExpired {
+		t.Errorf("scaduto: %q", got)
+	}
+
+	res, _ := r.Reserve("e", 1, time.Hour)
+	r.Cancel(res)
+	if got := reason(res.Slug); got != GoneSenderGone {
+		t.Errorf("prenotazione annullata prima del body: %q", got)
+	}
+}

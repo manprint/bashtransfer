@@ -142,7 +142,7 @@ Nella pagina di cortesia, sotto il titolo, un riquadro accetta un file trascinat
 2. invia il file (`PUT /<slug>`) solo quando il ricevente si collega, come `curl -T`;
 3. mostra la barra di avanzamento con percentuale, velocità, byte consegnati e tempo stimato, e alla fine l'esito: "Done: the receiver got the whole file", oppure il motivo (link scaduto, ricevente disconnesso, invio interrotto).
 
-La pagina va tenuta aperta fino alla fine: chiudendola, il browser chiede conferma. **Cancel** e la chiusura della pagina chiudono subito il link: un ricevente che lo apre dopo vede "Link already used or expired", uno che sta scaricando viene interrotto. Se invece cade la rete del mittente, il link si chiude quando il server se ne accorge (vedi sotto e [Limiti e sicurezza](#limiti-e-sicurezza)).
+La pagina va tenuta aperta fino alla fine: chiudendola, il browser chiede conferma. **Cancel** e la chiusura della pagina chiudono subito il link: un ricevente che lo apre dopo vede "Sender stopped" (410), uno che sta scaricando viene interrotto. Se invece cade la rete del mittente, il link si chiude quando il server se ne accorge (vedi sotto e [Limiti e sicurezza](#limiti-e-sicurezza)).
 
 Con `BASHT_AUTH_USER` impostato il browser chiede utente e password con la sua finestra di login; se l'utente annulla, la pagina mostra "This server requires a login to send files.".
 
@@ -368,7 +368,7 @@ Una riga per evento su stderr, nel formato di `BASHT_LOG_FORMAT`. Ogni riga ha `
 
 `wait_s` è l'attesa del ricevente, `transfer_s` la durata del relay, `rate_mbs` la velocità media in MB/s (10^6 byte). Le durate sono secondi con tre decimali, numeri anche in JSON.
 
-`reason` di `request_rejected`, con il livello: `unauthorized` (401, WARN), `capacity` (503, WARN: `BASHT_MAX_SESSIONS` raggiunto), `range_not_supported` (400, INFO), `invalid_host` (400, INFO), `gone` (410, INFO), `not_found` (404, DEBUG: slug inesistenti, scansioni; INFO per il `PUT` del browser con token errato o prenotazione scaduta), `bad_request` (400: DEBUG per un `POST /` malformato, INFO per un `PUT` del browser di lunghezza diversa da quella prenotata), `unsupported_media_type` (415, DEBUG: `POST /` non JSON), `method_not_allowed` (405, DEBUG), `internal` (500 o 503, ERROR).
+`reason` di `request_rejected`, con il livello: `unauthorized` (401, WARN), `capacity` (503, WARN: `BASHT_MAX_SESSIONS` raggiunto), `range_not_supported` (400, INFO), `invalid_host` (400, INFO), `gone` (410, INFO: link già reclamato da un ricevente, pagina "Link already used or expired"), `gone_sender` (410, INFO: il mittente è caduto o ha annullato prima di ogni ricevente, pagina "Sender stopped"), `gone_expired` (410, INFO: nessun ricevente entro `BASHT_WAIT_TIMEOUT`, pagina "Link expired"), `not_found` (404, DEBUG: slug inesistenti, scansioni; INFO per il `PUT` del browser con token errato o prenotazione scaduta), `bad_request` (400: DEBUG per un `POST /` malformato, INFO per un `PUT` del browser di lunghezza diversa da quella prenotata), `unsupported_media_type` (415, DEBUG: `POST /` non JSON), `method_not_allowed` (405, DEBUG), `internal` (500 o 503, ERROR).
 
 Esempio (`json`):
 

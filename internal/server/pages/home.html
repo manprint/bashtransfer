@@ -51,7 +51,7 @@
     <div id="x-links" hidden>
       <h3>Send this to the receiver</h3>
       <div class="rows tools" id="x-rows"></div>
-      <p class="muted">One receiver per link. Keep this page open until the end.</p>
+      <p class="muted">One receiver per link. <strong>Keep this page open and in the foreground until the end:</strong> if you switch to another app, a phone may stop the upload and the link stops working. To receive on the same phone, use split screen; otherwise open the link on another device.</p>
     </div>
     <div class="bar" id="x-bar" role="progressbar" aria-label="Transfer" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
     <div class="stats"><span class="pct" id="x-pct">0%</span><span id="x-rate"></span><span id="x-amount"></span></div>
@@ -168,7 +168,7 @@
     receiver_gone: "The receiver disconnected or stopped downloading.",
     idle: "The upload stalled: no data from this browser for too long.",
     length_mismatch: "The browser sent fewer bytes than the file size.",
-    sender_gone: "The upload from this browser was interrupted.",
+    sender_gone: "The upload from this browser was interrupted. If you switched to another app, the phone may have stopped it: keep this page in the foreground and send the file again.",
     expired: "No receiver opened the link in time: the link is closed."
   };
   // cancelLink chiude il link sul server. keepalive: la richiesta parte anche mentre la pagina si
@@ -284,7 +284,7 @@
     }).catch(function (e) {
       if (busy) cancelLink();
       finish(false, e.shown ? e.message : (reserved
-        ? "The connection to the server was lost: the link no longer works."
+        ? "The connection to the server was lost: the link no longer works. If you switched to another app, the phone may have stopped the page: keep it in the foreground and send the file again."
         : "Could not reach the server."));
     });
   }

@@ -71,6 +71,8 @@ const (
 	reasonMethod           = "method_not_allowed"
 	reasonNotFound         = "not_found"
 	reasonGone             = "gone"
+	reasonGoneSender       = "gone_sender"
+	reasonGoneExpired      = "gone_expired"
 	reasonRangeUnsupported = "range_not_supported"
 	reasonBadRequest       = "bad_request"
 	reasonMediaType        = "unsupported_media_type"
@@ -92,6 +94,21 @@ const (
 // bindTimeout è il tempo entro cui il browser deve iniziare il PUT dopo la prenotazione: lo fa
 // subito, e una prenotazione senza upload non deve occupare una sessione. Variabile per i test.
 var bindTimeout = 30 * time.Second
+
+// goneReasonOf è il motivo del rifiuto (log e pagina) di uno slug terminale: err è un GoneError di
+// relay, o ErrClaimed (reasonGone, come un link usato).
+func goneReasonOf(err error) string {
+	var g *relay.GoneError
+	if errors.As(err, &g) {
+		switch g.Reason {
+		case relay.GoneExpired:
+			return reasonGoneExpired
+		case relay.GoneSenderGone:
+			return reasonGoneSender
+		}
+	}
+	return reasonGone
+}
 
 // reject registra il rifiuto di una richiesta e risponde con status e msg (ai browser con la pagina
 // del motivo, writeError). Il path non compare nel log: contiene slug o nome del file.
@@ -843,7 +860,7 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, r, http.StatusGone, pageClaimed, "gone")
 		return
 	case errors.Is(err, relay.ErrGone):
-		h.reject(w, r, slog.LevelInfo, http.StatusGone, reasonGone, "gone")
+		h.reject(w, r, slog.LevelInfo, http.StatusGone, goneReasonOf(err), "gone")
 		return
 	case err != nil:
 		h.opts.Logger.Error("claim_failed", "err", err)
@@ -932,7 +949,7 @@ func (h *handler) rejectRange(w http.ResponseWriter, r *http.Request, id string)
 	case errors.Is(err, relay.ErrNotFound):
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 	case err != nil:
-		h.reject(w, r, slog.LevelInfo, http.StatusGone, reasonGone, "gone")
+		h.reject(w, r, slog.LevelInfo, http.StatusGone, goneReasonOf(err), "gone")
 	default:
 		w.Header().Set("Accept-Ranges", "none")
 		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonRangeUnsupported,

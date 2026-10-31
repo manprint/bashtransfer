@@ -128,7 +128,7 @@ func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, r, http.StatusGone, pageClaimed, "gone")
 		return
 	case err != nil:
-		h.reject(w, r, slog.LevelInfo, http.StatusGone, reasonGone, "gone")
+		h.reject(w, r, slog.LevelInfo, http.StatusGone, goneReasonOf(err), "gone")
 		return
 	}
 	d := pageData{Title: "Download · Bashtransfer", NoIndex: true, Name: s.Name, Size: humanSize(s.Length)}
@@ -152,6 +152,10 @@ var messages = map[string]struct{ heading, text string }{
 		"This link does not exist. Check that you copied the whole link; if you did, ask the sender to send the file again."},
 	reasonGone: {"Link already used or expired",
 		"Each link works for one download only and expires if nobody uses it in time. Ask the sender to send the file again."},
+	reasonGoneSender: {"Sender stopped",
+		"The sender closed the page, cancelled or lost the connection before this link was used. Ask the sender to keep the page open and send the file again."},
+	reasonGoneExpired: {"Link expired",
+		"Nobody opened this link in time. Ask the sender to send the file again."},
 	pageClaimed: {"Download already started",
 		"This link is already being downloaded, perhaps from another tab or window: check your browser's downloads. Each link works once; if it was not you, ask the sender to send the file again."},
 	pageAborted: {"Transfer interrupted",
