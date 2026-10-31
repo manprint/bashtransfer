@@ -74,9 +74,14 @@ type Session struct {
 	Token   string
 	Created time.Time
 
-	reg       *Registry
-	claimed   bool
-	bound     bool // prenotata: il mittente ha agganciato il body (Bind)
+	reg     *Registry
+	claimed bool
+	bound   bool // prenotata: il mittente ha agganciato il body (Bind)
+	// unbind si chiude quando l'aggancio corrente termina: Detach del mittente caduto o aggancio
+	// sostitutivo (BindDetachable). Un aggancio nuovo ne crea uno nuovo.
+	unbind chan struct{}
+	// streams conta gli stream di avanzamento aperti dal mittente nel browser (StreamOpen).
+	streams   int
 	err       error
 	timer     *time.Timer
 	bindTimer *time.Timer
@@ -157,6 +162,11 @@ type Registry struct {
 	maxSessions int
 	waitTimeout time.Duration
 	gen         func() (string, error)
+	// senderGrace, se > 0, tiene viva per quel tempo una prenotazione il cui mittente è caduto
+	// prima del ricevente: può riagganciarsi con lo stesso token (Detach, BindDetachable).
+	senderGrace time.Duration
+	// onGraceExpired, se non nil, è chiamata (senza lock) quando la tolleranza scade e chiude il link.
+	onGraceExpired func(*Session)
 }
 
 type tombstone struct {
@@ -174,6 +184,28 @@ func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry {
 		waitTimeout: waitTimeout,
 		gen:         slug.New,
 	}
+}
+
+// SetSenderGrace imposta la tolleranza per i mittenti dal browser caduti prima del ricevente; 0 la
+// disattiva. Va chiamata prima di servire richieste.
+func (r *Registry) SetSenderGrace(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.senderGrace = d
+}
+
+// SenderGrace restituisce la tolleranza impostata con SetSenderGrace.
+func (r *Registry) SenderGrace() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.senderGrace
+}
+
+// OnGraceExpired registra la funzione chiamata quando la tolleranza scade e il link si chiude.
+func (r *Registry) OnGraceExpired(fn func(*Session)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onGraceExpired = fn
 }
 
 // Create apre una sessione per un upload. length è -1 se ignota.
@@ -196,15 +228,117 @@ func (r *Registry) Reserve(name string, length int64, bindTimeout time.Duration)
 // Bind assegna al mittente la sessione prenotata id. Uno slug sconosciuto, un token errato o una
 // sessione già agganciata danno ErrNotFound: chi non ha il token non distingue i casi.
 func (r *Registry) Bind(id, token string) (*Session, error) {
+	s, _, err := r.BindDetachable(id, token)
+	return s, err
+}
+
+// BindDetachable è Bind e restituisce anche il canale che si chiude quando questo aggancio termina
+// senza chiudere la sessione: il mittente caduto (Detach) o un aggancio che lo sostituisce. Con la
+// tolleranza attiva (SetSenderGrace) il mittente che torna con il token riaggancia la sessione anche
+// se il server non ha ancora visto cadere il vecchio aggancio, purché il relay non sia iniziato e la
+// sessione non sia stata interrotta: il vecchio aggancio viene chiuso e il suo gestore esce senza
+// terminare la sessione.
+func (r *Registry) BindDetachable(id, token string) (*Session, <-chan struct{}, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[id]
-	if !ok || s.Token == "" || s.bound || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 {
-		return nil, ErrNotFound
+	if !ok || s.Token == "" || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 {
+		return nil, nil, ErrNotFound
+	}
+	if s.bound {
+		if r.senderGrace <= 0 || s.err != nil || s.relayStarted() {
+			return nil, nil, ErrNotFound
+		}
+		close(s.unbind)
 	}
 	s.bound = true
 	s.bindTimer.Stop()
-	return s, nil
+	s.unbind = make(chan struct{})
+	return s, s.unbind, nil
+}
+
+// relayStarted riporta se il relay verso il ricevente è iniziato (Start).
+func (s *Session) relayStarted() bool {
+	select {
+	case <-s.started:
+		return true
+	default:
+		return false
+	}
+}
+
+// Away riporta se una sessione prenotata non ha un mittente agganciato: il body non è ancora
+// arrivato, o il mittente è caduto e resta in tolleranza.
+func (s *Session) Away() bool {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	return s.Token != "" && !s.bound
+}
+
+// Requeue rimette in coda il ricevente letto da Attached da un gestore che cede la sessione a un
+// aggancio sostitutivo prima di iniziare il relay: lo leggerà il nuovo gestore.
+func (s *Session) Requeue(rcv Receiver) { s.attached <- rcv }
+
+// StreamOpen registra un nuovo stream di avanzamento del mittente nel browser (prenotazione o
+// ripresa). Ogni StreamOpen va chiuso con StreamClosed.
+func (r *Registry) StreamOpen(s *Session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s.streams++
+}
+
+// StreamClosed registra la chiusura di uno stream di avanzamento. Con la tolleranza attiva, la
+// chiusura dell'ultimo stream prima dell'inizio del relay vale come caduta del mittente: il suo PUT
+// con il body non letto non lo rivela in modo affidabile (la chiusura resta in coda dietro i dati
+// nei buffer di rete), lo stream sì. La sessione va in tolleranza come con Detach. Riporta true se
+// l'ha messa in tolleranza.
+func (r *Registry) StreamClosed(s *Session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s.streams > 0 {
+		s.streams--
+	}
+	if s.streams > 0 || !s.bound {
+		return false
+	}
+	return r.detachLocked(s, s.unbind) && !s.bound
+}
+
+// Detach gestisce la caduta del mittente dal browser, dell'aggancio binding (da BindDetachable), prima
+// dell'inizio del relay. Con la tolleranza attiva la sessione resta viva per senderGrace, senza
+// mittente: un ricevente che la reclama attende, e il mittente può riagganciarsi con lo stesso token
+// (BindDetachable). Alla scadenza il link si chiude come per un mittente caduto. Riporta true se la
+// sessione non va terminata dal chiamante: già ceduta a un altro aggancio, già in tolleranza o
+// messa in tolleranza ora. False se il chiamante deve terminarla (Abort, Finish): tolleranza
+// disattivata, mittente non prenotato, relay iniziato, sessione già finita o interrotta.
+func (r *Registry) Detach(s *Session, binding <-chan struct{}) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.detachLocked(s, binding)
+}
+
+// detachLocked è Detach con r.mu preso.
+func (r *Registry) detachLocked(s *Session, binding <-chan struct{}) bool {
+	if r.senderGrace <= 0 || s.Token == "" || s.err != nil || r.sessions[s.Slug] != s || s.relayStarted() {
+		return false
+	}
+	if s.unbind != binding || !s.bound {
+		return true
+	}
+	s.bound = false
+	close(s.unbind)
+	s.bindTimer.Stop()
+	s.bindTimer = time.AfterFunc(r.senderGrace, func() {
+		if r.unbound(s) {
+			r.mu.Lock()
+			fn := r.onGraceExpired
+			r.mu.Unlock()
+			if fn != nil {
+				fn(s)
+			}
+		}
+	})
+	return true
 }
 
 // Reserved restituisce la sessione prenotata id, agganciata o no, se token è il suo: serve

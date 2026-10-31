@@ -59,6 +59,10 @@ func New(reg *relay.Registry, copier *relay.Copier, opts Options) http.Handler {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
+	reg.OnGraceExpired(func(s *relay.Session) {
+		opts.Logger.LogAttrs(context.Background(), slog.LevelInfo, "sender_grace_expired",
+			slog.String("id", s.ID), seconds("wait_s", time.Since(s.Created)))
+	})
 	return &handler{reg: reg, copier: copier, opts: opts}
 }
 
@@ -251,6 +255,9 @@ type reservation struct {
 	URL      string    `json:"url"`
 	Token    string    `json:"token"`
 	Commands []command `json:"commands"`
+	// Grace, se > 0, sono i secondi di tolleranza per un mittente caduto (BASHT_SENDER_GRACE): la
+	// pagina si riaggancia con la ripresa dello stream (POST / con resume) e un nuovo PUT.
+	Grace int64 `json:"grace,omitempty"`
 }
 
 // reserve prenota una sessione per un invio dal browser: POST / con JSON {"name": ..., "size": ...}.
@@ -264,6 +271,10 @@ type reservation struct {
 // body, e quella di un trasferimento interrotto si perde nel reset della connessione. La chiusura
 // dello stream (pagina chiusa, Cancel) termina la sessione: dietro il body non letto del PUT il
 // server non vedrebbe andare via il mittente.
+//
+// Con BASHT_SENDER_GRACE la sola caduta dello stream non termina più la sessione: la caduta del
+// mittente la rileva il PUT (upload), che la mette in tolleranza. Il mittente che torna riapre lo
+// stream con POST / {"resume": "<slug>"} e il token nell'header, e ripete il PUT.
 func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(w, r) {
 		return
@@ -278,23 +289,47 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
-		Size *int64 `json:"size"`
+		Name   string `json:"name"`
+		Size   *int64 `json:"size"`
+		Resume string `json:"resume"`
 	}
 	// Il body va letto fino in fondo: solo dopo net/http rileva la chiusura della connessione e
 	// annulla il contesto della richiesta.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
-	if err != nil || json.Unmarshal(body, &req) != nil || req.Size == nil || *req.Size < 0 {
+	if err != nil || json.Unmarshal(body, &req) != nil || (req.Resume == "" && (req.Size == nil || *req.Size < 0)) {
 		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
 		return
 	}
-	s, err := h.reg.Reserve(SanitizeName(req.Name), *req.Size, bindTimeout)
-	if err != nil {
-		h.rejectCreate(w, r, err)
-		return
+	grace := h.reg.SenderGrace()
+	var s *relay.Session
+	if req.Resume != "" {
+		// Riapre lo stream di una prenotazione viva: solo con la tolleranza attiva e il token giusto.
+		var err error
+		if s, err = h.reg.Reserved(req.Resume, r.Header.Get(tokenHeader)); err != nil || grace <= 0 {
+			h.reject(w, r, slog.LevelInfo, http.StatusNotFound, reasonNotFound, "404 page not found")
+			return
+		}
+		h.opts.Logger.LogAttrs(r.Context(), slog.LevelInfo, "upload_resumed", slog.String("id", s.ID))
+	} else {
+		if s, err = h.reg.Reserve(SanitizeName(req.Name), *req.Size, bindTimeout); err != nil {
+			h.rejectCreate(w, r, err)
+			return
+		}
+		h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_reserved",
+			slog.String("id", s.ID), slog.Int64("length", s.Length))
 	}
-	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_reserved",
-		slog.String("id", s.ID), slog.Int64("length", s.Length))
+	// All'uscita dallo stream (pagina chiusa, rete caduta, Cancel, sessione finita): senza tolleranza
+	// la sessione termina (Cancel non fa nulla su una finita); con la tolleranza la chiusura
+	// dell'ultimo stream mette il mittente in tolleranza e il link resta vivo per un riaggancio.
+	h.reg.StreamOpen(s)
+	defer func() {
+		if grace <= 0 {
+			h.reg.Cancel(s)
+		} else if h.reg.StreamClosed(s) {
+			h.opts.Logger.LogAttrs(context.Background(), slog.LevelInfo, "sender_detached",
+				slog.String("id", s.ID), seconds("wait_s", time.Since(s.Created)), seconds("grace_s", grace))
+		}
+	}()
 	u := base + "/" + s.Slug
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
@@ -303,8 +338,8 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	send := func(v any) bool { return enc.Encode(v) == nil && rc.Flush() == nil }
 	if !send(reservation{
 		Slug: s.Slug, URL: u, Token: s.Token, Commands: append(receiverCommands(u), command{"direct", u}),
+		Grace: int64(grace / time.Second),
 	}) {
-		h.reg.Cancel(s)
 		return
 	}
 
@@ -337,7 +372,6 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		case <-started:
 			started, attached = nil, true
 			if !send(event{Event: "attached"}) {
-				h.reg.Cancel(s)
 				return
 			}
 		case <-tick.C:
@@ -353,11 +387,9 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 				ok = send(event{Event: "waiting"})
 			}
 			if !ok {
-				h.reg.Cancel(s)
 				return
 			}
 		case <-r.Context().Done():
-			h.reg.Cancel(s)
 			return
 		}
 	}
@@ -406,9 +438,10 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		return
 	}
 	var s *relay.Session
+	var binding <-chan struct{}
 	if web {
 		var err error
-		if s, err = h.reg.Bind(seg, token); err != nil {
+		if s, binding, err = h.reg.BindDetachable(seg, token); err != nil {
 			h.reject(w, r, slog.LevelInfo, http.StatusNotFound, reasonNotFound, "404 page not found")
 			return
 		}
@@ -423,7 +456,13 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_accepted",
 		slog.String("id", s.ID), slog.Int64("length", s.Length))
 	tr := transferLog{session: s}
+	// detached: la sessione non va terminata qui. Il mittente è caduto e la tolleranza (Detach) la
+	// tiene viva per un riaggancio, oppure un nuovo PUT con lo stesso token ha preso il suo posto.
+	detached := false
 	defer func() {
+		if detached {
+			return
+		}
 		if !ok {
 			s.Abort(relay.ErrSenderGone)
 		}
@@ -490,9 +529,30 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		heartbeat = t.C
 	}
 
+	// senderLost registra la caduta del mittente prima del ricevente: con la tolleranza attiva la
+	// sessione resta viva senza di lui (detached), altrimenti la termina il defer.
+	senderLost := func() {
+		if h.reg.Detach(s, binding) {
+			detached = true
+			drain = 0
+			h.opts.Logger.LogAttrs(r.Context(), slog.LevelInfo, "sender_detached",
+				slog.String("id", s.ID), seconds("wait_s", time.Since(s.Created)),
+				seconds("grace_s", h.reg.SenderGrace()))
+		}
+	}
+
 	for {
 		select {
 		case rcv := <-s.Attached():
+			// Un aggancio sostitutivo ha già preso il posto di questo: il ricevente va al nuovo gestore.
+			select {
+			case <-binding:
+				s.Requeue(rcv)
+				detached = true
+				drain = 0
+				return
+			default:
+			}
 			rr := rcv.(*responseReceiver)
 			tr.attached = time.Now()
 			h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "receiver_attached",
@@ -547,21 +607,32 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			// prenotazione): il body non letto non va più atteso. L'esito lo scrive lo stream.
 			drain = 0
 			return
+		case <-binding:
+			// Un nuovo PUT con lo stesso token ha preso il posto di questo (mittente tornato prima che
+			// il server vedesse cadere il vecchio aggancio): la sessione ora è sua.
+			detached = true
+			drain = 0
+			return
 		case <-r.Context().Done():
+			senderLost()
 			return
 		case <-heartbeat:
 			if _, err := io.WriteString(w, "\r"); err != nil {
 				drain = 0
+				senderLost()
 				panic(http.ErrAbortHandler)
 			}
 			if err := rc.Flush(); err != nil {
 				drain = 0
+				senderLost()
 				panic(http.ErrAbortHandler)
 			}
 		case <-peerCheck:
 			if peerClosed(conn) {
-				// outcome resta sender_gone; il defer registra ErrSenderGone e libera lo slug.
+				// outcome resta sender_gone; il defer registra ErrSenderGone e libera lo slug, salvo
+				// la tolleranza (senderLost).
 				drain = 0
+				senderLost()
 				panic(http.ErrAbortHandler)
 			}
 		}
@@ -868,6 +939,12 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "download_claimed", slog.String("id", s.ID))
+	// Mittente assente in tolleranza: a un browser l'header parte subito, così il download diventa
+	// un download del browser (che prosegue anche con l'app in secondo piano) invece di una
+	// richiesta in attesa; i dati arrivano quando il mittente torna.
+	if h.reg.SenderGrace() > 0 && wantsHTML(r) && s.Away() {
+		rcv.start(s.Name, s.Length)
+	}
 
 	finished := s.Finished()
 	ctxDone := r.Context().Done()

@@ -53,6 +53,7 @@ func run() error {
 		"auth", cfg.AuthUser != "",
 		"wait_timeout", cfg.WaitTimeout.String(),
 		"idle_timeout", cfg.IdleTimeout.String(),
+		"sender_grace", cfg.SenderGrace.String(),
 		"max_sessions", cfg.MaxSessions,
 		"buf_size", cfg.BufSize,
 		"log_level", cfg.LogLevel.String(),
@@ -60,6 +61,7 @@ func run() error {
 		"gomaxprocs", runtime.GOMAXPROCS(0))
 
 	reg := relay.NewRegistry(cfg.MaxSessions, cfg.WaitTimeout)
+	reg.SetSenderGrace(cfg.SenderGrace)
 	opts := server.Options{PublicURL: cfg.PublicURL, IdleTimeout: cfg.IdleTimeout, Logger: logger}
 	if cfg.AuthUser != "" {
 		opts.Authorize = server.BasicAuth(cfg.AuthUser, cfg.AuthPassword)

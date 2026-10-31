@@ -574,3 +574,157 @@ func TestRegistryGoneReason(t *testing.T) {
 		t.Errorf("prenotazione annullata prima del body: %q", got)
 	}
 }
+
+// reservedBound prenota una sessione e ne aggancia il body.
+func reservedBound(t *testing.T, r *Registry) (*Session, <-chan struct{}) {
+	t.Helper()
+	s, err := r.Reserve("a.bin", 10, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, binding, err := r.BindDetachable(s.Slug, s.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, binding
+}
+
+// TestRegistryDetachDisabled: senza tolleranza Detach non fa nulla e il chiamante termina la
+// sessione; un secondo aggancio con il vecchio ancora presente è rifiutato, come sempre.
+func TestRegistryDetachDisabled(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	s, binding := reservedBound(t, r)
+	if r.Detach(s, binding) {
+		t.Fatal("Detach senza tolleranza deve riportare false")
+	}
+	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("secondo Bind: %v, atteso ErrNotFound", err)
+	}
+}
+
+// TestRegistryDetachRebind: il mittente caduto resta in tolleranza, un ricevente può reclamare
+// il link e il mittente che torna con il token riaggancia la sessione.
+func TestRegistryDetachRebind(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Hour)
+	s, binding := reservedBound(t, r)
+	if !r.Detach(s, binding) {
+		t.Fatal("Detach con tolleranza deve riportare true")
+	}
+	select {
+	case <-binding:
+	default:
+		t.Fatal("il canale dell'aggancio non è chiuso dopo Detach")
+	}
+	if !s.Away() || r.Len() != 1 {
+		t.Fatalf("Away=%v, sessioni %d: attesa sessione viva senza mittente", s.Away(), r.Len())
+	}
+	if !r.Detach(s, binding) {
+		t.Fatal("secondo Detach: atteso true (già in tolleranza)")
+	}
+	if _, err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("Peek in tolleranza: %v", err)
+	}
+	// Il ricevente reclama mentre il mittente è assente: attende nel canale.
+	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
+		t.Fatalf("Claim in tolleranza: %v", err)
+	}
+	if _, _, err := r.BindDetachable(s.Slug, strings.Repeat("0", 32)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind con token errato: %v", err)
+	}
+	s2, binding2, err := r.BindDetachable(s.Slug, s.Token)
+	if err != nil || s2 != s {
+		t.Fatalf("riaggancio: %v", err)
+	}
+	if s.Away() {
+		t.Fatal("Away dopo il riaggancio")
+	}
+	select {
+	case rcv := <-s.Attached():
+		if rcv == nil {
+			t.Fatal("ricevente nullo")
+		}
+	default:
+		t.Fatal("il ricevente reclamato in tolleranza non è in coda per il nuovo aggancio")
+	}
+	// Un Detach del vecchio aggancio non tocca il nuovo.
+	if !r.Detach(s, binding) || s.Away() {
+		t.Fatal("Detach di un aggancio sostituito ha tolto il mittente nuovo")
+	}
+	select {
+	case <-binding2:
+		t.Fatal("il nuovo aggancio è stato chiuso dal Detach del vecchio")
+	default:
+	}
+}
+
+// TestRegistryBindTakeover: il mittente che torna prima che il server veda cadere il vecchio
+// aggancio lo sostituisce; a relay iniziato no.
+func TestRegistryBindTakeover(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Hour)
+	s, old := reservedBound(t, r)
+	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
+	if err != nil {
+		t.Fatalf("Bind sostitutivo: %v", err)
+	}
+	select {
+	case <-old:
+	default:
+		t.Fatal("il vecchio aggancio non è stato chiuso")
+	}
+	s.Start()
+	if _, _, err := r.BindDetachable(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind a relay iniziato: %v, atteso ErrNotFound", err)
+	}
+	if r.Detach(s, fresh) {
+		t.Fatal("Detach a relay iniziato deve riportare false")
+	}
+}
+
+// TestRegistryGraceExpires: scaduta la tolleranza il link si chiude come mittente caduto e la
+// funzione registrata viene chiamata; un ricevente in attesa vede la sessione finita.
+func TestRegistryGraceExpires(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(100 * time.Millisecond)
+	expired := make(chan *Session, 1)
+	r.OnGraceExpired(func(s *Session) { expired <- s })
+	s, binding := reservedBound(t, r)
+	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Detach(s, binding) {
+		t.Fatal("Detach: atteso true")
+	}
+	select {
+	case <-expired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tolleranza non scaduta entro 3 s")
+	}
+	select {
+	case <-s.Finished():
+	default:
+		t.Fatal("Finished non chiuso alla scadenza della tolleranza")
+	}
+	if !errors.Is(s.Err(), ErrSenderGone) || r.Len() != 0 {
+		t.Fatalf("Err %v, sessioni %d", s.Err(), r.Len())
+	}
+	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrGone) {
+		t.Fatalf("Peek dopo la scadenza: %v", err)
+	}
+}
+
+// TestRegistryGraceRebindStopsTimer: il riaggancio ferma la scadenza della tolleranza.
+func TestRegistryGraceRebindStopsTimer(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(150 * time.Millisecond)
+	s, binding := reservedBound(t, r)
+	r.Detach(s, binding)
+	if _, _, err := r.BindDetachable(s.Slug, s.Token); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if r.Len() != 1 || s.Err() != nil {
+		t.Fatalf("sessioni %d, Err %v: il riaggancio non ha fermato la scadenza", r.Len(), s.Err())
+	}
+}

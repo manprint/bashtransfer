@@ -12,6 +12,7 @@ services:
       BASHT_AUTH_PASSWORD: ${BASHT_AUTH_PASSWORD:-}
       BASHT_WAIT_TIMEOUT: ${BASHT_WAIT_TIMEOUT:-}
       BASHT_IDLE_TIMEOUT: ${BASHT_IDLE_TIMEOUT:-}
+      BASHT_SENDER_GRACE: ${BASHT_SENDER_GRACE:-}
       BASHT_MAX_SESSIONS: ${BASHT_MAX_SESSIONS:-}
       BASHT_BUF_SIZE: ${BASHT_BUF_SIZE:-}
       # JSON: un oggetto per riga, pronto per docker logs | jq o per un raccoglitore di log.

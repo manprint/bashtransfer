@@ -144,19 +144,22 @@ Nella pagina di cortesia, sotto il titolo, un riquadro accetta un file trascinat
 
 La pagina va tenuta aperta fino alla fine: chiudendola, il browser chiede conferma. **Cancel** e la chiusura della pagina chiudono subito il link: un ricevente che lo apre dopo vede "Sender stopped" (410), uno che sta scaricando viene interrotto. Se invece cade la rete del mittente, il link si chiude quando il server se ne accorge (vedi sotto e [Limiti e sicurezza](#limiti-e-sicurezza)).
 
+**Stesso telefono: tolleranza del mittente (`BASHT_SENDER_GRACE`).** Su Android, quando il mittente passa a un'altra app per aprire il link (per esempio da Chrome a Brave), il sistema sospende la rete di Chrome dopo pochi secondi: la connessione cade prima del ricevente e il link si chiude. Con `BASHT_SENDER_GRACE=120` (secondi) un mittente dal browser caduto prima che un ricevente inizi il download non chiude più il link: la prenotazione resta viva per 120 secondi. Tornando alla pagina, questa riapre lo stream e ripete il `PUT` con lo stesso token, e il trasferimento riparte. Il ricevente che nel frattempo preme **Download** in un browser riceve subito l'header del file (il browser lo tratta come download in corso, anche con l'app in secondo piano) e i dati partono quando il mittente è tornato; un ricevente da terminale resta in attesa. Se il mittente non torna entro il tempo impostato, il link si chiude come per un mittente caduto ("Sender stopped"). Variabile vuota o `0`: nessuna tolleranza, comportamento di sempre. **Non funziona** se il sistema termina il processo del browser (il file scelto non esiste più) o se il mittente non torna in primo piano. Cancel e la chiusura della pagina chiudono subito il link anche con la tolleranza. Una caduta durante il download non è recuperabile: il trasferimento è interrotto come sempre.
+
 Con `BASHT_AUTH_USER` impostato il browser chiede utente e password con la sua finestra di login; se l'utente annulla, la pagina mostra "This server requires a login to send files.".
 
 Protocollo (per chi scrive un client):
 
 - `POST /`, `Content-Type: application/json`, body `{"name":"file.zip","size":1234}` (al massimo 4096 byte; `size` obbligatorio e non negativo): richiede Basic auth come il `PUT` del terminale. Risponde `200` con uno stream NDJSON (`application/x-ndjson`), una riga JSON per evento, aperto per tutto il trasferimento:
-  - la prenotazione: `{"slug","url","token","commands":[{"label","line"}...]}`;
+  - la prenotazione: `{"slug","url","token","commands":[{"label","line"}...],"grace":S}` (`grace`, in secondi, c'è solo con `BASHT_SENDER_GRACE`);
   - `{"event":"waiting"}` ogni secondo finché nessun ricevente si collega;
   - `{"event":"attached"}` quando il ricevente si collega;
   - `{"event":"progress","bytes":N}` con i byte consegnati al ricevente, ogni 500 ms se cambiano e comunque ogni secondo;
   - l'esito, ultima riga: `{"outcome":"ok"|"expired"|"receiver_gone"|"idle"|"length_mismatch"|"sender_gone","bytes":N,"seconds":S}`.
 - `PUT /<slug>` con l'header `X-Bashtransfer-Token: <token>` e il body di esattamente `size` byte: va iniziato entro 30 secondi dalla prenotazione. Il token sostituisce la Basic auth. Risponde con lo stesso esito in JSON (su HTTP/1 il browser lo legge solo se ha inviato tutto il body: l'esito affidabile è quello dello stream). Token errato: `404`; lunghezza diversa: `400`.
+- Con `BASHT_SENDER_GRACE`: `POST /` con `{"resume":"<slug>"}` e l'header `X-Bashtransfer-Token` riapre lo stream di una prenotazione viva, con la prenotazione come prima riga (`404` se lo slug è chiuso, il token è errato o la tolleranza è disattivata). La caduta dell'ultimo stream, o del `PUT`, prima dell'inizio del relay mette il mittente in tolleranza invece di chiudere il link; un nuovo `PUT` con lo stesso token riaggancia la sessione, anche se il server non ha ancora visto cadere il vecchio (che viene sostituito), purché il relay non sia iniziato.
 - `DELETE /<slug>` con lo stesso header: chiude il link e interrompe il trasferimento (`204`; `404` se il token è errato o la sessione è già conclusa). È quello che fa la pagina con Cancel o alla chiusura (`fetch` con `keepalive`).
-- La chiusura dello stream NDJSON chiude il link. Se il `DELETE` non parte ma il browser chiude la connessione (processo terminato, scheda chiusa senza `pagehide`), il server se ne accorge alla prima scrittura fallita: subito con connessione diretta, in circa 3,5 secondi dietro Apache (misurato con Apache 2.4.69: Apache segnala la chiusura del client al backend solo dopo alcune scritture fallite, per questo lo stream scrive almeno una riga al secondo). Se la rete del mittente cade senza chiudere la connessione (nessun FIN o RST), le righe dello stream restano nei buffer TCP: il link si chiude alla scadenza della ritrasmissione TCP, a `BASHT_WAIT_TIMEOUT` o, durante il trasferimento, a `BASHT_IDLE_TIMEOUT`, come per un mittente curl.
+- La chiusura dello stream NDJSON chiude il link (senza `BASHT_SENDER_GRACE`; con la tolleranza mette il mittente in attesa di un riaggancio, vedi sopra). Se il `DELETE` non parte ma il browser chiude la connessione (processo terminato, scheda chiusa senza `pagehide`), il server se ne accorge alla prima scrittura fallita: subito con connessione diretta, in circa 3,5 secondi dietro Apache (misurato con Apache 2.4.69: Apache segnala la chiusura del client al backend solo dopo alcune scritture fallite, per questo lo stream scrive almeno una riga al secondo). Se la rete del mittente cade senza chiudere la connessione (nessun FIN o RST), le righe dello stream restano nei buffer TCP: il link si chiude alla scadenza della ritrasmissione TCP, a `BASHT_WAIT_TIMEOUT` o, durante il trasferimento, a `BASHT_IDLE_TIMEOUT`, come per un mittente curl.
 
 Il token è casuale (128 bit), confrontato in tempo costante, e viaggia in un header e non nella query, che i proxy registrano nei log. `POST /` richiede JSON e `PUT`/`DELETE` del browser un header personalizzato: un altro sito non può inviarli senza un preflight CORS, che il server non autorizza.
 
@@ -183,6 +186,7 @@ Tutte le variabili sono opzionali. Un valore vuoto equivale a non impostarlo.
 | `BASHT_AUTH_USER` | vuoto | Utente per l'upload. Va impostato insieme a `BASHT_AUTH_PASSWORD`. |
 | `BASHT_AUTH_PASSWORD` | vuoto | Password per l'upload. |
 | `BASHT_WAIT_TIMEOUT` | `1h` | Quanto il mittente può attendere un ricevente prima che lo slug scada. |
+| `BASHT_SENDER_GRACE` | vuoto (`0`) | Secondi interi (0–86400). Se > 0, un mittente dal browser caduto prima del ricevente (tipicamente l'app in secondo piano su un telefono) mantiene il link vivo per questo tempo e può riagganciarsi (vedi "Invio dal browser"). Vuoto o `0`: il link si chiude subito, come sempre. |
 | `BASHT_IDLE_TIMEOUT` | `2m` | Interruzione del relay se il mittente non invia byte per questo tempo, o se il ricevente non accetta una singola scrittura entro questo tempo (minimo `1s`). |
 | `BASHT_MAX_SESSIONS` | `1000` | Numero massimo di slug attivi contemporaneamente. |
 | `BASHT_BUF_SIZE` | `262144` | Dimensione del buffer di copia, tra 4096 e 4194304 byte. Il default 256 KiB è il buffer con il throughput assoluto più alto del relay in tutte e quattro le sessioni. |
@@ -344,11 +348,14 @@ Una riga per evento su stderr, nel formato di `BASHT_LOG_FORMAT`. Ogni riga ha `
 
 | Evento (`msg`) | Livello | Quando | Campi |
 |---|---|---|---|
-| `server_start` | INFO | avvio | `listen`, `public_url`, `auth` (bool), `wait_timeout`, `idle_timeout`, `max_sessions`, `buf_size`, `log_level`, `go`, `gomaxprocs` |
+| `server_start` | INFO | avvio | `listen`, `public_url`, `auth` (bool), `wait_timeout`, `idle_timeout`, `sender_grace`, `max_sessions`, `buf_size`, `log_level`, `go`, `gomaxprocs` |
 | `server_listening` | INFO | porta aperta | `addr` |
 | `upload_reserved` | DEBUG | invio dal browser prenotato (`POST /`) | `id`, `length` |
 | `upload_accepted` | DEBUG | sessione creata, comandi inviati; per il browser, inizio del `PUT` | `id`, `length` (-1 se ignota) |
 | `upload_cancelled` | DEBUG | invio dal browser annullato (`DELETE`) | `id` |
+| `upload_resumed` | INFO | il mittente dal browser ha riaperto lo stream dopo una caduta (`BASHT_SENDER_GRACE`) | `id` |
+| `sender_detached` | INFO | il mittente dal browser è caduto prima del ricevente e il link resta vivo per la tolleranza | `id`, `wait_s`, `grace_s` |
+| `sender_grace_expired` | INFO | la tolleranza è scaduta senza che il mittente tornasse: il link si chiude | `id`, `wait_s` |
 | `download_claimed` | DEBUG | un ricevente ha reclamato lo slug | `id` |
 | `receiver_attached` | DEBUG | il relay inizia | `id`, `wait_s` |
 | `transfer` | INFO, WARN se `aborted` | fine di ogni sessione, una volta | `id`, `outcome`, `bytes`, `length` (se nota), `wait_s`, `transfer_s` e `rate_mbs` (se un ricevente si è agganciato), `err` (se presente) |

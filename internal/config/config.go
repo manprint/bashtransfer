@@ -14,6 +14,9 @@ const (
 	minBufSize  = 4096
 	maxBufSize  = 4194304
 	minIdleTime = time.Second
+	// maxSenderGraceSeconds (un giorno) evita un valore che sfora time.Duration o tiene sessioni
+	// orfane oltre ogni scopo.
+	maxSenderGraceSeconds = 86400
 )
 
 // Config è la configurazione validata del server.
@@ -24,8 +27,11 @@ type Config struct {
 	AuthPassword string
 	WaitTimeout  time.Duration
 	IdleTimeout  time.Duration
-	MaxSessions  int
-	BufSize      int
+	// SenderGrace, se > 0, tiene viva per quel tempo la prenotazione di un mittente dal browser
+	// caduto prima del ricevente (BASHT_SENDER_GRACE, secondi). 0 la disattiva.
+	SenderGrace time.Duration
+	MaxSessions int
+	BufSize     int
 	// LogFormat è "text" (logfmt, una riga chiave=valore) o "json" (un oggetto per riga).
 	LogFormat string
 	LogLevel  slog.Level
@@ -77,6 +83,15 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("BASHT_IDLE_TIMEOUT non valida (minimo %s): %q", minIdleTime, v)
 		}
 		cfg.IdleTimeout = d
+	}
+
+	// Secondi interi; vuota o 0 disattiva la tolleranza (comportamento di sempre).
+	if v := getenv("BASHT_SENDER_GRACE"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 || n > maxSenderGraceSeconds {
+			return Config{}, fmt.Errorf("BASHT_SENDER_GRACE non valida (secondi interi tra 0 e %d): %q", maxSenderGraceSeconds, v)
+		}
+		cfg.SenderGrace = time.Duration(n) * time.Second
 	}
 
 	if v := getenv("BASHT_MAX_SESSIONS"); v != "" {

@@ -44,6 +44,8 @@ type pageData struct {
 	// download
 	Name, Size string
 	Commands   []command
+	// Away: il mittente non è connesso ma il link resta in tolleranza (BASHT_SENDER_GRACE).
+	Away bool
 	// message
 	Heading, Text string
 }
@@ -132,6 +134,7 @@ func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	d := pageData{Title: "Download · Bashtransfer", NoIndex: true, Name: s.Name, Size: humanSize(s.Length)}
+	d.Away = h.reg.SenderGrace() > 0 && s.Away()
 	if base, ok := h.baseURL(r); ok {
 		d.Commands = receiverCommands(base + "/" + id)
 	}

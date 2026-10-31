@@ -6,6 +6,9 @@
     <dt>Size</dt><dd>{{.Size}}</dd>
   </dl>
   <form id="dl" method="post"><button class="primary" type="submit">Download</button></form>
+  {{- if .Away}}
+  <p class="muted" id="dl-away">The sender is not connected right now, perhaps because their phone is in the background. You can press Download: the file starts when the sender is back.</p>
+  {{- end}}
   <p class="muted" id="dl-status" role="status">This link works for one download only: once you press Download, it is used.</p>
 </section>
 {{- if .Commands}}

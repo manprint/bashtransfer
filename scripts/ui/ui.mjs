@@ -1,6 +1,7 @@
 // Test frontend di bashtransfer con Playwright (Chromium): pagine, invio dal browser, download dalla
 // pagina, esiti e annullamento. Si lancia con scripts/ui/run.sh, che avvia i server.
-// Env: BASE (server, attesa lunga), BASE_SHORT (attesa 3s), BASE_AUTH (Basic auth u:p), OUT (cartella
+// Env: BASE (server, attesa lunga), BASE_SHORT (attesa 3s), BASE_AUTH (Basic auth u:p), BASE_GRACE
+// (BASHT_SENDER_GRACE=8, tolleranza del mittente), OUT (cartella
 // vuota per file e screenshot), TAG (nome della prova), ONLY (regex dei nomi dei test), CHROME
 // (eseguibile Chromium al posto di quello installato da Playwright), EXCLUDE_HOSTS (host raggiungibili
 // oltre a 127.0.0.1 e localhost, separati da virgola).
@@ -9,11 +10,12 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import net from 'node:net';
 
-for (const k of ['BASE', 'BASE_SHORT', 'BASE_AUTH', 'OUT']) {
+for (const k of ['BASE', 'BASE_SHORT', 'BASE_AUTH', 'BASE_GRACE', 'OUT']) {
   if (!process.env[k]) { console.error(`${k} non impostata: usare scripts/ui/run.sh`); process.exit(2); }
 }
-const { BASE, BASE_SHORT, BASE_AUTH, OUT } = process.env;
+const { BASE, BASE_SHORT, BASE_AUTH, BASE_GRACE, OUT } = process.env;
 const TAG = process.env.TAG || 'direct';
 const ONLY = process.env.ONLY ? new RegExp(process.env.ONLY) : null;
 fs.mkdirSync(OUT, { recursive: true });
@@ -83,6 +85,25 @@ async function newPage(opts = {}) {
   page.on('pageerror', (e) => page.errors.push(e.message));
   return page;
 }
+// Proxy TCP davanti a target che taglia le connessioni su comando, come un telefono che perde la
+// rete: sever() chiude tutte le connessioni aperte, block impedisce di aprirne di nuove.
+async function severProxy(target) {
+  const t = new URL(target);
+  const socks = new Set();
+  const px = { block: false, sever() { for (const c of socks) c.destroy(); socks.clear(); } };
+  const srv = net.createServer((c) => {
+    if (px.block) { c.destroy(); return; }
+    const up = net.connect(+t.port, t.hostname);
+    for (const x of [c, up]) { socks.add(x); x.on('error', () => {}); x.on('close', () => { socks.delete(x); c.destroy(); up.destroy(); }); }
+    c.pipe(up);
+    up.pipe(c);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  px.url = `http://127.0.0.1:${srv.address().port}`;
+  px.close = () => { px.sever(); srv.close(); };
+  return px;
+}
+
 // allow: errori attesi, per esempio il caricamento di una pagina 404/410 o il PUT interrotto.
 function noErrors(page, what, allow) {
   const errs = page.errors.filter((e) => !(allow && allow.test(e)));
@@ -444,6 +465,95 @@ await test('receiver gone reported to the browser sender', async () => {
   await page.screenshot({ path: path.join(OUT, 'upload-receiver-gone.png'), fullPage: true });
   noErrors(page, 'receiver gone', PUT_FAILED);
   await page.context().close();
+});
+
+// Tolleranza del mittente (BASHT_SENDER_GRACE=8 su BASE_GRACE). La pagina del mittente passa da un
+// proxy che taglia le connessioni, come un telefono che perde la rete in secondo piano.
+async function graceSender(px, name, size) {
+  const src = mkfile(name, size);
+  const page = await newPage();
+  await page.goto(px.url + '/');
+  await page.setInputFiles('#file', src);
+  await page.waitForSelector('#x-links:not([hidden])');
+  const url = (await linkRows(page))[3].line;
+  assert(url.startsWith(px.url + '/'), `link ${url}`);
+  await page.evaluate(() => {
+    window.__st = [];
+    new MutationObserver(() => window.__st.push(document.getElementById('x-status').textContent))
+      .observe(document.getElementById('x-status'), { childList: true, characterData: true, subtree: true });
+  });
+  return { src, page, url, direct: url.replace(px.url, BASE_GRACE) };
+}
+const WAITING = 'Waiting for the receiver to open the link…';
+
+await test('sender grace: the page reconnects and a curl receiver gets the file', async () => {
+  const px = await severProxy(BASE_GRACE);
+  try {
+    const s = await graceSender(px, 'grace1.bin', 24 << 20);
+    await sleep(1000);
+    px.sever();
+    await s.page.waitForFunction((w) => { const a = window.__st; return a.some((x) => /reconnecting/.test(x)) && a[a.length - 1] === w; }, WAITING, { timeout: 15000 });
+    const rcv = sh(`curl -sS -f -OJ "${s.direct}"`, path.join(OUT, 'grace1'));
+    const r = await rcv.done;
+    assert(r.code === 0, `curl ${r.code} ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(OUT, 'grace1', 'grace1.bin'))) === sha(fs.readFileSync(s.src)), 'file ricevuto diverso');
+    const res = await waitResult(s.page, 20000);
+    assert(res.cls === 'result ok' && /^Done: the receiver got the whole file/.test(res.text), `esito ${JSON.stringify(res)}`);
+    noErrors(s.page, 'grace reconnect', PUT_FAILED);
+    await s.page.context().close();
+  } finally { px.close(); }
+});
+
+await test('sender grace: a browser receiver pressing Download while the sender is away', async () => {
+  const px = await severProxy(BASE_GRACE);
+  try {
+    const s = await graceSender(px, 'grace2.bin', 24 << 20);
+    await sleep(1000);
+    // Nessun nuovo collegamento: il mittente resta assente finché il ricevente non ha premuto Download.
+    px.block = true;
+    px.sever();
+    const rp = await newPage();
+    let away = false;
+    for (let i = 0; i < 30 && !away; i++) {
+      const resp = await rp.goto(s.direct);
+      assert(resp.status() === 200, `pagina ${resp.status()}`);
+      away = (await rp.$('#dl-away')) !== null;
+      if (!away) await sleep(500);
+    }
+    assert(away, 'la pagina di download non avvisa che il mittente è assente');
+    const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: 5000 }), rp.click('#dl button')]);
+    px.block = false;
+    const saved = path.join(OUT, 'recv-grace2.bin');
+    await dl.saveAs(saved);
+    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file ricevuto diverso');
+    const res = await waitResult(s.page, 20000);
+    assert(res.cls === 'result ok', `esito ${JSON.stringify(res)}`);
+    await rp.context().close();
+    await s.page.context().close();
+  } finally { px.close(); }
+});
+
+await test('sender grace: the link closes if the sender does not come back in time', async () => {
+  const px = await severProxy(BASE_GRACE);
+  try {
+    const s = await graceSender(px, 'grace3.bin', 1 << 20);
+    await sleep(1000);
+    px.block = true;
+    px.sever();
+    const res = await waitResult(s.page, 20000);
+    assert(res.cls === 'result err' && /no longer works/.test(res.text), `esito ${JSON.stringify(res)}`);
+    px.block = false;
+    const rp = await newPage();
+    let gone = null;
+    for (let i = 0; i < 40 && !gone; i++) {
+      const resp = await rp.goto(s.direct);
+      if (resp.status() === 410) gone = await rp.textContent('h2');
+      else await sleep(500);
+    }
+    assert(gone === 'Sender stopped', `pagina dopo la scadenza: ${gone}`);
+    await rp.context().close();
+    await s.page.context().close();
+  } finally { px.close(); }
 });
 
 await test('unknown link page', async () => {

@@ -127,3 +127,23 @@ func TestLoadLogging(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigSenderGrace: secondi interi; assente o 0 disattiva la tolleranza.
+func TestConfigSenderGrace(t *testing.T) {
+	for _, v := range []string{"", "0"} {
+		cfg, err := Load(env(map[string]string{"BASHT_SENDER_GRACE": v}))
+		if err != nil || cfg.SenderGrace != 0 {
+			t.Errorf("BASHT_SENDER_GRACE=%q: %v %v, attesa tolleranza disattivata", v, cfg.SenderGrace, err)
+		}
+	}
+	cfg, err := Load(env(map[string]string{"BASHT_SENDER_GRACE": "120"}))
+	if err != nil || cfg.SenderGrace != 120*time.Second {
+		t.Errorf("BASHT_SENDER_GRACE=120: %v %v", cfg.SenderGrace, err)
+	}
+	for _, v := range []string{"-1", "1.5", "2m", "abc", "86401"} {
+		_, err := Load(env(map[string]string{"BASHT_SENDER_GRACE": v}))
+		if err == nil || !strings.Contains(err.Error(), "BASHT_SENDER_GRACE") {
+			t.Errorf("BASHT_SENDER_GRACE=%s: errore %v, atteso errore con nome variabile", v, err)
+		}
+	}
+}

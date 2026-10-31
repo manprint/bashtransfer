@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"bashtransfer/internal/relay"
@@ -20,7 +21,10 @@ type responseReceiver struct {
 	// writeTimeout, se > 0, è il tempo massimo per una singola scrittura verso il ricevente:
 	// un ricevente connesso che non legge bloccherebbe altrimenti mittente e sessione senza fine.
 	writeTimeout time.Duration
-	started      bool
+	// started è scritto sotto mu: start può arrivare dal gestore del ricevente (header anticipato con
+	// il mittente assente) e dalla goroutine del mittente.
+	mu      sync.Mutex
+	started bool
 }
 
 func newResponseReceiver(w http.ResponseWriter, writeTimeout time.Duration) *responseReceiver {
@@ -29,6 +33,8 @@ func newResponseReceiver(w http.ResponseWriter, writeTimeout time.Duration) *res
 
 // start imposta gli header di download e invia 200 con flush.
 func (r *responseReceiver) start(name string, length int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.started {
 		return
 	}
