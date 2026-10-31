@@ -488,8 +488,9 @@ const WAITING = 'Waiting for the receiver to open the link…';
 
 await test('sender grace: the page reconnects and a curl receiver gets the file', async () => {
   const px = await severProxy(BASE_GRACE);
+  let s;
   try {
-    const s = await graceSender(px, 'grace1.bin', 24 << 20);
+    s = await graceSender(px, 'grace1.bin', 24 << 20);
     await sleep(1000);
     px.sever();
     await s.page.waitForFunction((w) => { const a = window.__st; return a.some((x) => /reconnecting/.test(x)) && a[a.length - 1] === w; }, WAITING, { timeout: 15000 });
@@ -500,50 +501,55 @@ await test('sender grace: the page reconnects and a curl receiver gets the file'
     const res = await waitResult(s.page, 20000);
     assert(res.cls === 'result ok' && /^Done: the receiver got the whole file/.test(res.text), `esito ${JSON.stringify(res)}`);
     noErrors(s.page, 'grace reconnect', PUT_FAILED);
-    await s.page.context().close();
-  } finally { px.close(); }
+  } finally { px.close(); if (s) await s.page.context().close().catch(() => {}); }
 });
 
 await test('sender grace: a browser receiver pressing Download while the sender is away', async () => {
   const px = await severProxy(BASE_GRACE);
+  let s, rp;
   try {
-    const s = await graceSender(px, 'grace2.bin', 24 << 20);
+    s = await graceSender(px, 'grace2.bin', 24 << 20);
     await sleep(1000);
     // Nessun nuovo collegamento: il mittente resta assente finché il ricevente non ha premuto Download.
     px.block = true;
     px.sever();
-    const rp = await newPage();
+    rp = await newPage();
     let away = false;
-    for (let i = 0; i < 30 && !away; i++) {
+    for (let i = 0; i < 40 && !away; i++) {
       const resp = await rp.goto(s.direct);
       assert(resp.status() === 200, `pagina ${resp.status()}`);
       away = (await rp.$('#dl-away')) !== null;
       if (!away) await sleep(500);
     }
     assert(away, 'la pagina di download non avvisa che il mittente è assente');
-    const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: 5000 }), rp.click('#dl button')]);
+    // Diretto: l'header parte subito, il download del browser inizia con il mittente ancora assente.
+    // Dietro Apache il proxy può trattenere l'header fino ai primi dati: si sblocca il mittente subito.
+    const early = TAG === 'direct';
+    const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: early ? 5000 : 30000 }), rp.click('#dl button').then(() => { if (!early) px.block = false; })]);
     px.block = false;
     const saved = path.join(OUT, 'recv-grace2.bin');
     await dl.saveAs(saved);
     assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file ricevuto diverso');
     const res = await waitResult(s.page, 20000);
     assert(res.cls === 'result ok', `esito ${JSON.stringify(res)}`);
-    await rp.context().close();
-    await s.page.context().close();
-  } finally { px.close(); }
+  } finally {
+    px.close();
+    for (const p of [rp, s && s.page]) if (p) await p.context().close().catch(() => {});
+  }
 });
 
 await test('sender grace: the link closes if the sender does not come back in time', async () => {
   const px = await severProxy(BASE_GRACE);
+  let s, rp;
   try {
-    const s = await graceSender(px, 'grace3.bin', 1 << 20);
+    s = await graceSender(px, 'grace3.bin', 1 << 20);
     await sleep(1000);
     px.block = true;
     px.sever();
     const res = await waitResult(s.page, 20000);
     assert(res.cls === 'result err' && /no longer works/.test(res.text), `esito ${JSON.stringify(res)}`);
     px.block = false;
-    const rp = await newPage();
+    rp = await newPage();
     let gone = null;
     for (let i = 0; i < 40 && !gone; i++) {
       const resp = await rp.goto(s.direct);
@@ -551,9 +557,10 @@ await test('sender grace: the link closes if the sender does not come back in ti
       else await sleep(500);
     }
     assert(gone === 'Sender stopped', `pagina dopo la scadenza: ${gone}`);
-    await rp.context().close();
-    await s.page.context().close();
-  } finally { px.close(); }
+  } finally {
+    px.close();
+    for (const p of [rp, s && s.page]) if (p) await p.context().close().catch(() => {});
+  }
 });
 
 await test('unknown link page', async () => {
