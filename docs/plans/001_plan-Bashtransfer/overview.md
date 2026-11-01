@@ -5,221 +5,221 @@ Execution starts at [STATE.md](STATE.md); all live readiness and progress are th
 
 ## Goal and reference scenario
 
-Servizio relay a riga di comando, da deployare su una VM con Docker dietro nginx (TLS terminato da nginx). Il server non conserva file: riceve il body di un upload e lo inoltra in streaming al primo download che usa lo slug.
+Command-line relay service, to be deployed on a VM with Docker behind nginx (TLS terminated by nginx). The server stores no files: it receives the body of an upload and forwards it in streaming to the first download that uses the slug.
 
-Scenario di riferimento (RS-1):
-1. Mittente: `curl -T myfile.zip https://bashtransfer.mydomain.it` (istanza locale di test: `http://127.0.0.1:8080`).
-2. Il server risponde subito con due comandi testuali (curl e wget) contenenti uno slug di 10 caratteri. Il mittente resta in attesa.
-3. Ricevente: esegue `curl -o "myfile.zip" "<base>/<slug>"`. Il trasferimento parte; il file ricevuto ha sha256 uguale a quello inviato.
-4. Un secondo download con lo stesso slug ottiene `410 Gone`.
+Reference scenario (RS-1):
+1. Sender: `curl -T myfile.zip https://bashtransfer.mydomain.it` (local test instance: `http://127.0.0.1:8080`).
+2. The server immediately replies with two text commands (curl and wget) containing a 10-character slug. The sender stays waiting.
+3. Receiver: runs `curl -o "myfile.zip" "<base>/<slug>"`. The transfer starts; the received file has the same sha256 as the one sent.
+4. A second download with the same slug gets `410 Gone`.
 
-Scenario di riferimento (RS-2, streaming da pipe; aggiunto in revisione 2 da Specifiche):
-1. Mittente: `sudo tar -cpzf - mydir | curl -T - https://bashtransfer.mydomain.it/mydir.tgz`. Il body arriva da stdin con lunghezza ignota (`Transfer-Encoding: chunked`); il server non lo salva su disco.
-2. Il server risponde subito con i comandi curl e wget per `mydir.tgz` (nome dal path) e il mittente resta in attesa mentre tar produce output.
-3. Ricevente: `curl -o "mydir.tgz" "<base>/<slug>"`; sha256 del file ricevuto uguale al tar prodotto.
+Reference scenario (RS-2, streaming from a pipe; added in revision 2 from Specifiche):
+1. Sender: `sudo tar -cpzf - mydir | curl -T - https://bashtransfer.mydomain.it/mydir.tgz`. The body arrives from stdin with unknown length (`Transfer-Encoding: chunked`); the server does not save it to disk.
+2. The server immediately replies with the curl and wget commands for `mydir.tgz` (name taken from the path) and the sender stays waiting while tar produces output.
+3. Receiver: `curl -o "mydir.tgz" "<base>/<slug>"`; the sha256 of the received file equals that of the tar produced.
 
-Forma esatta di RS-1 (da Specifiche): URL senza `/` finale (`https://bashtransfer.mydomain.it`). Verificata in R4 (0.3).
+Exact form of RS-1 (from Specifiche): URL without a trailing `/` (`https://bashtransfer.mydomain.it`). Verified in R4 (0.3).
 
-Esclusioni (fuori scope):
-- Gestione certificati TLS (demandata a nginx).
-- Persistenza dei file su disco o in database.
-- Più destinatari per lo stesso slug.
-- Push, deploy su host remoto, pubblicazione di immagini. Nessuna operazione verso rete esterna senza autorizzazione esplicita.
-- Upload multipart/form o POST: solo PUT.
-- Rate limiting e quote per IP (possibile lavoro futuro).
+Exclusions (out of scope):
+- TLS certificate management (delegated to nginx).
+- Persistence of files on disk or in a database.
+- Multiple recipients for the same slug.
+- Push, deployment to a remote host, publishing of images. No operation towards the external network without explicit authorization.
+- Multipart/form or POST uploads: PUT only.
+- Rate limiting and per-IP quotas (possible future work).
 
-Vincoli: sandbox senza accesso di rete esterno (CLAUDE.md utente); Docker e nginx devono essere verificati localmente o dopo autorizzazione.
+Constraints: sandbox without external network access (user's CLAUDE.md); Docker and nginx must be verified locally or after authorization.
 
 ## Decisions
 
 | ID | Decision and consequence | Authority/source | Supersedes |
 |----|--------------------------|------------------|------------|
-| D1 | Linguaggio **Go** (toolchain minimo fissato in 0.2, non sotto la versione con `http.ResponseController.EnableFullDuplex`, vedi R3). Server a binario statico, `CGO_ENABLED=0`. Il relay è limitato dalla rete, Go con `net/http` satura la banda con poco codice. Rust scartato: prestazioni comparabili per un relay I/O-bound, costo implementativo più alto per lo stesso scope; decisione reversibile. | Supervisor, delega utente ("deci tu il migliore") | — |
-| D2 | Relay in memoria: una `session` per slug; il body viene letto in buffer fissi e scritto al ricevente con flush per blocco. Nessun file su disco. Un solo ricevente per slug. | Supervisor, da Specifiche ("solo relay") | — |
-| D3 | Slug: 10 caratteri dall'alfabeto `0-9A-Za-z` (62 simboli), generati con `crypto/rand` e rejection sampling (nessun bias modulo). In caso di collisione con una sessione viva: rigenerazione fino a 5 tentativi, poi 503. | Supervisor | — |
-| D4 | Protocollo mittente: `PUT /` oppure `PUT /<name>`. Il server crea la sessione e scrive subito la risposta `text/plain` con il blocco comandi (vedi Interfacce), usando full-duplex: risposta scritta e flushata prima di leggere il body. Il body viene letto solo quando un ricevente si aggancia. Il mittente non riceve esito finale oltre alla chiusura della connessione. | Supervisor; dipende da R1 (branch A) | — |
-| D5 | Nome file: segmento `<name>` del path se presente, altrimenti `download`. Sanitizzazione: solo basename, rimozione di caratteri di controllo, `"` e `\`, massimo 128 caratteri. Se R1 mostra che curl non invia il nome nel path con `curl -T f https://host/`, vale il branch B di R1 (vedi phase_02 e overview R1). | Supervisor; dipende da R1 | — |
-| D6 | Ricevente: `GET /<slug>`. Primo claim vince (operazione atomica nel registry). Risposta `200` con `Content-Type: application/octet-stream`, `Content-Disposition: attachment; filename="<name>"`; `Content-Length` inoltrato solo se il mittente lo ha dichiarato. Slug sconosciuto: `404`. Slug già reclamato o concluso: `410`. | Supervisor | — |
-| D7 | Attesa del ricevente: se nessun ricevente si aggancia entro `BASHT_WAIT_TIMEOUT` (default `1h`), la sessione viene rimossa e la connessione del mittente chiusa. | Supervisor | — |
-| D8 | Fallimenti: se il mittente cade durante il relay, la risposta al ricevente viene interrotta senza chiusura regolare del chunk finale (il client vede errore, nessun successo fittizio). Se il ricevente cade, la copia lato mittente fallisce e la sessione viene rimossa. Ogni sessione termina una sola volta (I-3). | Supervisor | — |
-| D9 | Basic auth opzionale, solo su `PUT`: `BASHT_AUTH_USER` e `BASHT_AUTH_PASSWORD` devono essere entrambi impostati o entrambi assenti (altrimenti errore all'avvio). Confronto con `subtle.ConstantTimeCompare` su digest SHA-256. Risposta `401` con `WWW-Authenticate: Basic`. Download `GET` sempre pubblico con slug. | Utente (Q1: solo PUT), supervisor (meccanismo) | — |
-| D10 | Configurazione solo da variabili d'ambiente; nessun file di configurazione. | Supervisor | — |
-| D11 | Limite sessioni vive `BASHT_MAX_SESSIONS` (default `1000`); oltre il limite il `PUT` riceve `503`. | Supervisor | — |
-| D12 | Il server parla HTTP semplice; TLS è terminato da nginx con blocco `stream` (rev 8: il proxy HTTP di nginx non è usato per il relay, vedi R2). `BASHT_PUBLIC_URL` è obbligatorio in compose. `X-Forwarded-Proto` e `Host` servono solo alla base URL dei comandi quando `BASHT_PUBLIC_URL` non è impostato (uso diretto senza nginx). | Supervisor | — |
-| D13 | Performance: buffer da `sync.Pool` di 256 KiB, `io.CopyBuffer`, flush per blocco, nessuna compressione, nessuna allocazione per chunk. Criterio di accettazione: throughput del relay ≥ 90% del baseline `io.CopyBuffer` diretto con stesso buffer, misurato su loopback con lo stesso host. | Supervisor | — |
-| D14 | Deploy: Dockerfile multi-stage, runtime `distroless/static:nonroot`, tag di immagine fissati. `compose.yaml` con `nginx` e `app` su rete interna; `app` non pubblica porte sull'host. | Supervisor | — |
-| D17 | Slug terminali (revisione 3): uno slug che è stato reclamato, concluso o scaduto va in una lista di tombstone per `24h` (costante, non configurabile in questa versione) e riceve `410` (D6, RS-1 passo 4). Senza tombstone `Finish` lo renderebbe `404`, in contrasto con D6. Dopo 24h lo slug è `404`. Limite di memoria: circa 100 byte per transfer nelle ultime 24h; dichiarato in 4.3. | Supervisor (correzione di contratto, requisito D6 già approvato) | 1.1 (Finish/Claim senza tombstone); 1.1 test `TestRegistryWaitTimeout`, `TestRegistryFinishOnce` |
-| D16 | Upload da stdin (RS-2): `PUT` con `Transfer-Encoding: chunked` e lunghezza ignota (`ContentLength == -1`), stesso protocollo di D4–D6, nome dal path (`PUT /mydir.tgz`). Nessun limite di dimensione lato server; la durata è limitata solo dall'inattività (D15). Vincolo: il blocco comandi arriva prima della fine di stdin (R4 caso B). | Utente (Specifiche, scenario 2), supervisor | — |
+| D1 | Language **Go** (minimum toolchain pinned in 0.2, not below the version with `http.ResponseController.EnableFullDuplex`, see R3). Statically linked binary, `CGO_ENABLED=0`. The relay is network-bound; Go with `net/http` saturates the bandwidth with little code. Rust discarded: comparable performance for an I/O-bound relay, higher implementation cost for the same scope; decision is reversible. | Supervisor, user delegation ("you decide the best one") | — |
+| D2 | In-memory relay: one `session` per slug; the body is read into fixed buffers and written to the receiver with a flush per block. No files on disk. One receiver per slug only. | Supervisor, from Specifiche ("relay only") | — |
+| D3 | Slug: 10 characters from the alphabet `0-9A-Za-z` (62 symbols), generated with `crypto/rand` and rejection sampling (no modulo bias). On collision with a live session: regeneration up to 5 attempts, then 503. | Supervisor | — |
+| D4 | Sender protocol: `PUT /` or `PUT /<name>`. The server creates the session and immediately writes the `text/plain` response with the command block (see Interfaces), using full-duplex: response written and flushed before reading the body. The body is read only when a receiver attaches. The sender receives no final outcome beyond the connection closing. | Supervisor; depends on R1 (branch A) | — |
+| D5 | File name: the `<name>` segment of the path if present, otherwise `download`. Sanitization: basename only, removal of control characters, `"` and `\`, maximum 128 characters. If R1 shows that curl does not send the name in the path with `curl -T f https://host/`, branch B of R1 applies (see phase_02 and overview R1). | Supervisor; depends on R1 | — |
+| D6 | Receiver: `GET /<slug>`. First claim wins (atomic operation in the registry). Response `200` with `Content-Type: application/octet-stream`, `Content-Disposition: attachment; filename="<name>"`; `Content-Length` forwarded only if the sender declared it. Unknown slug: `404`. Slug already claimed or concluded: `410`. | Supervisor | — |
+| D7 | Receiver wait: if no receiver attaches within `BASHT_WAIT_TIMEOUT` (default `1h`), the session is removed and the sender's connection is closed. | Supervisor | — |
+| D8 | Failures: if the sender drops during the relay, the response to the receiver is interrupted without a regular closing of the final chunk (the client sees an error, no fake success). If the receiver drops, the sender-side copy fails and the session is removed. Each session terminates only once (I-3). | Supervisor | — |
+| D9 | Optional basic auth, on `PUT` only: `BASHT_AUTH_USER` and `BASHT_AUTH_PASSWORD` must both be set or both be absent (otherwise an error at startup). Comparison with `subtle.ConstantTimeCompare` on SHA-256 digests. Response `401` with `WWW-Authenticate: Basic`. `GET` download is always public with the slug. | User (Q1: PUT only), supervisor (mechanism) | — |
+| D10 | Configuration only via environment variables; no configuration file. | Supervisor | — |
+| D11 | Live session limit `BASHT_MAX_SESSIONS` (default `1000`); above the limit `PUT` receives `503`. | Supervisor | — |
+| D12 | The server speaks plain HTTP; TLS is terminated by nginx with a `stream` block (rev 8: nginx's HTTP proxy is not used for the relay, see R2). `BASHT_PUBLIC_URL` is mandatory in compose. `X-Forwarded-Proto` and `Host` are used only for the base URL of the commands when `BASHT_PUBLIC_URL` is not set (direct use without nginx). | Supervisor | — |
+| D13 | Performance: buffers from a `sync.Pool` of 256 KiB, `io.CopyBuffer`, flush per block, no compression, no allocation per chunk. Acceptance criterion: relay throughput ≥ 90% of the direct `io.CopyBuffer` baseline with the same buffer, measured on loopback on the same host. | Supervisor | — |
+| D14 | Deploy: multi-stage Dockerfile, runtime `distroless/static:nonroot`, pinned image tags. `compose.yaml` with `nginx` and `app` on an internal network; `app` publishes no ports on the host. | Supervisor | — |
+| D17 | Terminal slugs (revision 3): a slug that has been claimed, concluded or expired goes into a tombstone list for `24h` (constant, not configurable in this version) and receives `410` (D6, RS-1 step 4). Without tombstones `Finish` would make it `404`, contrary to D6. After 24h the slug is `404`. Memory limit: about 100 bytes per transfer in the last 24h; declared in 4.3. | Supervisor (contract correction, D6 requirement already approved) | 1.1 (Finish/Claim without tombstone); 1.1 tests `TestRegistryWaitTimeout`, `TestRegistryFinishOnce` |
+| D16 | Upload from stdin (RS-2): `PUT` with `Transfer-Encoding: chunked` and unknown length (`ContentLength == -1`), same protocol as D4–D6, name from the path (`PUT /mydir.tgz`). No server-side size limit; duration is limited only by inactivity (D15). Constraint: the command block arrives before the end of stdin (R4 case B). | User (Specifiche, scenario 2), supervisor | — |
 
-Config (D10) in forma completa: `BASHT_LISTEN` (default `:8080`), `BASHT_PUBLIC_URL` (default: derivata dalla richiesta), `BASHT_AUTH_USER`, `BASHT_AUTH_PASSWORD`, `BASHT_WAIT_TIMEOUT` (default `1h`), `BASHT_MAX_SESSIONS` (default `1000`), `BASHT_BUF_SIZE` (default `262144`, valore minimo 4096).
+Config (D10) in full form: `BASHT_LISTEN` (default `:8080`), `BASHT_PUBLIC_URL` (default: derived from the request), `BASHT_AUTH_USER`, `BASHT_AUTH_PASSWORD`, `BASHT_WAIT_TIMEOUT` (default `1h`), `BASHT_MAX_SESSIONS` (default `1000`), `BASHT_BUF_SIZE` (default `262144`, minimum value 4096).
 
 ## Open questions
 
-- **Q1 — risolta dall'utente:** auth solo su `PUT` (upload con `-T`). Il download `GET /<slug>` è pubblico: lo slug è il segreto.
-- **Autorizzazioni dell'utente:** accesso di rete per documentazione nginx ufficiale (R2) e pull delle immagini base Docker pinnate (4.1, 4.2).
+- **Q1 — resolved by the user:** auth only on `PUT` (upload with `-T`). The download `GET /<slug>` is public: the slug is the secret.
+- **User authorizations:** network access for the official nginx documentation (R2) and pulling the pinned base Docker images (4.1, 4.2).
 
 No open product question. Technical choices are recorded as D1–D15.
 
 ## Architecture
 
 ```
-mittente ──PUT /<name>──▶ handler upload ─┐ crea session(slug, name, clen?)  registry (map slug→session, mutex)
-                          (full-duplex)   │ scrive comandi, attende claim    ▲
-                                          │                                 │ claim atomico (1 vincitore)
-ricevente ──GET /<slug>──▶ handler download ┘ consegna il proprio writer ────┘
+sender ──PUT /<name>──▶ upload handler ─┐ creates session(slug, name, clen?)  registry (map slug→session, mutex)
+                          (full-duplex) │ writes commands, waits for claim  ▲
+                                        │                                  │ atomic claim (1 winner)
+receiver ──GET /<slug>──▶ download handler ┘ delivers its own writer ───────┘
                           │
-                          └─ relay: io.CopyBuffer(writer, uploadBody) con buffer da sync.Pool, Flush per blocco
+                          └─ relay: io.CopyBuffer(writer, uploadBody) with buffers from sync.Pool, Flush per block
 ```
 
-Ownership: il registry è l'unico punto che muta lo stato delle sessioni. La goroutine del mittente possiede il body di upload e la copia; la goroutine del ricevente aspetta il segnale di fine. Il timeout di attesa è una goroutine per sessione con `time.Timer` gestito dal registry.
+Ownership: the registry is the only point that mutates session state. The sender's goroutine owns the upload body and the copy; the receiver's goroutine waits for the end signal. The wait timeout is one goroutine per session with a `time.Timer` managed by the registry.
 
-Stati sessione: `waiting` → `claimed` → `done` | `aborted`. Transizioni solo tramite metodi del registry, ognuna avvenuta una sola volta (I-3).
+Session states: `waiting` → `claimed` → `done` | `aborted`. Transitions only through registry methods, each happening exactly once (I-3).
 
-Package layout (tutti NEW, dettagli in phase file):
-- `cmd/bashtransfer/main.go`: bootstrap, lettura config, avvio `http.Server`.
-- `internal/config/`: parsing env e validazione.
-- `internal/slug/`: generazione slug.
-- `internal/relay/`: registry, sessioni, pool buffer, relay.
-- `internal/server/`: handler HTTP, auth, risposta testo con comandi.
+Package layout (all NEW, details in the phase file):
+- `cmd/bashtransfer/main.go`: bootstrap, config reading, starting the `http.Server`.
+- `internal/config/`: env parsing and validation.
+- `internal/slug/`: slug generation.
+- `internal/relay/`: registry, sessions, buffer pool, relay.
+- `internal/server/`: HTTP handlers, auth, text response with the commands.
 - `scripts/e2e.sh`, `scripts/bench.sh`.
-- `Dockerfile`, `compose.yaml`, `deploy/nginx/nginx.conf` (rev 8: sostituisce `bashtransfer.conf`), `README.md`, `go.mod`.
+- `Dockerfile`, `compose.yaml`, `deploy/nginx/nginx.conf` (rev 8: replaces `bashtransfer.conf`), `README.md`, `go.mod`.
 
 ## Interfaces and compatibility
 
 | Surface | Exact name/type | Default | Errors/conflicts | Compatibility |
 |---------|-----------------|---------|------------------|---------------|
-| HTTP upload | `PUT /` e `PUT /<name>`, body stream, `Content-Length` opzionale; da stdin senza lunghezza = `Transfer-Encoding: chunked` (D16) | — | `401` auth, `503` limite sessioni o collisioni slug, `405` altri metodi su path di upload | nuovo |
-| HTTP risposta upload | `200 text/plain`, due righe: `curl -o "<name>" "<base>/<slug>"` e `wget -O "<name>" "<base>/<slug>"` | — | — | nuovo; formato a righe fisse per script |
-| HTTP download | `GET /<slug>` | — | `404` slug ignoto, `410` già reclamato, concluso o scaduto (D7) | nuovo |
-| HTTP root | `GET /` testo d'uso | — | — | nuovo |
-| Env | vedi D10 | vedi D10 | config invalida → exit 1 all'avvio con messaggio su stderr | nuovo |
-| Binario | `bashtransfer` senza argomenti; SIGINT/SIGTERM → shutdown ordinato | — | — | — |
+| HTTP upload | `PUT /` and `PUT /<name>`, streamed body, optional `Content-Length`; from stdin without length = `Transfer-Encoding: chunked` (D16) | — | `401` auth, `503` session limit or slug collisions, `405` other methods on the upload path | new |
+| HTTP upload response | `200 text/plain`, two lines: `curl -o "<name>" "<base>/<slug>"` and `wget -O "<name>" "<base>/<slug>"` | — | — | new; fixed-line format for scripts |
+| HTTP download | `GET /<slug>` | — | `404` unknown slug, `410` already claimed, concluded or expired (D7) | new |
+| HTTP root | `GET /` usage text | — | — | new |
+| Env | see D10 | see D10 | invalid config → exit 1 at startup with a message on stderr | new |
+| Binary | `bashtransfer` with no arguments; SIGINT/SIGTERM → ordered shutdown | — | — | — |
 
-Errori standard: corpi di errore in testo semplice con una riga; nessun dettaglio interno (stack, path) esposto.
+Standard errors: plain-text error bodies with one line; no internal details (stack, paths) exposed.
 
 ## Phase map
 
 | Logical phase | File | Sub-phase IDs | Depends on | Assignment |
 |---------------|------|---------------|------------|------------|
 | 0 | [phase_01.md](phase_01.md) | 0.1, 0.2, 0.3 | none | agent-2 (probe, skeleton); agent-1 review |
-| 1 | [phase_02.md](phase_02.md) | 1.1, 1.2, 1.3 | 0 (0.1 per R1, 0.2 per R3) | agent-2; review agent-1 |
+| 1 | [phase_02.md](phase_02.md) | 1.1, 1.2, 1.3 | 0 (0.1 for R1, 0.2 for R3) | agent-2; review agent-1 |
 | 2 | [phase_03.md](phase_03.md) | 2.1, 2.2 | 1 | agent-2; review agent-1 |
 | 3 | [phase_04.md](phase_04.md) | 3.1 | 1 | agent-2; review agent-1 |
-| 4 | [phase_05.md](phase_05.md) | 4.1, 4.2 (residuo R2 e rete), 4.3 docs | 2, 3 | agent-2; review agent-1 |
+| 4 | [phase_05.md](phase_05.md) | 4.1, 4.2 (R2 residual and network), 4.3 docs | 2, 3 | agent-2; review agent-1 |
 
 No live status in this table.
 
 ## Reuse map
 
-Greenfield: il repository non ha codice (nessun commit, solo `Specifiche.md` non tracciato). Nessun simbolo da riusare. Riferimenti esterni alla libreria standard sono verificati localmente con `go doc` (vedi R3) e non vanno reimplementati.
+Greenfield: the repository has no code (no commits, only an untracked `Specifiche.md`). No symbols to reuse. External references to the standard library are verified locally with `go doc` (see R3) and must not be reimplemented.
 
 | Need | Path and symbol | Contract to preserve |
 |------|-----------------|----------------------|
 | Streaming HTTP | `net/http`, `http.ResponseController.EnableFullDuplex`, `http.Flusher` | D4, D6 |
-| Copia con buffer riusabile | `io.CopyBuffer`, `sync.Pool` | D13 |
-| Slug sicuro | `crypto/rand.Int` | D3 |
-| Confronto costante | `crypto/subtle.ConstantTimeCompare` | D9 |
+| Reusable buffered copy | `io.CopyBuffer`, `sync.Pool` | D13 |
+| Secure slug | `crypto/rand.Int` | D3 |
+| Constant-time comparison | `crypto/subtle.ConstantTimeCompare` | D9 |
 
 ## Research and evidence
 
-Ricerca esterna (B2) limitata: la sandbox non può accedere alla rete esterna senza autorizzazione esplicita (regole utente in CLAUDE.md). Le claim che dipendono da fonti esterne restano UNVERIFIED. Quelle verificabili localmente (curl installato, toolchain Go, binari locali) sono verificate con probe isolati fuori dal repository.
+External research (B2) is limited: the sandbox cannot access the external network without explicit authorization (user rules in CLAUDE.md). Claims that depend on external sources remain UNVERIFIED. Those verifiable locally (installed curl, Go toolchain, local binaries) are verified with isolated probes outside the repository.
 
 | ID | Question / required or optional | Evidence state | Affected decisions / units / tests |
 |----|---------------------------------|----------------|------------------------------------|
-| R1 | `curl -T <file> https://host/` (URL senza nome file): (a) il server riceve il nome nel path? (b) curl stampa la risposta del server prima della fine dell'upload? Required. | CONFIRMED (branch A) — probe locale 0.1, curl 8.18.0 | D4, D5; 0.1, 1.2, 1.3 |
-| R2 | Direttive nginx per upload/download in streaming senza buffering e body illimitato (`proxy_request_buffering off`, `proxy_buffering off`, `client_max_body_size 0`, timeout di lettura/scrittura lunghi, `proxy_http_version 1.1`). Required per 4.2. | CONFIRMED per le direttive di buffering, body e versione HTTP; `client_body_timeout` letto da nginx.org (default 60s). Superseded da rev 8: il proxy HTTP è sostituito da `stream` TLS, quindi queste direttive non sono più in uso (vedi ### R2). Timeout di proxy da portare ≥ BASHT_WAIT_TIMEOUT. | D12, D14; 4.2 sbloccata, con parametri timeout |
-| R3 | `http.ResponseController.EnableFullDuplex` disponibile dalla versione Go minima; comportamento sul body durante la scrittura della risposta. Required per D4. | CONFIRMED — fonte locale: `go doc` su go1.27.3; introduzione in go1.21 (`$GOROOT/api/go1.21.txt`). `go.mod`: `go 1.21`. | D1, D4; 0.2, 1.2 |
-| R4 | Due casi di curl: (a) `curl -T file https://host` senza `/` finale (forma di RS-1) produce path con nome del file? (b) `tar ... \| curl -T - https://host/x.tgz` stampa il blocco comandi prima della fine di stdin? Required per RS-1 e RS-2 (D16). | CONFIRMED — probe locale 0.3, curl 8.18.0: (a) path `/payload.bin` (branch A: nome preservato); (b) riga di risposta 3 ms dopo `PUT_START`, EOF stdin +3 s (branch B-OK); (c) stdin senza nome → path `/` (limitazione D5, non bloccante) | D4, D5, D16; 0.3, 1.2, 1.3 |
+| R1 | `curl -T <file> https://host/` (URL without file name): (a) does the server receive the name in the path? (b) does curl print the server's response before the end of the upload? Required. | CONFIRMED (branch A) — local probe 0.1, curl 8.18.0 | D4, D5; 0.1, 1.2, 1.3 |
+| R2 | nginx directives for streaming upload/download without buffering and unlimited body (`proxy_request_buffering off`, `proxy_buffering off`, `client_max_body_size 0`, long read/write timeouts, `proxy_http_version 1.1`). Required for 4.2. | CONFIRMED for the buffering, body and HTTP version directives; `client_body_timeout` read from nginx.org (default 60s). Superseded by rev 8: the nginx HTTP proxy is replaced by TLS `stream`, so these directives are no longer in use (see ### R2). Proxy timeouts must be raised to ≥ BASHT_WAIT_TIMEOUT. | D12, D14; 4.2 unblocked, with timeout parameters |
+| R3 | `http.ResponseController.EnableFullDuplex` available from the minimum Go version; behaviour on the body while the response is being written. Required for D4. | CONFIRMED — local source: `go doc` on go1.27.3; introduced in go1.21 (`$GOROOT/api/go1.21.txt`). `go.mod`: `go 1.21`. | D1, D4; 0.2, 1.2 |
+| R4 | Two curl cases: (a) does `curl -T file https://host` without a trailing `/` (RS-1 form) produce a path with the file name? (b) does `tar ... \| curl -T - https://host/x.tgz` print the command block before the end of stdin? Required for RS-1 and RS-2 (D16). | CONFIRMED — local probe 0.3, curl 8.18.0: (a) path `/payload.bin` (branch A: name preserved); (b) response line 3 ms after `PUT_START`, stdin EOF +3 s (branch B-OK); (c) stdin without name → path `/` (limitation of D5, non-blocking) | D4, D5, D16; 0.3, 1.2, 1.3 |
 
 ### R1 — curl upload behaviour
-- Sources: local `curl --help all`/`man curl` (versione installata) e probe locale.
-- Applicability: versione curl installata nella sandbox; il comportamento dei client può variare tra versioni.
-- Dates: non applicabile (verifica locale).
-- Documented fact: nessuno ancora.
-- Supervisor inference: il progetto deve funzionare con `curl` standard della macchina del mittente; la versione della sandbox è solo un indizio.
-- Local check (0.1, curl 8.18.0, 2026-10-27): probe in directory di scratch fuori dal repo, server su `127.0.0.1` che invia la risposta come chunk (senza chunk finale), attende 3 s, poi legge il body (8 MiB casuali).
-  - S3 `curl -N -T payload.bin http://127.0.0.1:<porta>/`: la riga `COMANDI-DI-PROVA` arriva entro 2 ms dalla risposta del server; `BODY_END` a +3 s con 8388608/8388608 byte. Branch A.
-  - Senza `-N` la riga su pipe arriva solo a fine upload: buffering stdio di curl, non del protocollo. Il README (4.3) deve citare `curl -N` solo per output su pipe; su terminale la riga compare subito.
-  - S4: `PUT /probe-name.zip` → path `/probe-name.zip`. `PUT /` con URL che termina in `/` → curl aggiunge il basename locale: path `/payload.bin`. Il nome è quindi disponibile in entrambi i casi (D5 valido).
-  - Prima passata scartata: risposta con `Content-Length` completa. curl chiude l'upload subito dopo la risposta (body ricevuto 576 KiB su 8 MiB). Non rappresenta D4.
-  - Vincolo implementativo (D4): la risposta al `PUT` deve restare aperta (nessun chunk finale) fino alla fine del relay. Chiudere la risposta prima di aver letto il body fa interrompere l'upload al mittente.
-- Esito: **branch A**. Decision impact: D4 e D5 valgono come scritti. Branch B (curl stampa solo a fine upload): **stop** e escalation all'utente, perché il mittente non vedrebbe i comandi prima del relay; nessuna scelta tecnica sostitutiva è autorizzata senza decisione. Branch C (path senza nome): D5 usa `download` come nome di default e il nome è dichiarato limitazione, o l'utente sceglie un'alternativa (es. `curl -T f -H` — non nella spec). Escalation in ogni caso.
-- Unresolved/replacement: nessuno dopo 0.1.
+- Sources: local `curl --help all`/`man curl` (installed version) and local probe.
+- Applicability: curl version installed in the sandbox; client behaviour may vary between versions.
+- Dates: not applicable (local verification).
+- Documented fact: none yet.
+- Supervisor inference: the project must work with the standard `curl` on the sender's machine; the sandbox version is only a hint.
+- Local check (0.1, curl 8.18.0, 2026-10-27): probe in a scratch directory outside the repo, server on `127.0.0.1` that sends the response as a chunk (without final chunk), waits 3 s, then reads the body (8 MiB random).
+  - S3 `curl -N -T payload.bin http://127.0.0.1:<port>/`: the `COMANDI-DI-PROVA` line arrives within 2 ms of the server's response; `BODY_END` at +3 s with 8388608/8388608 bytes. Branch A.
+  - Without `-N` the line on a pipe arrives only at the end of the upload: curl's stdio buffering, not the protocol. The README (4.3) must cite `curl -N` only for output on a pipe; on a terminal the line appears immediately.
+  - S4: `PUT /probe-name.zip` → path `/probe-name.zip`. `PUT /` with a URL ending in `/` → curl adds the local basename: path `/payload.bin`. The name is therefore available in both cases (D5 valid).
+  - First pass discarded: response with full `Content-Length`. curl closes the upload right after the response (body received 576 KiB out of 8 MiB). Does not represent D4.
+  - Implementation constraint (D4): the response to `PUT` must stay open (no final chunk) until the end of the relay. Closing the response before reading the body makes the sender's upload abort.
+- Outcome: **branch A**. Decision impact: D4 and D5 apply as written. Branch B (curl prints only at the end of the upload): **stop** and escalate to the user, because the sender would not see the commands before the relay; no substitute technical choice is authorized without a decision. Branch C (path without name): D5 uses `download` as the default name and the limitation is declared, or the user chooses an alternative (e.g. `curl -T f -H` — not in the spec). Escalation in any case.
+- Unresolved/replacement: none after 0.1.
 
 ### R2 — nginx streaming directives
-- Sources: https://nginx.org/en/docs/http/ngx_http_proxy_module.html e https://nginx.org/en/docs/http/ngx_http_core_module.html (fetch 2026-10-27, autorizzato dall'utente; indicizzati con context-mode).
-- Applicability: documentazione corrente di nginx.org, non legata a una versione pinnata. La versione dell'immagine va pinnata in 4.2 e confrontata con le note di versione (`proxy_request_buffering` esiste da 1.7.11).
-- Documented facts (confermati):
-  - `proxy_request_buffering off`: il body è inoltrato all'upstream appena arriva (default `on`, introdotta in 1.7.11). Con HTTP/1.1 verso upstream (default `proxy_http_version 1.1`) l'opzione è rispettata.
-  - `proxy_buffering off`: la risposta è passata al client senza bufferizzazione; nginx legge al massimo `proxy_buffer_size` per volta. Il header `X-Accel-Buffering: no` ha lo stesso effetto ma non va usato come sostituto.
-  - `proxy_http_version 1.1` è il default.
-  - `client_max_body_size 0` disabilita il controllo della dimensione del body (default `1m`).
-  - `proxy_read_timeout` e `proxy_send_timeout` default `60s`; si applicano tra due operazioni di lettura/scrittura successive, non all'intera trasmissione.
-- Supervisor inference (non garanzia della fonte): durante l'attesa del ricevente l'app non legge il body e non emette byte dopo i comandi. Quindi nginx vede un upstream fermo: `proxy_send_timeout` chiude la connessione verso l'app dopo 60s di blocco in scrittura, e `proxy_read_timeout` la chiude dopo 60s senza byte di risposta. Entrambi devono essere ≥ `BASHT_WAIT_TIMEOUT` (default 1h = 3600s). Per il relay in corso, il silenzio del mittente è limitato da `BASHT_IDLE_TIMEOUT` (D15), che deve essere < `proxy_read_timeout`.
-- Residuo chiuso (rev 7): `client_body_timeout` default `60s`, contesto http/server/location, si applica tra due letture consecutive del body, non all'intera trasmissione (fonte: nginx.org core module, letta in 4.2). Scelta: `client_body_timeout 3600s` nel server 443, così nginx non tronca un mittente fermo prima di `BASHT_IDLE_TIMEOUT`.
-- Local check 4.2: `nginx -t` pass nell'immagine `nginx:1.27-alpine` pinnata con digest.
-- Rev 8 (B-NGX risolto): il proxy HTTP di nginx (`proxy_pass` in `http`) interrompe il body dell'upload quando l'upstream ha già risposto (test a coppie: upstream che risponde prima della lettura → stallo a 3.9 MB, EOF; upstream che risponde dopo → 8 MiB in 3 s). D4 richiede la risposta prima del body, quindi R2 non basta. Scelta: TLS e inoltro in `stream` (TCP) su 443; `http` solo per il redirect 80→443. Verificato: `stream` con binario reale 8 MiB e 256 MiB (e2e esterno); stack compose su 443 con 256 MiB (RS-1 e RS-2, sha256 identico, 2.3 s); redirect 80 → 443 e `GET /` via HTTPS.
-- Decision impact (rev 8, supersede rev 7 per il blocco http): `BASHT_PUBLIC_URL` obbligatorio in compose (nginx stream non aggiunge header HTTP, quindi niente `X-Forwarded-Proto`). E2E esterno controlla che i comandi usino la base di test. Decision impact originale (SUPERSEDED da rev 8, non più applicata): 4.2 sbloccata; i parametri `proxy_*` e `client_max_body_size` di questo punto non sono usati nella configurazione attuale. Parametri nginx: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` e `proxy_send_timeout` = 3600s (≥ default `BASHT_WAIT_TIMEOUT`); `proxy_read_timeout` > `BASHT_IDLE_TIMEOUT`. Scelta reversibile; alternativa (timeout più corti) rifiutata perché rompe D7.
-- Unresolved/replacement: inoltro del body chunked del client (RS-2) con `proxy_request_buffering off` da verificare nella stessa fonte. `client_body_timeout` (default 60s, tra due letture successive del body dal client) non ancora letto: da verificare in 4.2 con la stessa fonte prima di dichiarare la configurazione corretta. Resta aperto un punto: se nginx non legge il body mentre l'app attende, `client_body_timeout` può scattare sul mittente; da verificare con test e2e lento (upload che attende > 60s prima del download).
+- Sources: https://nginx.org/en/docs/http/ngx_http_proxy_module.html and https://nginx.org/en/docs/http/ngx_http_core_module.html (fetched 2026-10-27, authorized by the user; indexed with context-mode).
+- Applicability: current nginx.org documentation, not tied to a pinned version. The image version must be pinned in 4.2 and compared with the release notes (`proxy_request_buffering` exists since 1.7.11).
+- Documented facts (confirmed):
+  - `proxy_request_buffering off`: the body is forwarded to the upstream as soon as it arrives (default `on`, introduced in 1.7.11). With HTTP/1.1 towards the upstream (default `proxy_http_version 1.1`) the option is respected.
+  - `proxy_buffering off`: the response is passed to the client without buffering; nginx reads at most `proxy_buffer_size` at a time. The header `X-Accel-Buffering: no` has the same effect but must not be used as a substitute.
+  - `proxy_http_version 1.1` is the default.
+  - `client_max_body_size 0` disables the body size check (default `1m`).
+  - `proxy_read_timeout` and `proxy_send_timeout` default `60s`; they apply between two consecutive read/write operations, not to the whole transmission.
+- Supervisor inference (not guaranteed by the source): while the receiver is waiting, the app does not read the body and emits no bytes after the commands. So nginx sees a stalled upstream: `proxy_send_timeout` closes the connection to the app after 60s of blocked writing, and `proxy_read_timeout` closes it after 60s without response bytes. Both must be ≥ `BASHT_WAIT_TIMEOUT` (default 1h = 3600s). For the relay in progress, the sender's silence is limited by `BASHT_IDLE_TIMEOUT` (D15), which must be < `proxy_read_timeout`.
+- Residual closed (rev 7): `client_body_timeout` default `60s`, http/server/location context, applies between two consecutive body reads, not to the whole transmission (source: nginx.org core module, read in 4.2). Choice: `client_body_timeout 3600s` in the server on port 443, so nginx does not truncate an idle sender before `BASHT_IDLE_TIMEOUT`.
+- Local check 4.2: `nginx -t` passes in the `nginx:1.27-alpine` image pinned by digest.
+- Rev 8 (B-NGX resolved): the nginx HTTP proxy (`proxy_pass` in `http`) interrupts the upload body when the upstream has already responded (paired tests: upstream that responds before the body is read → stall at 3.9 MB, EOF; upstream that responds after → 8 MiB in 3 s). D4 requires the response before the body, so R2 is not enough. Choice: TLS and forwarding in `stream` (TCP) on 443; `http` only for the 80→443 redirect. Verified: `stream` with the real binary 8 MiB and 256 MiB (external e2e); compose stack on 443 with 256 MiB (RS-1 and RS-2, identical sha256, 2.3 s); redirect 80 → 443 and `GET /` via HTTPS.
+- Decision impact (rev 8, supersedes rev 7 for the http block): `BASHT_PUBLIC_URL` mandatory in compose (nginx stream adds no HTTP headers, so no `X-Forwarded-Proto`). External e2e checks that the commands use the test base. Original decision impact (SUPERSEDED by rev 8, no longer applied): 4.2 unblocked; the `proxy_*` and `client_max_body_size` parameters from this point are not used in the current configuration. nginx parameters: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` and `proxy_send_timeout` = 3600s (≥ default `BASHT_WAIT_TIMEOUT`); `proxy_read_timeout` > `BASHT_IDLE_TIMEOUT`. Reversible choice; the alternative (shorter timeouts) rejected because it breaks D7.
+- Unresolved/replacement: forwarding of the client's chunked body (RS-2) with `proxy_request_buffering off` must be verified in the same source. `client_body_timeout` (default 60s, between two consecutive body reads from the client) not yet read: to be verified in 4.2 with the same source before declaring the configuration correct. One point stays open: if nginx does not read the body while the app waits, `client_body_timeout` may fire on the sender; to be verified with a slow e2e test (upload waiting > 60s before the download).
 
 ### R3 — Go full duplex
-- Sources: `go doc net/http.ResponseController.EnableFullDuplex` sulla toolchain installata; `$GOROOT/api/go1.21.txt` riga 356 (`pkg net/http, method (*ResponseController) EnableFullDuplex() error #57786`). Fonte locale, nessuna ricerca web.
-- Local check (0.2, 2026-10-27): `go version` = `go1.27.3 linux/amd64`; `go doc` stampa la firma `func (c *ResponseController) EnableFullDuplex() error` e la descrizione (HTTP/1: lettura del body interleaved con la scrittura della risposta). `go vet ./...` exit 0; `go list ./...` = `bashtransfer/cmd/bashtransfer`.
-- Decision impact: il metodo esiste dalla go1.21; `go.mod` dichiara `go 1.21` (minimo). D4 valido. La builder image in 4.1 usa una toolchain ≥ 1.21 (la scelta pinnata va registrata in 4.1). Non è una ricerca web.
+- Sources: `go doc net/http.ResponseController.EnableFullDuplex` on the installed toolchain; `$GOROOT/api/go1.21.txt` line 356 (`pkg net/http, method (*ResponseController) EnableFullDuplex() error #57786`). Local source, no web search.
+- Local check (0.2, 2026-10-27): `go version` = `go1.27.3 linux/amd64`; `go doc` prints the signature `func (c *ResponseController) EnableFullDuplex() error` and the description (HTTP/1: reading the body interleaved with writing the response). `go vet ./...` exit 0; `go list ./...` = `bashtransfer/cmd/bashtransfer`.
+- Decision impact: the method exists since go1.21; `go.mod` declares `go 1.21` (minimum). D4 valid. The builder image in 4.1 uses a toolchain ≥ 1.21 (the pinned choice must be recorded in 4.1). Not a web search.
 
-### R4 — curl upload senza `/` finale e da stdin
-- Sources: probe locale con curl installato (versione registrata in 0.3), fuori dal repo.
-- Applicability: curl della sandbox; il comportamento del mittente reale può variare.
-- Documented fact: nessuno ancora.
-- Local check (0.3, curl 8.18.0, 2026-10-27; server di probe in scratch `r4/probe_server.py` su `127.0.0.1:18090`, chiuso dopo il probe, nessun listener residuo; log in `scratchpad/r4/server.log`):
-  - (A) `curl -N -T r1/payload.bin http://127.0.0.1:18090` (URL senza `/`, 8388608 byte, `CL=8388608`): `PUT_START path=/payload.bin`; `BODY_END bytes=8388608`. Il nome è nel path anche senza slash finale.
-  - (B) `{ printf x; sleep 3; head -c 8388608 /dev/urandom; } | curl -N -T - http://127.0.0.1:18090/mydir.tgz`: `PUT_START path=/mydir.tgz CL=- TE=chunked` a .714694; riga `COMANDI-DI-PROVA` visibile a .717428 (+3 ms); EOF stdin a .731 (+3 s dopo la riga); `BODY_END bytes=8388609` (1 byte `x` + 8388608). Nessun `Content-Length`.
-  - (C) `head -c 1024 /dev/urandom | curl -N -T - http://127.0.0.1:18090`: `PUT_START path=/` (nessun nome). Risposta visibile; `BODY_END bytes=1024`.
-  - Osservazione: curl invia `Expect: 100-continue` in tutti i casi; il server non risponde 100 e curl procede comunque (nessun blocco osservato).
-- Decision impact: (A) path con basename → RS-1 invariato, D5 valido. (B) risposta visibile prima dell'EOF → D16 valido, nessun escalation. (C) stdin senza nome: D5 usa `download`; per RS-2 il nome è sempre nel path (`/mydir.tgz`), quindi non bloccante. Limitazione da documentare in 4.3: `tar ... | curl -T - https://host` senza nome produce `download`.
-- Esito: **branch A/B-OK/C-limit** → R4 CONFIRMED, nessuna escalation. Unresolved/replacement: nessuno.
+### R4 — curl upload without trailing `/` and from stdin
+- Sources: local probe with installed curl (version recorded in 0.3), outside the repo.
+- Applicability: sandbox curl; the real sender's behaviour may vary.
+- Documented fact: none yet.
+- Local check (0.3, curl 8.18.0, 2026-10-27; probe server in scratch `r4/probe_server.py` on `127.0.0.1:18090`, closed after the probe, no residual listener; log in `scratchpad/r4/server.log`):
+  - (A) `curl -N -T r1/payload.bin http://127.0.0.1:18090` (URL without `/`, 8388608 bytes, `CL=8388608`): `PUT_START path=/payload.bin`; `BODY_END bytes=8388608`. The name is in the path even without a trailing slash.
+  - (B) `{ printf x; sleep 3; head -c 8388608 /dev/urandom; } | curl -N -T - http://127.0.0.1:18090/mydir.tgz`: `PUT_START path=/mydir.tgz CL=- TE=chunked` at .714694; `COMANDI-DI-PROVA` line visible at .717428 (+3 ms); stdin EOF at .731 (+3 s after the line); `BODY_END bytes=8388609` (1 byte `x` + 8388608). No `Content-Length`.
+  - (C) `head -c 1024 /dev/urandom | curl -N -T - http://127.0.0.1:18090`: `PUT_START path=/` (no name). Response visible; `BODY_END bytes=1024`.
+  - Observation: curl sends `Expect: 100-continue` in all cases; the server does not reply 100 and curl proceeds anyway (no block observed).
+- Decision impact: (A) path with basename → RS-1 unchanged, D5 valid. (B) response visible before EOF → D16 valid, no escalation. (C) stdin without name: D5 uses `download`; for RS-2 the name is always in the path (`/mydir.tgz`), so non-blocking. Limitation to document in 4.3: `tar ... | curl -T - https://host` without a name produces `download`.
+- Outcome: **branch A/B-OK/C-limit** → R4 CONFIRMED, no escalation. Unresolved/replacement: none.
 
 ## Invariants
 
 | ID | Meaning | Guarding test |
 |----|---------|---------------|
-| I-1 | Il server non scrive il body su disco e usa al più un buffer per relay attivo. | `TestRelayUsesPooledBuffer` (1.2); revisione di codice in 1.2 e P1 |
-| I-2 | Per uno slug c'è al massimo un ricevente; ogni altro claim riceve `410`. | `TestRegistryClaimOnce`, `TestGetSecondClaim410` (1.1, 1.2) |
-| I-3 | Ogni sessione transita a un terminale (`done`/`aborted`) e viene rimossa dal registry esattamente una volta. | `TestRegistryRemoveOnce`, `TestReceiverAbortCleansSession` (1.1, 1.2) |
-| I-4 | Il byte stream ricevuto è identico a quello inviato, oppure il ricevente vede un errore di trasferimento. Mai troncamento silenzioso. | `TestRelayRoundTripSHA` con sha256 (1.2); `TestSenderAbortFailsReceiver` (1.2) |
-| I-5 | Gli slug vivi sono unici; lo slug ha 10 caratteri dall'alfabeto D3. | `TestGenerateLength`, `TestGenerateUnique` (1.1) |
+| I-1 | The server does not write the body to disk and uses at most one buffer per active relay. | `TestRelayUsesPooledBuffer` (1.2); code review in 1.2 and P1 |
+| I-2 | For a slug there is at most one receiver; every other claim receives `410`. | `TestRegistryClaimOnce`, `TestGetSecondClaim410` (1.1, 1.2) |
+| I-3 | Every session transitions to a terminal state (`done`/`aborted`) and is removed from the registry exactly once. | `TestRegistryRemoveOnce`, `TestReceiverAbortCleansSession` (1.1, 1.2) |
+| I-4 | The received byte stream is identical to the one sent, or the receiver sees a transfer error. Never silent truncation. | `TestRelayRoundTripSHA` with sha256 (1.2); `TestSenderAbortFailsReceiver` (1.2) |
+| I-5 | Live slugs are unique; the slug has 10 characters from the D3 alphabet. | `TestGenerateLength`, `TestGenerateUnique` (1.1) |
 
 ## Risks
 
 | Risk | Design mitigation | Verification |
 |------|-------------------|--------------|
-| curl non mostra la risposta prima della fine dell'upload (R1-B) | Stop e escalation, nessuna implementazione del relay prima dell'esito di 0.1 | esito registrato in overview R1 |
-| Goroutine e connessioni lasciate aperte da sender abbandonati | D7 timeout, I-3, `http.Request.Context` su ogni attesa | `TestRegistryWaitTimeout`, `TestSenderAbortFailsReceiver` |
-| Molti mittenti in attesa consumano risorse (istanza pubblica) | D11 limite sessioni; ogni sessione usa una goroutine e nessun buffer finché non c'è un ricevente | `TestRegistryMaxSessions` |
-| Buffering nginx annulla lo streaming | R2, 4.2 non chiudibile finché la config non è verificata; test di regressione con nginx in compose | 4.2 e G-P4 |
-| Upload pubblico anonimo abusato | D9 auth opzionale; Q1; rate limiting fuori scope | documentato in 4.3 |
-| Filename con caratteri pericolosi nell'header | D5 sanitizzazione | `TestFilenameSanitize` (2.2) |
+| curl does not show the response before the end of the upload (R1-B) | Stop and escalate, no relay implementation before the outcome of 0.1 | outcome recorded in overview R1 |
+| Goroutines and connections left open by abandoned senders | D7 timeout, I-3, `http.Request.Context` on every wait | `TestRegistryWaitTimeout`, `TestSenderAbortFailsReceiver` |
+| Many senders waiting consume resources (public instance) | D11 session limit; each session uses a goroutine and no buffer until a receiver is present | `TestRegistryMaxSessions` |
+| nginx buffering cancels streaming | R2, 4.2 cannot be closed until the config is verified; regression test with nginx in compose | 4.2 and G-P4 |
+| Anonymous public upload abused | D9 optional auth; Q1; rate limiting out of scope | documented in 4.3 |
+| Filename with dangerous characters in the header | D5 sanitization | `TestFilenameSanitize` (2.2) |
 
 ## Verification strategy
 
-- Baseline (G-BASE): repository senza codice; registrare `git status --short` e `go version` prima della prima modifica.
-- Unit (per sub-phase): solo i test del pacchetto modificato, con nome e conteggio atteso in STATE §3.
-- Phase closure P<N>: `go test -race -count=1 ./...` con conteggio test non zero e i test e2e della fase (`scripts/e2e.sh`).
-- Benchmark in 3.1 e P3: `scripts/bench.sh` su loopback; verdetto secondo D13.
-- Final (G-FINAL, ultima fase): RS-1 e RS-2 eseguiti su istanza locale tramite `compose.yaml` e nginx, dopo autorizzazione rete per pull delle immagini (4.1–4.2).
+- Baseline (G-BASE): repository without code; record `git status --short` and `go version` before the first change.
+- Unit (per sub-phase): only the tests of the modified package, with name and expected count in STATE §3.
+- Phase closure P<N>: `go test -race -count=1 ./...` with a non-zero test count and the phase's e2e tests (`scripts/e2e.sh`).
+- Benchmark in 3.1 and P3: `scripts/bench.sh` on loopback; verdict according to D13.
+- Final (G-FINAL, last phase): RS-1 and RS-2 run on a local instance via `compose.yaml` and nginx, after network authorization for pulling the images (4.1–4.2).
 
-I comandi esatti sono in STATE.md §3 (registro gate), non ripetuti nelle fasi.
+The exact commands are in STATE.md §3 (gate register), not repeated in the phases.
 
 ## Model-assignment summary
 
-Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (override esplicito dell'utente: solo Haiku 5.5, nessun Sonnet o Opus).
+Roster: `agent-1:claude-haiku-5-5,agent-2:claude-haiku-5-5` (explicit user override: Haiku 5.5 only, no Sonnet or Opus).
 
 | Unit(s) | Implementer | Required supervisor review |
 |---------|-------------|----------------------------|
-| 0.1, 0.2, 0.3 | agent-2 (claude-haiku-5-5) | agent-1 (claude-haiku-5-5), dopo 0.1: verifica dell'esito R1 e branch scelto |
-| 1.1, 1.2, 1.3 | agent-2 | agent-1, revisione ad alto rischio prima di scrivere `handler.go` (concorrenza e lifecycle) e chiusura P1 |
-| 2.1, 2.2 | agent-2 | agent-1 su 2.1 (contratto auth) e P2 |
-| 3.1 | agent-2 | agent-1 su criterio D13 e P3 |
-| 4.1, 4.2, 4.3 | agent-2 | agent-1 su 4.2 (direttive) e P4 |
+| 0.1, 0.2, 0.3 | agent-2 (claude-haiku-5-5) | agent-1 (claude-haiku-5-5), after 0.1: verification of the R1 outcome and chosen branch |
+| 1.1, 1.2, 1.3 | agent-2 | agent-1, high-risk review before writing `handler.go` (concurrency and lifecycle) and closure of P1 |
+| 2.1, 2.2 | agent-2 | agent-1 on 2.1 (auth contract) and P2 |
+| 3.1 | agent-2 | agent-1 on the D13 criterion and P3 |
+| 4.1, 4.2, 4.3 | agent-2 | agent-1 on 4.2 (directives) and P4 |
 
-Limitazione dichiarata: con un solo modello, la "revisione del supervisore" è una **self-review di un altro agente dello stesso modello**. Non è una revisione da modello più forte. Ogni record di review in STATE.md riporta questo limite e non va presentato come approvazione forte.
+Declared limitation: with a single model, the "supervisor review" is a **self-review by another agent of the same model**. It is not a review by a stronger model. Each review record in STATE.md states this limit and must not be presented as a strong approval.

@@ -111,7 +111,7 @@
     clearTimeout(timer);
     if (pending) { var old = pending; pending = null; old.abort(); }
     readiness(false);
-    // Lascia partire il form prima di disattivare il pulsante.
+    // Let the form submit before disabling the button.
     setTimeout(function () {
       btn.disabled = true;
       btn.textContent = "Download requested";

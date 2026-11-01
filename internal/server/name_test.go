@@ -10,44 +10,44 @@ func TestSanitizeName(t *testing.T) {
 		name, in, want string
 	}{
 		{"path traversal", "../../etc/passwd", "passwd"},
-		{"virgolette e backslash", `a"b\c.zip`, "abc.zip"},
-		{"controllo", "\x01x", "x"},
-		{"vuoto", "", "download"},
-		{"punti", "..", "download"},
-		{"punto singolo", ".", "download"},
-		{"file nascosto", ".bashrc", "bashrc"},
-		{"punti e spazi iniziali", ". .profile", "profile"},
-		{"solo punti", "...", "download"},
-		{"punti interni invariati", "a..b.tar.gz", "a..b.tar.gz"},
-		{"spazi attorno", "  file.zip  ", "file.zip"},
-		{"nome con spazi", "strano nome.zip", "strano nome.zip"},
-		{"UTF-8 invariato", "città.zip", "città.zip"},
-		{"sostituzione comando", "x$(touch PWNED).zip", "x_(touch PWNED).zip"},
+		{"quotes and backslash", `a"b\c.zip`, "abc.zip"},
+		{"control", "\x01x", "x"},
+		{"empty", "", "download"},
+		{"dots", "..", "download"},
+		{"single dot", ".", "download"},
+		{"hidden file", ".bashrc", "bashrc"},
+		{"leading dots and spaces", ". .profile", "profile"},
+		{"only dots", "...", "download"},
+		{"inner dots unchanged", "a..b.tar.gz", "a..b.tar.gz"},
+		{"surrounding spaces", "  file.zip  ", "file.zip"},
+		{"name with spaces", "strano nome.zip", "strano nome.zip"},
+		{"UTF-8 unchanged", "città.zip", "città.zip"},
+		{"command substitution", "x$(touch PWNED).zip", "x_(touch PWNED).zip"},
 		{"backtick", "a`id`.zip", "a_id_.zip"},
 		{"history expansion", "a!b.zip", "a_b.zip"},
 		{"CSI C1", "a\u009b31mb.zip", "a31mb.zip"},
 		{"override bidi", "doc\u202efdp.exe", "docfdp.exe"},
-		{"separatore di riga", "a\u2028b", "ab"},
-		{"DEL e NUL", "a\x7fb\x00c", "abc"},
-		{"trattino (stdout per curl e wget)", "-", "download"},
-		{"trattino iniziale invariato", "-x.zip", "-x.zip"},
+		{"line separator", "a\u2028b", "ab"},
+		{"DEL and NUL", "a\x7fb\x00c", "abc"},
+		{"dash (stdout for curl and wget)", "-", "download"},
+		{"leading dash unchanged", "-x.zip", "-x.zip"},
 	}
 	for _, c := range cases {
 		if got := SanitizeName(c.in); got != c.want {
-			t.Errorf("%s: SanitizeName(%q) = %q, atteso %q", c.name, c.in, got, c.want)
+			t.Errorf("%s: SanitizeName(%q) = %q, want %q", c.name, c.in, got, c.want)
 		}
 	}
 
 	long := strings.Repeat("a", 200)
 	if got := SanitizeName(long); len([]rune(got)) != 128 {
-		t.Errorf("200 caratteri: lunghezza %d, attesa 128", len([]rune(got)))
+		t.Errorf("200 characters: length %d, want 128", len([]rune(got)))
 	}
-	// Il taglio a 128 rune non lascia spazi in coda.
+	// Cutting at 128 runes leaves no trailing spaces.
 	if got := SanitizeName(strings.Repeat("a", 127) + " b"); got != strings.Repeat("a", 127) {
-		t.Errorf("spazio al taglio: %q", got)
+		t.Errorf("space at the cut: %q", got)
 	}
 	longUTF := strings.Repeat("è", 200)
 	if got := SanitizeName(longUTF); len([]rune(got)) != 128 {
-		t.Errorf("200 rune UTF-8: lunghezza %d, attesa 128", len([]rune(got)))
+		t.Errorf("200 UTF-8 runes: length %d, want 128", len([]rune(got)))
 	}
 }

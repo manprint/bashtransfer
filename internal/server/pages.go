@@ -17,9 +17,9 @@ import (
 	"bashtransfer/internal/slug"
 )
 
-// Pagine HTML per i browser: la home (pagina di cortesia), la pagina di download di un link e i
-// messaggi di errore. layout.html contiene stili, intestazione e script comuni; ogni pagina
-// definisce il blocco content. html/template applica l'escape a base, nome del file e messaggi.
+// HTML pages for browsers: the home (courtesy page), the download page of a link and the
+// error messages. layout.html holds the styles, header and shared scripts; each page defines the
+// content block. html/template escapes the base, the file name and the messages.
 //
 //go:embed pages/*.html
 var pageFS embed.FS
@@ -35,39 +35,39 @@ func parsePages(names ...string) map[string]*template.Template {
 	return m
 }
 
-// pageData sono i dati delle pagine: ognuna usa solo i suoi campi.
+// pageData holds the page data: each page uses only its own fields.
 type pageData struct {
 	Title   string
 	NoIndex bool
 	// home
 	Base    string
 	HTTPS   bool
-	Receive []command // comandi del ricevente, con LINK al posto del link
+	Receive []command // receiver commands, with LINK in place of the link
 	// download
 	Name, Size string
 	Commands   []command
-	// Away: il mittente non è connesso ma il link resta in tolleranza (BASHT_SENDER_GRACE).
+	// Away: the sender is not connected but the link stays in grace (BASHT_SENDER_GRACE).
 	Away bool
 	// message
 	Heading, Text string
 }
 
-// wantsHTML riporta se il client è un browser. curl, wget e aria2c inviano Accept */* o nessun
-// Accept e ricevono il testo delle istruzioni o il file.
+// wantsHTML reports whether the client is a browser. curl, wget and aria2c send Accept */* or no
+// Accept and receive the text of the instructions or the file.
 func wantsHTML(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
-// previewAgents sono frammenti (minuscoli) dello User-Agent dei programmi che aprono un link per
-// mostrarne l'anteprima o controllarlo: chat, social, posta, Office. Alcuni non chiedono text/html:
-// ricevono comunque la pagina di download, così non consumano il link. Nessuno compare negli
-// User-Agent di curl, wget, aria2c e busybox wget.
+// previewAgents are (lowercase) fragments of the User-Agent of programs that open a link to show
+// its preview or check it: chat, social, mail, Office. Some do not ask for text/html: they still
+// receive the download page, so they do not consume the link. None appears in the User-Agent of
+// curl, wget, aria2c or busybox wget.
 var previewAgents = []string{
 	"bot", "spider", "crawl", "preview", "facebookexternalhit", "whatsapp", "embedly", "iframely",
 	"slack", "skype", "discord", "telegram", "mattermost", "ms-office", "microsoft office", "outlook",
 }
 
-// isPreviewAgent riporta se la richiesta viene da un programma di anteprima (previewAgents).
+// isPreviewAgent reports whether the request comes from a preview program (previewAgents).
 func isPreviewAgent(r *http.Request) bool {
 	ua := strings.ToLower(r.UserAgent())
 	for _, a := range previewAgents {
@@ -78,13 +78,13 @@ func isPreviewAgent(r *http.Request) bool {
 	return false
 }
 
-// pageCSP vieta ogni risorsa esterna: script, stili e icona sono inline. I due %s sono le
-// destinazioni ammesse per i form (il pulsante della pagina di download) e per le richieste degli
-// script (l'upload della home): 'self' dove servono, altrimenti 'none'.
+// pageCSP forbids any external resource: scripts, styles and the icon are inline. The two %s are the
+// destinations allowed for forms (the download page button) and for script requests (the home
+// upload): 'self' where needed, otherwise 'none'.
 const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action %s; connect-src %s; frame-ancestors 'none'"
 
-// servePage risponde con la pagina name e lo stato status. La pagina è generata prima degli header:
-// un errore del template diventa un 500 invece di una pagina troncata.
+// servePage responds with page name and status status. The page is generated before the headers:
+// a template error becomes a 500 instead of a truncated page.
 func servePage(w http.ResponseWriter, status int, name, formAction, connect string, d pageData) {
 	var b bytes.Buffer
 	if err := pages[name].ExecuteTemplate(&b, "layout", d); err != nil {
@@ -103,7 +103,7 @@ func servePage(w http.ResponseWriter, status int, name, formAction, connect stri
 	_, _ = w.Write(b.Bytes())
 }
 
-// serveHome risponde con la pagina di cortesia; base è la base pubblica dei comandi.
+// serveHome responds with the courtesy page; base is the public base of the commands.
 func serveHome(w http.ResponseWriter, base string) {
 	servePage(w, http.StatusOK, "home", "'none'", "'self'", pageData{
 		Title:   "Bashtransfer",
@@ -113,10 +113,10 @@ func serveHome(w http.ResponseWriter, base string) {
 	})
 }
 
-// landing risponde a un browser, o a un programma di anteprima, con la pagina di download dello
-// slug: nome, dimensione e il pulsante Download, un form POST sulla stessa URL. Non reclama mai lo
-// slug: aprire il link, ricaricarlo o incollarlo in una chat non lo consuma. Un link già usato,
-// scaduto o sconosciuto risponde come il download (410, 404) con la pagina del motivo.
+// landing responds to a browser, or to a preview program, with the download page of the slug: name,
+// size and the Download button, a POST form on the same URL. It never claims the slug: opening the
+// link, reloading it or pasting it into a chat does not consume it. A link already used, expired or
+// unknown responds like the download (410, 404) with the page for the reason.
 func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 	if !slug.Valid(id) {
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
@@ -190,15 +190,15 @@ func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) 
 	}{state, message, ready, readyTTL})
 }
 
-// Pagine dei messaggi che non corrispondono a un motivo di rifiuto (reason*): link reclamato da un
-// download in corso, trasferimento interrotto dal mittente prima dell'inizio.
+// Message pages that do not match a rejection reason (reason*): link claimed by a download in
+// progress, transfer interrupted by the sender before it started.
 const (
 	pageClaimed = "claimed"
 	pageAborted = "aborted"
 )
 
-// messages sono titolo e testo delle pagine di errore per i browser, per motivo. Per un motivo
-// assente la pagina mostra lo stato HTTP e il messaggio in testo.
+// messages hold the title and text of the error pages for browsers, per reason. For a reason that
+// is absent, the page shows the HTTP status and the message as text.
 var messages = map[string]struct{ heading, text string }{
 	reasonNotFound: {"Link not found",
 		"This link does not exist. Check that you copied the whole link; if you did, ask the sender to send the file again."},
@@ -216,8 +216,8 @@ var messages = map[string]struct{ heading, text string }{
 		"This link can only be downloaded from the beginning, in one go."},
 }
 
-// writeError risponde con status: ai browser con la pagina del motivo reason, agli altri client con
-// msg in testo (http.Error).
+// writeError responds with status: to browsers with the page of the reason reason, to other clients
+// with msg as text (http.Error).
 func writeError(w http.ResponseWriter, r *http.Request, status int, reason, msg string) {
 	if !wantsHTML(r) {
 		http.Error(w, msg, status)
@@ -232,8 +232,8 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, reason, msg 
 	})
 }
 
-// humanSize rende n per la pagina di download: "1.1 GiB (1,152,499,340 bytes)". -1 è la lunghezza
-// ignota di un invio da pipe.
+// humanSize renders n for the download page: "1.1 GiB (1,152,499,340 bytes)". -1 is the unknown
+// length of an upload from a pipe.
 func humanSize(n int64) string {
 	const unit = 1024
 	switch {
@@ -252,7 +252,7 @@ func humanSize(n int64) string {
 	return fmt.Sprintf("%.1f %ciB (%s bytes)", float64(n)/float64(div), "KMGTPE"[exp], groupDigits(n))
 }
 
-// groupDigits separa le migliaia con la virgola: 1152499340 diventa "1,152,499,340".
+// groupDigits separates thousands with commas: 1152499340 becomes "1,152,499,340".
 func groupDigits(n int64) string {
 	s := strconv.FormatInt(n, 10)
 	var b strings.Builder

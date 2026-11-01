@@ -1,39 +1,39 @@
-# Operazioni
+# Operations
 
-Deploy e gestione di bashtransfer su una VM con Docker. Uso e configurazione sono nel [README](../README.md); il funzionamento interno in [architettura.md](architettura.md).
+Deployment and management of bashtransfer on a VM with Docker. Usage and configuration are in the [README](../README.md); internal workings in [architettura.md](architettura.md).
 
-## Requisiti della VM
+## VM requirements
 
-- Linux con kernel ≥ 4.15 (sysctl TCP per namespace di rete), Docker Engine con il plugin `compose`.
-- Porte 80 e 443 raggiungibili da Internet; nessun'altra porta serve (l'app non pubblica porte).
-- Modulo `tcp_bbr` caricato sull'host: compose imposta `bbr` nel namespace di rete di nginx e un container non può caricare moduli.
-- Certificato TLS per il nome pubblico (`fullchain.pem`, `privkey.pem`), gestito fuori dal repository (per esempio certbot sull'host).
-- Memoria: ogni sessione attiva usa al più un buffer di copia (256 KiB di default) nell'app più i buffer TCP del kernel, che crescono fino a 32 MiB per socket solo quanto serve; il totale è limitato da `net.ipv4.tcp_mem` dell'host.
+- Linux with kernel ≥ 4.15 (TCP sysctls per network namespace), Docker Engine with the `compose` plugin.
+- Ports 80 and 443 reachable from the Internet; no other port is needed (the app publishes no ports).
+- `tcp_bbr` module loaded on the host: compose sets `bbr` in nginx's network namespace, and a container cannot load modules.
+- TLS certificate for the public name (`fullchain.pem`, `privkey.pem`), managed outside the repository (for example certbot on the host).
+- Memory: each active session uses at most one copy buffer (256 KiB by default) in the app, plus the kernel's TCP buffers, which grow up to 32 MiB per socket only as needed; the total is limited by the host's `net.ipv4.tcp_mem`.
 
-## Primo deploy
+## First deployment
 
-1. Caricare BBR, anche ai riavvii:
+1. Load BBR, including across reboots:
 
    ```bash
    sudo modprobe tcp_bbr
    echo tcp_bbr | sudo tee /etc/modules-load.d/bbr.conf
    ```
 
-2. Servono sulla VM solo `compose.yaml` e `deploy/nginx/nginx.conf` (clonare il repository è il modo più semplice). Creare `.env` accanto a `compose.yaml` (non versionato, permessi `600`):
+2. The VM needs only `compose.yaml` and `deploy/nginx/nginx.conf` (cloning the repository is the simplest way). Create `.env` next to `compose.yaml` (not versioned, permissions `600`):
 
    ```
    BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.0.0
    BASHT_CERTS_DIR=/etc/ssl/bashtransfer
    BASHT_PUBLIC_URL=https://bashtransfer.mydomain.it
-   BASHT_AUTH_USER=utente
-   BASHT_AUTH_PASSWORD=una-password-lunga
+   BASHT_AUTH_USER=user
+   BASHT_AUTH_PASSWORD=a-long-password
    ```
 
-   `BASHT_CERTS_DIR` deve contenere `fullchain.pem` e `privkey.pem` come file regolari. Con certbot i file in `live/` sono link simbolici relativi verso `archive/`, che dentro il container non si risolvono: copiarli in `/etc/ssl/bashtransfer` con un deploy hook (sezione "Rinnovo del certificato"). nginx gira senza `DAC_OVERRIDE`: i file devono essere di root o leggibili da tutti; `privkey.pem` di root con permessi `600` va bene (verificato).
+   `BASHT_CERTS_DIR` must contain `fullchain.pem` and `privkey.pem` as regular files. With certbot, the files in `live/` are relative symbolic links to `archive/`, which do not resolve inside the container: copy them to `/etc/ssl/bashtransfer` with a deploy hook (section "Certificate renewal"). nginx runs without `DAC_OVERRIDE`: the files must be owned by root or readable by everyone; `privkey.pem` owned by root with permissions `600` is fine (verified).
 
-   Se il pacchetto su ghcr.io è privato: `docker login ghcr.io` con un token con permesso `read:packages`.
+   If the package on ghcr.io is private: `docker login ghcr.io` with a token that has the `read:packages` permission.
 
-3. Avviare e controllare:
+3. Start and check:
 
    ```bash
    docker compose pull
@@ -43,46 +43,59 @@ Deploy e gestione di bashtransfer su una VM con Docker. Uso e configurazione son
    curl -sS https://bashtransfer.mydomain.it/
    ```
 
-4. Verificare i parametri TCP effettivi di nginx:
+4. Check nginx's effective TCP parameters:
 
    ```bash
    docker compose exec nginx sysctl net.ipv4.tcp_congestion_control net.ipv4.tcp_rmem net.ipv4.tcp_wmem
    ```
 
-   Attesi `bbr`, `4096 131072 33554432`, `4096 16384 33554432`. Se il modulo `tcp_bbr` manca, il container nginx non dovrebbe partire (errore sul sysctl): caricare il modulo, oppure `BASHT_TCP_CC=cubic` nel `.env`.
+   Expected `bbr`, `4096 131072 33554432`, `4096 16384 33554432`. If the `tcp_bbr` module is missing, the nginx container should not start (sysctl error): load the module, or set `BASHT_TCP_CC=cubic` in `.env`.
 
-5. Prova end-to-end dalla workstation (non dalla VM):
+5. End-to-end test from the workstation (not from the VM):
 
    ```bash
    BASHT_E2E_BASE=https://bashtransfer.mydomain.it BASHT_E2E_MB=256 \
-     BASHT_E2E_AUTH=utente:una-password-lunga bash scripts/e2e.sh
+     BASHT_E2E_AUTH=user:a-long-password bash scripts/e2e.sh
    ```
 
-   Lo script accetta qualsiasi certificato. Senza auth configurata omettere `BASHT_E2E_AUTH`. Lascia nei log un `transfer` con `outcome` `aborted` per ogni caso di caduta simulata: è atteso.
+   The script accepts any certificate. Without auth configured, omit `BASHT_E2E_AUTH`. It leaves a `transfer` entry with `outcome` `aborted` in the logs for each simulated drop case: this is expected.
 
-## Aggiornamenti
+## Updates
 
-Impostare in `.env` il nuovo tag (`BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.1.0`; usare tag di versione, non `latest`, per sapere cosa gira e poter tornare indietro), poi:
+Set the new tag in `.env` (`BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.1.0`; use version tags, not `latest`, so you know what is running and can roll back), then:
 
 ```bash
-git pull                # solo se cambiano compose.yaml o nginx.conf
+git pull                # only if compose.yaml or nginx.conf change
 docker compose pull
 docker compose up -d
 ```
 
-Ritorno alla versione precedente: rimettere il tag precedente in `.env` e ripetere `docker compose up -d`.
+To return to the previous version: restore the previous tag in `.env` and repeat `docker compose up -d`.
 
-La ricreazione di `app` interrompe i trasferimenti in corso dopo 10 secondi di grazia; i mittenti in attesa vengono chiusi subito. Gli slug emessi prima del riavvio rispondono `404` (le sessioni sono solo in memoria). nginx risolve `app` a ogni connessione e non va riavviato.
+Recreating `app` interrupts ongoing transfers after a 10-second grace period; waiting senders are closed immediately. Slugs issued before the restart respond with `404` (sessions are only in memory). nginx resolves `app` on every connection and does not need to be restarted.
 
-## Rinnovo del certificato
+### Frontend updates and browser check
 
-nginx legge i certificati all'avvio. Dopo il rinnovo:
+HTML, CSS and JavaScript are templates embedded in the Go binary. Node.js, npm, a frontend server or a separate build are not needed on the VM: to publish UI changes, you must update the image and recreate `app`, with the same effects on transfers described above.
+
+After an update, verify from the workstation and from a phone:
+
+1. Open the HTTPS page, choose a file and share the link with **Link** or **Copy link**. UNREADY on the sender before the receiver arrives is normal and does not prevent Share.
+2. Return to the same page in the sender's browser and keep it in the foreground; open the link on another device. After the server confirms, both pages show a green READY and the Download button is enabled. Opening the link and polling do not consume it.
+3. Before starting the download, move the sender to the background and then back: verify UNREADY and the subsequent reconnection within `BASHT_SENDER_GRACE`. The grace period does not keep the file and does not allow resuming interrupted downloads.
+4. Press Download only once and keep both devices connected. Check the received file and the outcome on the sender. UNREADY after the session has ended is normal: it does not mean the transfer failed.
+
+The Playwright checks simulate mobile viewports and some native APIs; they do not replace this check of real behavior on Android/iOS and in the in-app browsers of chat apps.
+
+## Certificate renewal
+
+nginx reads the certificates at startup. After renewal:
 
 ```bash
 docker compose exec nginx nginx -s reload
 ```
 
-Il reload non interrompe i trasferimenti: i worker vecchi terminano quando le loro connessioni finiscono. Con certbot, un deploy hook che copia i file e ricarica nginx, per esempio `/etc/letsencrypt/renewal-hooks/deploy/bashtransfer.sh` (eseguibile):
+The reload does not interrupt transfers: old workers exit when their connections finish. With certbot, a deploy hook that copies the files and reloads nginx, for example `/etc/letsencrypt/renewal-hooks/deploy/bashtransfer.sh` (executable):
 
 ```bash
 #!/bin/sh
@@ -92,64 +105,71 @@ install -m 600 -o root -g root /etc/letsencrypt/live/bashtransfer.mydomain.it/pr
 cd /opt/bashtransfer && docker compose exec -T nginx nginx -s reload
 ```
 
-(`/opt/bashtransfer` è la directory con `compose.yaml` e `.env`.)
+(`/opt/bashtransfer` is the directory containing `compose.yaml` and `.env`.)
 
 ## Log
 
-Formato JSON in compose (`BASHT_LOG_FORMAT`), rotazione 3 × 10 MB per container. Eventi e campi sono descritti nel README, sezione "Log". Esempi con `jq`:
+JSON format in compose (`BASHT_LOG_FORMAT`), rotation 3 × 10 MB per container. Events and fields are described in the README, section "Log". Examples with `jq`:
 
 ```bash
-# tutti gli esiti, in diretta
+# all outcomes, live
 docker compose logs -f --no-log-prefix app | jq -c 'select(.msg=="transfer")'
 
-# trasferimenti falliti con il motivo
+# failed transfers with the reason
 docker compose logs --no-log-prefix app | jq -c 'select(.msg=="transfer" and .outcome!="ok") | {time, outcome, err, bytes}'
 
-# conteggio per esito
+# count per outcome
 docker compose logs --no-log-prefix app | jq -r 'select(.msg=="transfer") | .outcome' | sort | uniq -c
 
-# velocità dei trasferimenti riusciti sopra 100 MB (MB/s)
+# speed of successful transfers above 100 MB (MB/s)
 docker compose logs --no-log-prefix app | jq -r 'select(.msg=="transfer" and .outcome=="ok" and .bytes>1e8) | .rate_mbs'
 
-# tentativi di upload con credenziali errate e sessioni esaurite
+# upload attempts with wrong credentials and exhausted sessions
 docker compose logs --no-log-prefix app | jq -c 'select(.msg=="request_rejected" and (.reason=="unauthorized" or .reason=="capacity"))'
 ```
 
-`BASHT_LOG_LEVEL=debug` aggiunge `upload_accepted`, `download_claimed`, `receiver_attached` (tutti con lo stesso `id` del `transfer` finale) e i `404`. L'app vede solo l'IP di nginx: gli IP dei client non sono nei log dell'app. Il blocco `stream` di nginx non ha access log.
+`BASHT_LOG_LEVEL=debug` adds `upload_accepted`, `download_claimed`, `receiver_attached` (all with the same `id` as the final `transfer`) and the `404`s. The app only sees nginx's IP: client IPs are not in the app's logs. nginx's `stream` block has no access log.
 
-## Monitoraggio
+## Monitoring
 
-- Stato del container: `docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q app)`. L'healthcheck esegue `GET /` ogni 30 s.
-- Segnali da osservare nei log: `request_rejected` con `reason=capacity` (aumentare `BASHT_MAX_SESSIONS` o cercare chi occupa sessioni), molti `unauthorized` (tentativi sulla password), `transfer` con `outcome=aborted` e `err="sender idle"` (mittenti lenti o bloccati), qualsiasi evento a livello `ERROR`.
+- Container status: `docker inspect -f '{{.State.Health.Status}}' $(docker compose ps -q app)`. The healthcheck runs `GET /` every 30 s.
+- Signals to watch in the logs: `request_rejected` with `reason=capacity` (raise `BASHT_MAX_SESSIONS` or look for what is occupying sessions), many `unauthorized` (password attempts), `transfer` with `outcome=aborted` and `err="sender idle"` (slow or stuck senders), any event at `ERROR` level.
 
-## Risoluzione dei problemi
+## Troubleshooting
 
-| Sintomo | Causa probabile | Cosa fare |
+| Symptom | Probable cause | What to do |
 |---|---|---|
-| nginx non parte, errore su `tcp_congestion_control` | modulo `tcp_bbr` non caricato | `sudo modprobe tcp_bbr`, oppure `BASHT_TCP_CC=cubic` |
-| `docker compose up` chiede `BASHT_IMAGE`, `BASHT_PUBLIC_URL` o `BASHT_CERTS_DIR` | variabile obbligatoria mancante | impostarla nel `.env` |
-| `docker compose pull` fallisce con `denied` o `unauthorized` | pacchetto ghcr.io privato | renderlo pubblico o `docker login ghcr.io` con un token `read:packages` |
-| nginx non parte: `cannot load certificate` o `Permission denied` | link simbolici di certbot o file non di root e non leggibili | copiare i file come file regolari di root (deploy hook sopra) |
-| upload lento con RTT alto, download veloce | buffer di invio del mittente (default Linux 4 MiB: ~66 MB/s a 40 ms) | sul mittente: `sysctl -w net.ipv4.tcp_wmem="4096 16384 33554432"` e `bbr` (README, "Prestazioni di rete") |
-| download lento con RTT alto | buffer di ricezione del ricevente o perdita sul suo percorso | sul ricevente: `net.ipv4.tcp_rmem` con massimo 32 MiB |
-| velocità ferma sotto ~200–300 Mbit/s su un solo lato | client in Wi-Fi | misurare con il client via cavo |
-| `401` all'upload | credenziali assenti o errate | `curl -u utente:password -T ...` |
-| `503` all'upload | `BASHT_MAX_SESSIONS` raggiunto | vedere i log; aumentare il limite |
-| il client riceve un reset dopo 64 connessioni | `limit_conn perip 64` in nginx | alzare o rimuovere in `deploy/nginx/nginx.conf` |
-| `410` al download | slug già usato, concluso o scaduto | il mittente deve inviare di nuovo |
-| `404` al download | slug sbagliato, oppure server riavviato | controllare l'URL; reinviare |
-| `400` al download | ripresa (`curl -C -`, `wget -c`) o download manager con più connessioni | scaricare dall'inizio con il comando stampato |
-| trasferimento interrotto dopo una pausa del mittente | `BASHT_IDLE_TIMEOUT` (2 min) | alzarlo se il comando del mittente può restare fermo a lungo (per esempio `tar` su molti file piccoli lenti) |
-| il mittente aspetta e lo slug scade | nessun ricevente entro `BASHT_WAIT_TIMEOUT` (1 h) | alzarlo; deve restare sotto `proxy_timeout` di nginx (24 h) |
+| nginx does not start, error on `tcp_congestion_control` | `tcp_bbr` module not loaded | `sudo modprobe tcp_bbr`, or `BASHT_TCP_CC=cubic` |
+| `docker compose up` asks for `BASHT_IMAGE`, `BASHT_PUBLIC_URL` or `BASHT_CERTS_DIR` | required variable missing | set it in `.env` |
+| `docker compose pull` fails with `denied` or `unauthorized` | private ghcr.io package | make it public, or `docker login ghcr.io` with a `read:packages` token |
+| nginx does not start: `cannot load certificate` or `Permission denied` | certbot symbolic links, or files not owned by root and not readable | copy the files as regular root-owned files (deploy hook above) |
+| slow upload with high RTT, fast download | sender's send buffer (Linux default 4 MiB: ~66 MB/s at 40 ms) | on the sender: `sysctl -w net.ipv4.tcp_wmem="4096 16384 33554432"` and `bbr` (README, "Network performance") |
+| slow download with high RTT | receiver's receive buffer or packet loss on its path | on the receiver: `net.ipv4.tcp_rmem` with a maximum of 32 MiB |
+| speed stuck below ~200–300 Mbit/s on one side only | client on Wi-Fi | measure with the client on a cable |
+| `401` on upload | credentials missing or wrong | `curl -u user:password -T ...` |
+| `503` on upload | `BASHT_MAX_SESSIONS` reached | check the logs; raise the limit |
+| the client gets a reset after 64 connections | `limit_conn perip 64` in nginx | raise or remove it in `deploy/nginx/nginx.conf` |
+| `410` on download | slug already used, finished or expired | the sender must send again |
+| `404` on download | wrong slug, or server restarted | check the URL; send again |
+| `400` on download | resume (`curl -C -`, `wget -c`) or a download manager with multiple connections | download from the start with the printed command |
+| transfer interrupted after a sender pause | `BASHT_IDLE_TIMEOUT` (2 min) | raise it if the sender's command can stay idle for a long time (for example `tar` over many small, slow files) |
+| the sender waits and the slug expires | no receiver within `BASHT_WAIT_TIMEOUT` (1 h) | raise it; it must stay below nginx's `proxy_timeout` (24 h) |
+| UNREADY on the sender before the receiver opens the link | no receiver page has confirmed presence yet | share the link; Share remains available |
+| Download stays waiting after sharing on WhatsApp | sender's browser in the background or body detached | return to the same sender page within `BASHT_SENDER_GRACE` and keep it in the foreground; if the download was already interrupted, send again |
+| UNREADY with both pages visible | confirmations missing or expired, failed requests, or the control stream blocked by the proxy | check the `?status=1` requests and the `POST /` stream in the browser; verify the network, the proxy configuration and the running image, without sharing tokens or credentials |
 
-## Script di verifica e misura
+## Verification and measurement scripts
 
-| Script | Cosa fa | Dove |
+| Script | What it does | Where |
 |---|---|---|
-| `go test -race ./...` | test unitari e di integrazione | sviluppo |
-| `scripts/e2e.sh` | e2e con curl, wget, aria2c (se installato), cadute, paralleli, auth; locale o contro uno stack (`BASHT_E2E_BASE`) | sviluppo, VM |
-| `scripts/invariant.py` | la sorgente non viene mai alterata: ogni variante dei comandi di ricevente e mittente, configurazioni ostili, link in ogni stato (eseguito dall'e2e locale) | sviluppo, CI |
-| `scripts/bench.sh` | throughput del relay su loopback contro una baseline a due hop | sviluppo |
-| `scripts/netbench.sh` | effetto di algoritmo di congestione e buffer TCP con netem in Docker (richiede `sudo modprobe sch_netem` e un'immagine locale con `tc`) | sviluppo |
+| `go test -race ./...` | unit and integration tests | development |
+| `scripts/e2e.sh` | e2e with curl, wget, aria2c (if installed), drops, parallel transfers, auth; locally or against a stack (`BASHT_E2E_BASE`) | development, VM |
+| `scripts/invariant.py` | the source is never altered: every variant of the receiver and sender commands, hostile configurations, links in every state (run by the local e2e) | development, CI |
+| `bash scripts/ui/run.sh direct` | Playwright: desktop/mobile layout, upload and download, sharing, readiness, presence and recovery | development, CI |
+| `bash scripts/ui/run.sh apache` | same suite through Apache/h2c; requires Docker and free `bt-ui-*`/`bt-ui-net` names | development, CI |
+| `scripts/bench.sh` | relay throughput on loopback against a two-hop baseline | development |
+| `scripts/netbench.sh` | effect of congestion-control algorithm and TCP buffers with netem in Docker (requires `sudo modprobe sch_netem` and a local image with `tc`) | development |
 
-`netbench.sh` cambia i sysctl solo dentro i namespace di rete dei suoi container: l'host non viene modificato.
+`netbench.sh` changes the sysctls only inside the network namespaces of its containers: the host is not modified.
+
+Node.js, npm and Chromium are required only on the machine running the browser tests, not on the production VM. Installation and test selection are described in the [README, Development](../README.md#sviluppo).

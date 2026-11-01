@@ -11,10 +11,10 @@ func TestGenerateLength(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(s) != 10 {
-		t.Fatalf("lunghezza %d, attesa 10: %q", len(s), s)
+		t.Fatalf("length %d, want 10: %q", len(s), s)
 	}
 	if !Valid(s) || Valid("abc") || Valid(s+"!") {
-		t.Fatalf("Valid non riconosce %q", s)
+		t.Fatalf("Valid does not recognize %q", s)
 	}
 }
 
@@ -26,7 +26,7 @@ func TestGenerateAlphabet(t *testing.T) {
 		}
 		for _, c := range s {
 			if !strings.ContainsRune(alphabet, c) {
-				t.Fatalf("carattere fuori alfabeto %q in %q", c, s)
+				t.Fatalf("character outside alphabet %q in %q", c, s)
 			}
 		}
 	}
@@ -40,7 +40,7 @@ func TestGenerateUnique(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, dup := seen[s]; dup {
-			t.Fatalf("duplicato %q dopo %d campioni", s, i)
+			t.Fatalf("duplicate %q after %d samples", s, i)
 		}
 		seen[s] = struct{}{}
 	}

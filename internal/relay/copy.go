@@ -10,12 +10,12 @@ import (
 	"time"
 )
 
-// Copier copia il body di un upload verso un Receiver con buffer riusabili (D13, I-1).
+// Copier copies an upload's body to a Receiver using reusable buffers (D13, I-1).
 type Copier struct {
 	pool sync.Pool
 }
 
-// NewCopier crea un Copier con buffer di size byte.
+// NewCopier creates a Copier with buffers of size bytes.
 func NewCopier(size int) *Copier {
 	c := &Copier{}
 	c.pool.New = func() any {
@@ -25,21 +25,21 @@ func NewCopier(size int) *Copier {
 	return c
 }
 
-// Copy copia src in dst con flush dopo ogni scrittura riuscita.
+// Copy copies src to dst, flushing after each successful write.
 func (c *Copier) Copy(dst Receiver, src io.Reader) (int64, error) {
 	bp := c.pool.Get().(*[]byte)
 	defer c.pool.Put(bp)
 	return io.CopyBuffer(&flushWriter{dst: dst}, src, *bp)
 }
 
-// NewIdleReader limita l'inattività del mittente (D15): prima di ogni Read imposta la
-// scadenza di lettura con setDeadline; una lettura scaduta restituisce ErrIdle. Con idle <= 0
-// non imposta scadenze e serve solo a Stop.
+// NewIdleReader limits the sender's inactivity (D15): before each Read it sets the
+// read deadline with setDeadline; an expired read returns ErrIdle. With idle <= 0
+// it sets no deadlines and only serves Stop.
 func NewIdleReader(r io.Reader, idle time.Duration, setDeadline func(time.Time) error) *IdleReader {
 	return &IdleReader{r: r, idle: idle, setDeadline: setDeadline}
 }
 
-// IdleReader è il reader restituito da NewIdleReader.
+// IdleReader is the reader returned by NewIdleReader.
 type IdleReader struct {
 	r           io.Reader
 	idle        time.Duration
@@ -47,7 +47,7 @@ type IdleReader struct {
 	stopped     atomic.Bool
 }
 
-// aLongTimeAgo è una scadenza già passata: sblocca subito una Read in corso.
+// aLongTimeAgo is a deadline already in the past: it immediately unblocks an ongoing Read.
 var aLongTimeAgo = time.Unix(1, 0)
 
 func (d *IdleReader) Read(p []byte) (int, error) {
@@ -56,9 +56,9 @@ func (d *IdleReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
-	// Uno Stop concorrente può aver impostato la scadenza passata prima di quella appena
-	// rinnovata: la si ripristina. Non si restituisce subito errore, perché la lettura può
-	// ancora concludersi senza toccare la connessione (EOF di un body con Content-Length).
+	// A concurrent Stop may have set the past deadline before the one just renewed:
+	// it is restored. No error is returned right away, because the read can still
+	// complete without touching the connection (EOF of a Content-Length body).
 	if d.stopped.Load() {
 		_ = d.setDeadline(aLongTimeAgo)
 	}
@@ -76,14 +76,14 @@ func (d *IdleReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Stop sblocca una Read in attesa di dati e fa fallire le successive letture dalla connessione
-// con ErrInterrupted. Può essere chiamata da un'altra goroutine durante una Read.
+// Stop unblocks a Read waiting for data and makes subsequent reads from the connection fail
+// with ErrInterrupted. It may be called from another goroutine during a Read.
 func (d *IdleReader) Stop() {
 	d.stopped.Store(true)
 	_ = d.setDeadline(aLongTimeAgo)
 }
 
-// flushWriter fa flush del Receiver dopo ogni Write che ha scritto byte.
+// flushWriter flushes the Receiver after each Write that wrote bytes.
 type flushWriter struct {
 	dst Receiver
 }

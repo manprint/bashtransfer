@@ -1,4 +1,4 @@
-// Package server contiene i gestori HTTP del relay: upload con comandi immediati e download in streaming.
+// Package server contains the relay's HTTP handlers: upload with immediate commands and streaming download.
 package server
 
 import (
@@ -21,30 +21,30 @@ import (
 	"bashtransfer/internal/slug"
 )
 
-// drainTimeout limita il tempo che Go dedica a svuotare il body non letto di un upload terminato
-// male (401, 503, scadenza, ricevente caduto). Senza limite un mittente fermo terrebbe aperta la
-// connessione all'infinito: l'handler è già finito ma net/http legge il body prima di chiudere.
+// drainTimeout limits the time Go spends draining the unread body of an upload that ended
+// abnormally (401, 503, expiry, receiver gone). Without a limit, a stalled sender would keep the
+// connection open forever: the handler has already finished, but net/http reads the body before closing.
 const drainTimeout = 2 * time.Second
 
-// abortLinger è l'attesa tra l'esito negativo scritto al mittente HTTP/1 e la chiusura della
-// connessione: con il body non letto la chiusura invia un RST, che arrivato prima della lettura di
-// curl cancellerebbe il messaggio. Variabile per i test.
+// abortLinger is the wait between writing the negative outcome to an HTTP/1 sender and closing the
+// connection: with the body unread, closing sends an RST, which would cancel the message if it
+// arrived before curl reads it. A variable for the tests.
 var abortLinger = 500 * time.Millisecond
 
-// defaultDisposition è il Content-Disposition di ogni risposta che non è un download.
+// defaultDisposition is the Content-Disposition of every response that is not a download.
 const defaultDisposition = `inline; filename="bashtransfer.txt"`
 
-// Options configura il gestore HTTP.
+// Options configures the HTTP handler.
 type Options struct {
-	// PublicURL, se non vuoto, è la base dei comandi generati (D12).
+	// PublicURL, if not empty, is the base of the generated commands (D12).
 	PublicURL string
-	// Authorize, se non nil, decide se un PUT è autorizzato (D9).
+	// Authorize, if not nil, decides whether a PUT is authorized (D9).
 	Authorize func(*http.Request) bool
-	// IdleTimeout, se > 0, interrompe il relay se il mittente è fermo così a lungo (D15)
-	// o se una singola scrittura verso il ricevente non termina entro questo tempo.
+	// IdleTimeout, if > 0, aborts the relay if the sender is idle for this long (D15)
+	// or if a single write to the receiver does not complete within this time.
 	IdleTimeout time.Duration
-	// Logger, se non nil, riceve gli eventi del relay (README, "Log"). Non vi compaiono mai slug,
-	// nomi di file, path o credenziali: una sessione è identificata dal suo ID casuale.
+	// Logger, if not nil, receives the relay events (README, "Log"). Slugs,
+	// file names, paths or credentials never appear in it: a session is identified by its random ID.
 	Logger *slog.Logger
 }
 
@@ -54,7 +54,7 @@ type handler struct {
 	opts   Options
 }
 
-// New restituisce il gestore HTTP del relay.
+// New returns the HTTP handler of the relay.
 func New(reg *relay.Registry, copier *relay.Copier, opts Options) http.Handler {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
@@ -66,7 +66,7 @@ func New(reg *relay.Registry, copier *relay.Copier, opts Options) http.Handler {
 	return &handler{reg: reg, copier: copier, opts: opts}
 }
 
-// Motivi dei rifiuti registrati nei log (campo reason di request_rejected).
+// Rejection reasons recorded in the logs (reason field of request_rejected).
 const (
 	reasonUnauthorized     = "unauthorized"
 	reasonInvalidHost      = "invalid_host"
@@ -82,25 +82,25 @@ const (
 	reasonMediaType        = "unsupported_media_type"
 )
 
-// tokenHeader porta il token di una sessione prenotata (reserve) nel PUT del browser: un header e
-// non la query, che i proxy registrano nei log con la riga della richiesta.
+// tokenHeader carries the token of a reserved session (reserve) in the browser's PUT: a header and
+// not the query, which proxies record in logs with the request line.
 const tokenHeader = "X-Bashtransfer-Token"
 
-// Ritmo dello stream di una prenotazione (reserve): avanzamento ogni progressInterval, una riga
-// di keepalive ogni keepaliveTicks intervalli senza novità. Dietro Apache la chiusura della pagina
-// arriva al server solo dopo alcune scritture fallite verso il browser: il keepalive frequente la
-// fa arrivare in pochi secondi se l'annullamento esplicito (cancel) non parte.
+// Pace of a reservation's stream (reserve): progress every progressInterval, one keepalive line every
+// keepaliveTicks intervals without news. Behind Apache the page closing reaches the server only after
+// several failed writes to the browser: frequent keepalives make it arrive within seconds if the explicit
+// cancellation (cancel) does not go out.
 const (
 	progressInterval = 500 * time.Millisecond
 	keepaliveTicks   = 2
 )
 
-// bindTimeout è il tempo entro cui il browser deve iniziare il PUT dopo la prenotazione: lo fa
-// subito, e una prenotazione senza upload non deve occupare una sessione. Variabile per i test.
+// bindTimeout is the time within which the browser must start the PUT after the reservation: it does so
+// immediately, and a reservation without an upload must not occupy a session. A variable for the tests.
 var bindTimeout = 30 * time.Second
 
-// goneReasonOf è il motivo del rifiuto (log e pagina) di uno slug terminale: err è un GoneError di
-// relay, o ErrClaimed (reasonGone, come un link usato).
+// goneReasonOf is the reason for rejecting (log and page) a terminal slug: err is a relay GoneError,
+// or ErrClaimed (reasonGone, like an already-used link).
 func goneReasonOf(err error) string {
 	var g *relay.GoneError
 	if errors.As(err, &g) {
@@ -114,8 +114,8 @@ func goneReasonOf(err error) string {
 	return reasonGone
 }
 
-// reject registra il rifiuto di una richiesta e risponde con status e msg (ai browser con la pagina
-// del motivo, writeError). Il path non compare nel log: contiene slug o nome del file.
+// reject logs the rejection of a request and responds with status and msg (to browsers with the reason
+// page, writeError). The path does not appear in the log: it contains the slug or the file name.
 func (h *handler) reject(w http.ResponseWriter, r *http.Request, level slog.Level, status int, reason, msg string) {
 	h.logReject(r, level, status, reason)
 	writeError(w, r, status, reason, msg)
@@ -127,23 +127,22 @@ func (h *handler) logReject(r *http.Request, level slog.Level, status int, reaso
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Ogni risposta porta un nome di file. curl -J apre il file con O_EXCL (rifiuta di sovrascrivere)
-	// solo se trova Content-Disposition; senza, ripiega sul nome nell'URL e lo tronca. Un mittente
-	// che aggiunge -OJ a curl -T src URL/src scriverebbe così la risposta dentro la sorgente. Il
-	// download lo sostituisce con il nome vero. curl recenti (8.18) ignorano l'header sulle
-	// risposte 4xx/5xx: lì protegge solo le versioni meno recenti (README, "La sorgente non viene
-	// mai alterata").
+	// Every response carries a file name. curl -J opens the file with O_EXCL (refuses to overwrite) only
+	// if it finds Content-Disposition; without it, it falls back to the name in the URL and truncates it.
+	// A sender that adds -OJ to curl -T src URL/src would thus write the response inside the source. The
+	// download replaces it with the real name. Recent curl (8.18) ignores the header on 4xx/5xx responses:
+	// there only older versions are protected (README, "The source is never altered").
 	w.Header().Set("Content-Disposition", defaultDisposition)
-	// Il path ancora codificato: un %2F nel nome resta parte del segmento invece di diventare
-	// un separatore (SanitizeName ne tiene poi l'ultima parte).
+	// The path is still encoded: a %2F in the name stays part of the segment instead of becoming a
+	// separator (SanitizeName then keeps only its last part).
 	seg, ok := singleSegment(r.URL.EscapedPath())
 	if !ok {
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	}
 	if seg != "" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
-		// La stessa URL dà la pagina di download o il file: le cache non devono confonderli, e lo
-		// stato del link cambia a ogni richiesta.
+		// The same URL gives the download page or the file: caches must not confuse them, and the
+		// link's state changes on every request.
 		w.Header().Set("Vary", "Accept, User-Agent")
 		w.Header().Set("Cache-Control", "no-store")
 	}
@@ -157,8 +156,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && seg != "" && r.Header.Get(tokenHeader) != "":
 		h.foreground(w, r, seg)
 	case r.Method == http.MethodGet && (wantsHTML(r) || isPreviewAgent(r)):
-		// Un browser, o un'anteprima di chat e posta, vede la pagina di download: solo il pulsante
-		// (POST) reclama il link, così aprirlo o incollarlo in una chat non lo consuma.
+		// A browser, or a chat or mail preview, sees the download page: only the button (POST)
+		// claims the link, so opening it or pasting it into a chat does not consume it.
 		h.landing(w, r, seg)
 	case r.Method == http.MethodGet, r.Method == http.MethodPost && seg != "":
 		h.download(w, r, seg)
@@ -172,8 +171,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// singleSegment accetta "/" (segmento vuoto) e "/<seg>" con p ancora codificato; altri path sono
-// 404. Il segmento restituito è decodificato.
+// singleSegment accepts "/" (empty segment) and "/<seg>" with p still encoded; other paths are
+// 404. The returned segment is decoded.
 func singleSegment(p string) (string, bool) {
 	if p == "/" {
 		return "", true
@@ -189,13 +188,13 @@ func singleSegment(p string) (string, bool) {
 	return seg, true
 }
 
-// unsafeHostChars sono i caratteri che la shell interpreta tra virgolette doppie, più spazi e
-// fine riga. net/http accetta `$`, `!` e parentesi in Host: senza questo controllo un Host come
-// `x$(cmd)` finirebbe nella riga di comando stampata.
+// unsafeHostChars are the characters the shell interprets inside double quotes, plus spaces and
+// line breaks. net/http accepts `$`, `!` and parentheses in Host: without this check a Host such as
+// `x$(cmd)` would end up in the printed command line.
 const unsafeHostChars = "\"`$\\ !\t\r\n"
 
-// baseURL costruisce la base dei comandi (D12). ok è false se Host è vuoto o contiene caratteri
-// che la shell interpreterebbe nella riga stampata.
+// baseURL builds the base of the commands (D12). ok is false if Host is empty or contains characters
+// that the shell would interpret in the printed line.
 func (h *handler) baseURL(r *http.Request) (base string, ok bool) {
 	if h.opts.PublicURL != "" {
 		return strings.TrimSuffix(h.opts.PublicURL, "/"), true
@@ -219,7 +218,7 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 		h.reject(w, r, slog.LevelInfo, http.StatusBadRequest, reasonInvalidHost, "invalid host")
 		return
 	}
-	// "/" non ha un nome di file: curl -OJ non ha nulla da sovrascrivere, e il browser mostra la pagina.
+	// "/" has no file name: curl -OJ has nothing to overwrite, and the browser shows the page.
 	w.Header().Del("Content-Disposition")
 	w.Header().Add("Vary", "Accept")
 	if wantsHTML(r) {
@@ -233,7 +232,7 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 		"         from the sender's table.\n", base)
 }
 
-// authorized riporta se la richiesta può aprire un invio; altrimenti risponde 401.
+// authorized reports whether the request may open an upload; otherwise it responds 401.
 func (h *handler) authorized(w http.ResponseWriter, r *http.Request) bool {
 	if h.opts.Authorize == nil || h.opts.Authorize(r) {
 		return true
@@ -243,7 +242,7 @@ func (h *handler) authorized(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// rejectCreate risponde all'errore di Create o Reserve.
+// rejectCreate responds to an error from Create or Reserve.
 func (h *handler) rejectCreate(w http.ResponseWriter, r *http.Request, err error) {
 	level, reason := slog.LevelWarn, reasonCapacity
 	if !errors.Is(err, relay.ErrCapacity) {
@@ -253,14 +252,14 @@ func (h *handler) rejectCreate(w http.ResponseWriter, r *http.Request, err error
 	h.reject(w, r, level, http.StatusServiceUnavailable, reason, "service unavailable")
 }
 
-// reservation è la risposta di reserve: il link, i comandi della tabella e il token del PUT.
+// reservation is the response of reserve: the link, the table's commands and the PUT token.
 type reservation struct {
 	Slug     string    `json:"slug"`
 	URL      string    `json:"url"`
 	Token    string    `json:"token"`
 	Commands []command `json:"commands"`
-	// Grace, se > 0, sono i secondi di tolleranza per un mittente caduto (BASHT_SENDER_GRACE): la
-	// pagina si riaggancia con la ripresa dello stream (POST / con resume) e un nuovo PUT.
+	// Grace, if > 0, is the tolerance in seconds for a sender that dropped (BASHT_SENDER_GRACE): the
+	// page reattaches by resuming the stream (POST / with resume) and a new PUT.
 	Grace    int64 `json:"grace,omitempty"`
 	Started  bool  `json:"started,omitempty"`
 	Bytes    int64 `json:"bytes,omitempty"`
@@ -268,21 +267,21 @@ type reservation struct {
 	ReadyTTL int64 `json:"ready_ttl,omitempty"`
 }
 
-// reserve prenota una sessione per un invio dal browser: POST / con JSON {"name": ..., "size": ...}.
-// Il browser invia poi il body con PUT /<slug> e il token (upload). Solo JSON: un altro sito non può
-// inviarlo senza un preflight CORS, che il relay non autorizza.
+// reserve reserves a session for an upload from the browser: POST / with JSON {"name": ..., "size": ...}.
+// The browser then sends the body with PUT /<slug> and the token (upload). JSON only: another site cannot
+// send it without a CORS preflight, which the relay does not authorize.
 //
-// La risposta è uno stream NDJSON aperto per tutto il trasferimento: la prenotazione (link, comandi,
-// token), {"event":"attached"} quando il ricevente si aggancia, {"event":"progress","bytes":N} con i
-// byte consegnati al ricevente e infine l'esito, come nella risposta del PUT. L'esito non può
-// viaggiare solo sul PUT: su HTTP/1 il browser legge la risposta solo dopo aver inviato tutto il
-// body, e quella di un trasferimento interrotto si perde nel reset della connessione. La chiusura
-// dello stream (pagina chiusa, Cancel) termina la sessione: dietro il body non letto del PUT il
-// server non vedrebbe andare via il mittente.
+// The response is an NDJSON stream kept open for the whole transfer: the reservation (link, commands,
+// token), {"event":"attached"} when the receiver attaches, {"event":"progress","bytes":N} with the
+// bytes delivered to the receiver, and finally the outcome, as in the PUT response. The outcome cannot
+// travel only on the PUT: on HTTP/1 the browser reads the response only after sending the whole
+// body, and that of an interrupted transfer is lost in the connection reset. Closing the stream
+// (page closed, Cancel) ends the session: behind the unread PUT body the server would not see the
+// sender leave.
 //
-// Con BASHT_SENDER_GRACE la sola caduta dello stream non termina più la sessione: la caduta del
-// mittente la rileva il PUT (upload), che la mette in tolleranza. Il mittente che torna riapre lo
-// stream con POST / {"resume": "<slug>"} e il token nell'header, e ripete il PUT.
+// With BASHT_SENDER_GRACE the mere drop of the stream no longer ends the session: the sender's drop
+// is detected by the PUT (upload), which puts it in tolerance. A sender that returns reopens the
+// stream with POST / {"resume": "<slug>"} and the token in the header, and repeats the PUT.
 func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(w, r) {
 		return
@@ -304,8 +303,8 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		Foreground *bool  `json:"foreground"`
 		Readiness  bool   `json:"readiness"`
 	}
-	// Il body va letto fino in fondo: solo dopo net/http rileva la chiusura della connessione e
-	// annulla il contesto della richiesta.
+	// The body must be read to the end: only then net/http detects the connection close and
+	// cancels the request context.
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
 	if err != nil || json.Unmarshal(body, &req) != nil || (req.Resume == "" && (req.Size == nil || *req.Size < 0)) {
 		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
@@ -315,7 +314,7 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	var s *relay.Session
 	var alreadyStarted bool
 	if req.Resume != "" {
-		// Riapre lo stream di una prenotazione viva: solo con la tolleranza attiva e il token giusto.
+		// Reopens the stream of a live reservation: only with tolerance active and the right token.
 		var err error
 		if s, alreadyStarted, err = h.reg.Resume(req.Resume, r.Header.Get(tokenHeader), req.Rebind); err != nil {
 			h.reject(w, r, slog.LevelInfo, http.StatusNotFound, reasonNotFound, "404 page not found")
@@ -333,9 +332,9 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 			_ = h.reg.Foreground(s.Slug, s.Token, *req.Foreground)
 		}
 	}
-	// All'uscita dallo stream (pagina chiusa, rete caduta, Cancel, sessione finita): senza tolleranza
-	// la sessione termina (Cancel non fa nulla su una finita); con la tolleranza la chiusura
-	// dell'ultimo stream mette il mittente in tolleranza e il link resta vivo per un riaggancio.
+	// On exit from the stream (page closed, network dropped, Cancel, session finished): without tolerance
+	// the session ends (Cancel does nothing on a finished one); with tolerance the closing of the last
+	// stream puts the sender in tolerance and the link stays alive for a reattach.
 	h.reg.StreamOpen(s)
 	defer func() {
 		if grace <= 0 {
@@ -383,8 +382,8 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		case <-s.Finished():
 			res := s.Result()
 			if res == "" {
-				// Sessione finita senza un esito del PUT: scaduta prima del body, chiusa per bindTimeout
-				// o mittente caduto.
+				// Session finished without a PUT outcome: expired before the body, closed for bindTimeout,
+				// or sender gone.
 				select {
 				case <-s.Expired():
 					res = webOutcome(outcomeExpired, 0, time.Since(s.Created))
@@ -406,8 +405,8 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-tick.C:
-			// L'avanzamento quando cambia; senza novità una riga ogni keepaliveTicks: una scrittura
-			// fallita rivela il mittente caduto anche se la chiusura non arriva al server (proxy).
+			// Progress when it changes; without news one line every keepaliveTicks: a failed write
+			// reveals the dropped sender even if the close does not reach the server (proxy).
 			ticks++
 			if req.Readiness {
 				value := s.PeerReady()
@@ -455,10 +454,10 @@ func (h *handler) foreground(w http.ResponseWriter, r *http.Request, id string) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// cancel annulla un invio dal browser: DELETE /<slug> con il token della prenotazione. La pagina lo
-// invia al Cancel e alla chiusura (fetch keepalive): la chiusura dello stream della prenotazione
-// basta solo senza proxy, perché Apache la inoltra al server con ritardo. Prima del ricevente il
-// link diventa 410; durante il download il ricevente vede il trasferimento interrotto.
+// cancel cancels an upload from the browser: DELETE /<slug> with the reservation's token. The page sends
+// it on Cancel and on close (fetch keepalive): closing the reservation's stream is enough only without
+// a proxy, because Apache forwards it to the server late. Before the receiver, the link becomes 410;
+// during the download the receiver sees the transfer interrupted.
 func (h *handler) cancel(w http.ResponseWriter, r *http.Request, seg string) {
 	s, err := h.reg.Reserved(seg, r.Header.Get(tokenHeader))
 	if err != nil {
@@ -470,9 +469,9 @@ func (h *handler) cancel(w http.ResponseWriter, r *http.Request, seg string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// upload apre la sessione, scrive subito i comandi e legge il body solo quando il ricevente si aggancia.
-// Con tokenHeader è il body di una sessione prenotata dal browser (reserve): seg è lo slug, il token
-// sostituisce le credenziali, e la risposta contiene solo l'esito finale in JSON (webOutcome).
+// upload opens the session, writes the commands immediately and reads the body only when the receiver attaches.
+// With tokenHeader it is the body of a session reserved by the browser (reserve): seg is the slug, the token
+// replaces the credentials, and the response contains only the final outcome in JSON (webOutcome).
 func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	rc := http.NewResponseController(w)
 	ok := false
@@ -515,8 +514,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_accepted",
 		slog.String("id", s.ID), slog.Int64("length", s.Length))
 	tr := transferLog{session: s}
-	// detached: la sessione non va terminata qui. Il mittente è caduto e la tolleranza (Detach) la
-	// tiene viva per un riaggancio, oppure un nuovo PUT con lo stesso token ha preso il suo posto.
+	// detached: the session must not be ended here. The sender dropped and the tolerance (Detach) keeps it
+	// alive for a reattach, or a new PUT with the same token has taken its place.
 	detached := false
 	defer func() {
 		if detached {
@@ -528,14 +527,14 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		h.reg.Finish(s)
 		err := s.Err()
 		if ok {
-			// Copia completa: un ErrReceiverGone registrato dopo l'ultimo byte (il client chiude
-			// appena ha letto Content-Length byte) non è un errore del trasferimento.
+			// Full copy: an ErrReceiverGone recorded after the last byte (the client closes as soon as it
+			// has read Content-Length bytes) is not a transfer error.
 			err = nil
 		}
 		tr.log(h.opts.Logger, err)
 	}()
 
-	// La lunghezza annunciata alla prenotazione è quella che il ricevente vedrà in Content-Length.
+	// The length announced at the reservation is the one the receiver will see in Content-Length.
 	if web && r.ContentLength >= 0 && r.ContentLength != s.Length {
 		s.Abort(relay.ErrLengthMismatch)
 		s.SetResult(webOutcome(failLengthMismatch, 0, 0))
@@ -543,19 +542,19 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		return
 	}
 
-	// curl invia "Expect: 100-continue" per upload grandi. Se la risposta finale arriva prima
-	// del 100 e prima della lettura del body, Go chiude il body (ErrBodyReadAfterClose).
-	// Il 100 viene quindi inviato esplicitamente, prima dei comandi.
-	// Dietro un proxy h2c (Apache) l'header Expect non arriva: il proxy lo toglie e curl, vista la
-	// risposta finale senza 100, non invia il body. Su HTTP/2 il 100 va quindi sempre inviato.
+	// curl sends "Expect: 100-continue" for large uploads. If the final response arrives before
+	// the 100 and before the body is read, Go closes the body (ErrBodyReadAfterClose).
+	// So the 100 is sent explicitly, before the commands.
+	// Behind an h2c proxy (Apache) the Expect header does not arrive: the proxy strips it and curl, seeing
+	// the final response without a 100, does not send the body. On HTTP/2 the 100 must therefore always be sent.
 	if expectsContinue(r) || (r.ProtoMajor == 2 && r.ContentLength != 0) {
 		w.WriteHeader(http.StatusContinue)
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// La connessione del mittente non viene riusata: Stop può lasciarvi una scadenza di lettura
-	// passata, e un upload resta comunque l'unica richiesta di curl -T.
-	// Solo HTTP/1: in HTTP/2 l'header diventa un GOAWAY che blocca i proxy h2c (Apache) con il body in attesa.
+	// The sender's connection is not reused: Stop may leave a past read deadline on it, and an upload
+	// is in any case the only request of curl -T.
+	// HTTP/1 only: in HTTP/2 the header becomes a GOAWAY that blocks h2c proxies (Apache) with the body pending.
 	if r.ProtoMajor == 1 {
 		w.Header().Set("Connection", "close")
 	}
@@ -564,8 +563,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		_ = rc.Flush()
 	}
 
-	// Con il body non letto net/http non vede la caduta del mittente: la connessione viene
-	// controllata a intervalli finché il ricevente non si aggancia.
+	// Without reading the body net/http does not see the sender drop: the connection is
+	// checked at intervals until the receiver attaches.
 	conn := connFrom(r.Context())
 	var peerCheck <-chan time.Time
 	if conn != nil && peerCheckSupported {
@@ -574,8 +573,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		peerCheck = t.C
 	}
 
-	// Solo per il browser: per curl un'interruzione prima della copia (ricevente caduto appena
-	// agganciato) passa dalla copia, che scrive al mittente il motivo.
+	// Browser only: for curl, an interruption before the copy (receiver dropped right after attaching)
+	// goes through the copy, which writes the reason to the sender.
 	var cancelled <-chan struct{}
 	if web {
 		cancelled = s.Aborted()
@@ -588,8 +587,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		heartbeat = t.C
 	}
 
-	// senderLost registra la caduta del mittente prima del ricevente: con la tolleranza attiva la
-	// sessione resta viva senza di lui (detached), altrimenti la termina il defer.
+	// senderLost records the sender's drop before the receiver: with tolerance active the
+	// session stays alive without it (detached), otherwise the defer ends it.
 	senderLost := func() {
 		if h.reg.Detach(s, binding) {
 			detached = true
@@ -603,7 +602,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	for {
 		select {
 		case rcv := <-s.Attached():
-			// Un aggancio sostitutivo ha già preso il posto di questo: il ricevente va al nuovo gestore.
+			// A replacement attach has already taken this one's place: the receiver goes to the new handler.
 			if !h.reg.BeginRelay(s, binding) {
 				s.Requeue(rcv)
 				detached = true
@@ -645,7 +644,7 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			return
 		case <-s.Expired():
 			tr.outcome = outcomeExpired
-			// Prima dell'Abort differito con ErrSenderGone: il log deve dire scadenza, non mittente caduto.
+			// Before the deferred Abort with ErrSenderGone: the log must say expiry, not sender gone.
 			s.Abort(relay.ErrExpired)
 			drain = 0
 			if web {
@@ -654,17 +653,17 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 				writeWebOutcome(w, res)
 				return
 			}
-			abortSender(w, r, fmt.Sprintf("\nERRORE: download NON avvenuto: nessun ricevente si è collegato "+
-				"in %s, il link è stato chiuso.\n", roundDuration(time.Since(s.Created))))
+			abortSender(w, r, fmt.Sprintf("\nERRORE: download NOT completed: no receiver connected "+
+				"in %s, the link has been closed.\n", roundDuration(time.Since(s.Created))))
 			return
 		case <-cancelled:
-			// Il mittente nel browser ha chiuso la pagina o annullato (Cancel dallo stream della
-			// prenotazione): il body non letto non va più atteso. L'esito lo scrive lo stream.
+			// The sender in the browser closed the page or cancelled (Cancel from the reservation's
+			// stream): the unread body must no longer be awaited. The outcome is written by the stream.
 			drain = 0
 			return
 		case <-binding:
-			// Un nuovo PUT con lo stesso token ha preso il posto di questo (mittente tornato prima che
-			// il server vedesse cadere il vecchio aggancio): la sessione ora è sua.
+			// A new PUT with the same token has taken this one's place (the sender came back before the
+			// server saw the old attachment drop): the session is now its own.
 			detached = true
 			drain = 0
 			return
@@ -684,8 +683,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			}
 		case <-peerCheck:
 			if peerClosed(conn) {
-				// outcome resta sender_gone; il defer registra ErrSenderGone e libera lo slug, salvo
-				// la tolleranza (senderLost).
+				// outcome stays sender_gone; the defer records ErrSenderGone and frees the slug, unless
+				// the tolerance (senderLost) applies.
 				drain = 0
 				senderLost()
 				panic(http.ErrAbortHandler)
@@ -694,13 +693,13 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 	}
 }
 
-// doneMessage è l'ultima riga per il mittente a trasferimento riuscito: tutti i byte sono stati
-// scritti verso il ricevente. Il salvataggio su disco lo verifica il programma del ricevente.
+// doneMessage is the last line for the sender on a successful transfer: all bytes have been
+// written to the receiver. Saving to disk is verified by the receiver's program.
 func doneMessage(n int64, d time.Duration) string {
-	return fmt.Sprintf("\nOK: download completato, %s consegnati al ricevente in %s.\n", sizeText(n), roundDuration(d))
+	return fmt.Sprintf("\nOK: download completed, %s delivered to the receiver in %s.\n", sizeText(n), roundDuration(d))
 }
 
-// Motivi di un relay interrotto (failReason), nell'esito per il browser.
+// Reasons for an interrupted relay (failReason), in the outcome for the browser.
 const (
 	failReceiverGone   = "receiver_gone"
 	failIdle           = "idle"
@@ -708,7 +707,7 @@ const (
 	failSenderGone     = "sender_gone"
 )
 
-// failReason classifica il primo errore della sessione di un relay interrotto.
+// failReason classifies the first error of the session of an interrupted relay.
 func failReason(err error) string {
 	switch {
 	case errors.Is(err, relay.ErrReceiverGone):
@@ -721,30 +720,30 @@ func failReason(err error) string {
 	return failSenderGone
 }
 
-// failedMessage è l'ultima riga per il mittente quando il relay si interrompe dopo n byte. err è
-// il primo errore della sessione.
+// failedMessage is the last line for the sender when the relay is interrupted after n bytes. err is
+// the first error of the session.
 func failedMessage(err error, n, length int64, idle time.Duration) string {
 	var why string
 	switch failReason(err) {
 	case failReceiverGone:
-		why = "il ricevente si è disconnesso o ha smesso di ricevere"
+		why = "the receiver disconnected or stopped receiving"
 	case failIdle:
-		why = "nessun dato dal mittente per " + idle.String()
+		why = "no data from the sender for " + idle.String()
 	case failLengthMismatch:
-		why = "il mittente ha inviato meno byte di quelli dichiarati"
+		why = "the sender sent fewer bytes than declared"
 	default:
-		why = "connessione con il mittente interrotta"
+		why = "connection with the sender interrupted"
 	}
 	done := strconv.FormatInt(n, 10)
 	if length >= 0 {
-		done += " di " + strconv.FormatInt(length, 10)
+		done += " of " + strconv.FormatInt(length, 10)
 	}
-	return fmt.Sprintf("\nERRORE: download NON completato dopo %s byte: %s.\n", done, why)
+	return fmt.Sprintf("\nERRORE: download NOT completed after %s bytes: %s.\n", done, why)
 }
 
-// webOutcome è l'ultima riga della risposta a un invio dal browser: l'esito in JSON, che la pagina
-// mostra nella sua lingua. outcome è outcomeOK, outcomeExpired o un motivo di failReason; seconds è
-// la durata del relay (dell'attesa per outcomeExpired).
+// webOutcome is the last line of the response to an upload from the browser: the outcome in JSON, which the page
+// shows in its own language. outcome is outcomeOK, outcomeExpired or a failReason reason; seconds is
+// the relay's duration (the wait, for outcomeExpired).
 func webOutcome(outcome string, n int64, d time.Duration) string {
 	b, _ := json.Marshal(struct {
 		Outcome string  `json:"outcome"`
@@ -754,11 +753,11 @@ func webOutcome(outcome string, n int64, d time.Duration) string {
 	return "\n" + string(b) + "\n"
 }
 
-// abortSender scrive msg al mittente e chiude la risposta. Su HTTP/1 la interrompe senza chunk
-// finale, così curl esce con errore: chiude prima il lato in scrittura (curl legge il messaggio e
-// poi la fine del flusso) e attende abortLinger prima del RST. Su HTTP/2 lo stream termina
-// regolarmente: un proxy h2c (Apache) che riceve un reset aggiunge al messaggio una sua pagina 502
-// e chiude comunque la risposta al client senza errore.
+// abortSender writes msg to the sender and closes the response. On HTTP/1 it interrupts without a final
+// chunk, so curl exits with an error: it first closes the write side (curl reads the message and
+// then the end of the stream) and waits abortLinger before the RST. On HTTP/2 the stream ends
+// normally: an h2c proxy (Apache) that receives a reset adds its own 502 page to the message
+// and closes the response to the client without an error anyway.
 func abortSender(w http.ResponseWriter, r *http.Request, msg string) {
 	rc := http.NewResponseController(w)
 	_, err := io.WriteString(w, msg)
@@ -776,30 +775,30 @@ func abortSender(w http.ResponseWriter, r *http.Request, msg string) {
 	panic(http.ErrAbortHandler)
 }
 
-// writeWebOutcome scrive l'esito di un upload dal browser e lascia terminare la risposta
-// regolarmente anche su HTTP/1: per XMLHttpRequest una risposta troncata è solo un errore di rete,
-// senza l'esito. Con il body non letto net/http chiude poi la connessione in scrittura e attende
-// prima del reset, come abortSender.
+// writeWebOutcome writes the outcome of an upload from the browser and lets the response end
+// normally even on HTTP/1: for XMLHttpRequest a truncated response is only a network error,
+// without the outcome. With the body unread, net/http then closes the connection for writing and waits
+// before the reset, as in abortSender.
 func writeWebOutcome(w http.ResponseWriter, msg string) {
 	_, _ = io.WriteString(w, msg)
 	_ = http.NewResponseController(w).Flush()
 }
 
-// sizeText rende n come "3000000 byte (2.9 MiB)".
+// sizeText renders n as "3000000 bytes (2.9 MiB)".
 func sizeText(n int64) string {
 	const unit = 1024
 	if n < unit {
-		return strconv.FormatInt(n, 10) + " byte"
+		return strconv.FormatInt(n, 10) + " bytes"
 	}
 	div, exp := int64(unit), 0
 	for m := n / unit; m >= unit; m /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%d byte (%.1f %ciB)", n, float64(n)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%d bytes (%.1f %ciB)", n, float64(n)/float64(div), "KMGTPE"[exp])
 }
 
-// roundDuration arrotonda d ai millisecondi sotto il secondo, ai decimi di secondo sopra.
+// roundDuration rounds d to milliseconds below one second, to tenths of a second above.
 func roundDuration(d time.Duration) time.Duration {
 	if d < time.Second {
 		return d.Round(time.Millisecond)
@@ -807,7 +806,7 @@ func roundDuration(d time.Duration) time.Duration {
 	return d.Round(100 * time.Millisecond)
 }
 
-// copyUntilAbort sblocca sia la lettura dal mittente sia una scrittura ferma verso il ricevente.
+// copyUntilAbort unblocks both the read from the sender and a stalled write to the receiver.
 func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *relay.IdleReader) (int64, error) {
 	copied := make(chan struct{})
 	watched := make(chan struct{})
@@ -834,8 +833,8 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 	return n, err
 }
 
-// deliveredCounter conta nella sessione i byte scritti al ricevente, per l'avanzamento che lo stream
-// della prenotazione mostra al mittente nel browser.
+// deliveredCounter counts in the session the bytes written to the receiver, for the progress that the
+// reservation's stream shows the sender in the browser.
 type deliveredCounter struct {
 	relay.Receiver
 	s *relay.Session
@@ -847,23 +846,23 @@ func (c deliveredCounter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// command è un comando di download: lo strumento e la riga da eseguire.
+// command is a download command: the tool and the line to run.
 type command struct {
 	Label string `json:"label"`
 	Line  string `json:"line"`
 }
 
-// receiverCommands restituisce i comandi di download per il link u, uno per strumento (curl, wget,
-// aria2c): la tabella del mittente e le pagine HTML li prendono da qui. aria2c usa una sola
-// connessione: il relay è un flusso unico e non serve intervalli di byte.
-// Invariante: la sorgente non viene mai alterata. Se il ricevente lavora nella cartella del
-// mittente, il file omonimo è proprio quello in invio, e nessun comando, né alcuna sua variante con
-// meno flag, deve sovrascriverlo (scripts/invariant.py lo verifica). Per questo i comandi non
-// contengono il nome: un nome esplicito (curl -o, wget -O) tronca il file prima di ogni controllo,
-// e busybox wget ignora -nc. Il nome arriva da Content-Disposition: curl -OJ rifiuta di
-// sovrascrivere, wget --content-disposition e aria2c salvano con un altro nome (.1). Senza -J o
-// --content-disposition il nome è lo slug, senza -O curl scrive sullo stdout. -f evita di salvare
-// la pagina di errore; --allow-overwrite=false prevale su un aria2.conf che chiede di sovrascrivere.
+// receiverCommands returns the download commands for the link u, one per tool (curl, wget,
+// aria2c): the sender's table and the HTML pages take them from here. aria2c uses a single
+// connection: the relay is a single stream and does not need byte ranges.
+// Invariant: the source is never altered. If the receiver works in the sender's folder, the file with
+// the same name is exactly the one being sent, and no command, nor any variant of it with
+// fewer flags, must overwrite it (scripts/invariant.py checks this). For this reason the commands do not
+// contain the name: an explicit name (curl -o, wget -O) truncates the file before any check,
+// and busybox wget ignores -nc. The name comes from Content-Disposition: curl -OJ refuses to
+// overwrite, while wget --content-disposition and aria2c save under another name (.1). Without -J or
+// --content-disposition the name is the slug; without -O curl writes to stdout. -f avoids saving
+// the error page; --allow-overwrite=false takes precedence over an aria2.conf that asks to overwrite.
 func receiverCommands(u string) []command {
 	return []command{
 		{"curl", fmt.Sprintf("curl -f -OJ \"%s\"", u)},
@@ -872,17 +871,17 @@ func receiverCommands(u string) []command {
 	}
 }
 
-// commands restituisce la tabella ASCII stampata al mittente: una riga per strumento con il
-// comando di download (receiverCommands) e la riga direct con il solo link, senza virgolette, da
-// incollare nel browser: apre la pagina di download, e il file parte solo dal suo pulsante.
+// commands returns the ASCII table printed to the sender: one line per tool with the
+// download command (receiverCommands) and the direct line with only the link, without quotes, to
+// paste into the browser: it opens the download page, and the file starts only from its button.
 func commands(u string) string {
 	cmds := append(receiverCommands(u), command{"direct", u})
 	const (
-		title = "bashtransfer: comandi per il ricevente"
-		note  = "Un solo ricevente per link. Lascia aperto il terminale fino alla fine."
+		title = "bashtransfer: commands for the receiver"
+		note  = "One receiver per link. Keep the terminal open until the end."
 	)
-	// Due colonne (strumento, comando) larghe quanto il contenuto più lungo; titolo e nota occupano
-	// tutta la larghezza. Se sono più larghi dei comandi, la colonna dei comandi si allarga.
+	// Two columns (tool, command) as wide as the longest content; title and note span
+	// the full width. If they are wider than the commands, the command column widens.
 	lw, cw := 0, 0
 	for _, c := range cmds {
 		lw = max(lw, len(c.Label))
@@ -908,25 +907,25 @@ func commands(u string) string {
 	return b.String()
 }
 
-// Esiti di un trasferimento (campo outcome dell'evento transfer).
+// Outcomes of a transfer (outcome field of the transfer event).
 const (
-	outcomeOK         = "ok"          // tutti i byte consegnati al ricevente
-	outcomeAborted    = "aborted"     // relay iniziato e interrotto (mittente, ricevente, inattività)
-	outcomeExpired    = "expired"     // nessun ricevente entro BASHT_WAIT_TIMEOUT (o arresto)
-	outcomeSenderGone = "sender_gone" // il mittente è caduto prima che un ricevente si agganciasse
+	outcomeOK         = "ok"          // all bytes delivered to the receiver
+	outcomeAborted    = "aborted"     // relay started and interrupted (sender, receiver, idle)
+	outcomeExpired    = "expired"     // no receiver within BASHT_WAIT_TIMEOUT (or shutdown)
+	outcomeSenderGone = "sender_gone" // the sender dropped before a receiver attached
 )
 
-// transferLog raccoglie i dati dell'evento transfer, registrato una volta per sessione alla fine
-// dell'upload.
+// transferLog collects the data of the transfer event, recorded once per session at the end of the
+// upload.
 type transferLog struct {
 	session  *relay.Session
 	outcome  string
-	attached time.Time // zero se nessun ricevente si è agganciato
+	attached time.Time // zero if no receiver attached
 	bytes    int64
 }
 
-// log registra l'esito: Info per ok, scadenza e mittente caduto in attesa (comportamenti normali
-// degli utenti), Warn per un relay interrotto a metà.
+// log records the outcome: Info for ok, expiry and a sender that dropped while waiting (normal
+// user behavior), Warn for a relay interrupted midway.
 func (t *transferLog) log(l *slog.Logger, err error) {
 	if t.outcome == "" {
 		t.outcome = outcomeSenderGone
@@ -960,18 +959,18 @@ func (t *transferLog) log(l *slog.Logger, err error) {
 	l.LogAttrs(context.Background(), level, "transfer", attrs...)
 }
 
-// seconds rende una durata come secondi con tre decimali: leggibile in text e numerica in JSON
-// (slog scriverebbe time.Duration in nanosecondi nel JSON).
+// seconds renders a duration as seconds with three decimals: readable in text and numeric in JSON
+// (slog would write time.Duration in nanoseconds in JSON).
 func seconds(key string, d time.Duration) slog.Attr {
 	return slog.Float64(key, math.Round(d.Seconds()*1000)/1000)
 }
 
-// expectsContinue riporta se il client ha chiesto 100 Continue con un body non vuoto.
+// expectsContinue reports whether the client asked for 100 Continue with a non-empty body.
 func expectsContinue(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Expect"), "100-continue") && r.ContentLength != 0
 }
 
-// download reclama lo slug e attende la fine del trasferimento; il relay lo scrive il mittente.
+// download claims the slug and waits for the end of the transfer; the sender writes the relay.
 func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 	if !slug.Valid(id) {
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
@@ -997,7 +996,7 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	case errors.Is(err, relay.ErrClaimed):
-		// Nel log resta gone; il browser (pulsante premuto due volte) vede che il download è partito.
+		// The log keeps "gone"; the browser (button pressed twice) sees that the download has started.
 		h.logReject(r, slog.LevelInfo, http.StatusGone, reasonGone)
 		writeError(w, r, http.StatusGone, pageClaimed, "gone")
 		return
@@ -1024,17 +1023,17 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 	rcv.clearWriteDeadline()
 	if s.Err() != nil {
 		if rcv.started {
-			// Interrompe la risposta senza chunk finale: il client vede un errore (D8).
+			// Interrupts the response without a final chunk: the client sees an error (D8).
 			panic(http.ErrAbortHandler)
 		}
 		writeError(w, r, http.StatusServiceUnavailable, pageAborted, "transfer aborted")
 	}
 }
 
-// rangeFromStart riporta se la richiesta si serve dal primo byte: nessun Range, un Range da
-// ignorare (con If-Range, mai soddisfatto senza validatori; unità diversa da bytes; sintassi non
-// valida) o intervalli che partono tutti da 0. In questi casi il relay risponde 200 con il body
-// intero, come RFC 9110 consente.
+// rangeFromStart reports whether the request is served from the first byte: no Range, a Range to
+// ignore (with If-Range, never satisfied without validators; unit other than bytes; invalid
+// syntax) or ranges that all start at 0. In these cases the relay responds 200 with the whole
+// body, as RFC 9110 allows.
 func rangeFromStart(h http.Header) bool {
 	v := h.Get("Range")
 	if v == "" || h.Get("If-Range") != "" {
@@ -1057,7 +1056,7 @@ func rangeFromStart(h http.Header) bool {
 			return true
 		}
 		if first == "" {
-			// Intervallo suffisso (ultimi N byte): richiede la fine del flusso.
+			// Suffix range (last N bytes): requires the end of the stream.
 			if _, err := strconv.ParseUint(last, 10, 64); err != nil {
 				return true
 			}
@@ -1080,11 +1079,11 @@ func rangeFromStart(h http.Header) bool {
 	return specs == 0 || fromStart
 }
 
-// rejectRange risponde a una richiesta di intervallo che non parte dal primo byte (ripresa con
-// curl -C -, wget -c, connessioni aggiuntive di aria2) senza reclamare lo slug: il relay è un
-// flusso unico, e un 200 con il body intero consumerebbe il trasferimento. Uno slug sconosciuto,
-// concluso o già reclamato risponde come un GET normale. Non 416: curl -C - lo tratta come file
-// già completo ed esce con successo lasciando il file parziale.
+// rejectRange responds to a range request that does not start at the first byte (resume with
+// curl -C -, wget -c, additional aria2 connections) without claiming the slug: the relay is a
+// single stream, and a 200 with the whole body would consume the transfer. An unknown slug,
+// completed or already claimed, responds like a normal GET. Not 416: curl -C - treats it as a
+// file already complete and exits successfully, leaving the partial file.
 func (h *handler) rejectRange(w http.ResponseWriter, r *http.Request, id string) {
 	switch _, err := h.reg.Peek(id); {
 	case errors.Is(err, relay.ErrNotFound):

@@ -33,9 +33,9 @@ func newTestServer(t *testing.T) (*httptest.Server, *relay.Registry) {
 	return newTestServerWait(t, time.Hour)
 }
 
-// newTestServerWait usa wait come timeout di attesa del ricevente (D7).
-// Un mittente senza ricevente e con body non letto non viene rilevato come caduto
-// dal server Go: la scadenza dell'attesa è l'unico modo per chiudere il suo handler.
+// newTestServerWait uses wait as the receiver wait timeout (D7).
+// A sender with no receiver and an unread body is not detected as dropped
+// by the Go server: the wait expiry is the only way to close its handler.
 func newTestServerWait(t *testing.T, wait time.Duration) (*httptest.Server, *relay.Registry) {
 	t.Helper()
 	reg := relay.NewRegistry(100, wait)
@@ -44,7 +44,7 @@ func newTestServerWait(t *testing.T, wait time.Duration) (*httptest.Server, *rel
 	return srv, reg
 }
 
-// within esegue fn e fallisce il test se non termina entro d.
+// within runs fn and fails the test if it does not finish within d.
 func within[T any](t *testing.T, d time.Duration, what string, fn func() T) T {
 	t.Helper()
 	ch := make(chan T, 1)
@@ -53,15 +53,15 @@ func within[T any](t *testing.T, d time.Duration, what string, fn func() T) T {
 	case v := <-ch:
 		return v
 	case <-time.After(d):
-		t.Fatalf("%s: nessuna risposta entro %s", what, d)
+		t.Fatalf("%s: no response within %s", what, d)
 	}
 	var zero T
 	return zero
 }
 
-// cmdOf estrae il comando da una riga della tabella ("| curl   | curl -f -OJ ... |"); "" se la
-// riga non è una riga di comando. La prima colonna non contiene "|", quindi il primo "|" dopo il
-// bordo separa le colonne anche se il nome del file contiene "|".
+// cmdOf extracts the command from a table row ("| curl   | curl -f -OJ ... |"); "" if the
+// row is not a command row. The first column does not contain "|", so the first "|" after the
+// border separates the columns even if the file name contains "|".
 func cmdOf(line string) string {
 	s := strings.TrimSpace(line)
 	if !strings.HasPrefix(s, "|") || !strings.HasSuffix(s, "|") || len(s) < 2 {
@@ -75,7 +75,7 @@ func cmdOf(line string) string {
 	return strings.TrimSpace(s[i+1:])
 }
 
-// slugOf estrae lo slug dall'ultima parte dell'URL in una riga di comando.
+// slugOf extracts the slug from the last part of the URL in a command line.
 func slugOf(line string) string {
 	line = strings.TrimSuffix(strings.TrimSpace(line), `"`)
 	return line[strings.LastIndex(line, "/")+1:]
@@ -90,7 +90,7 @@ type upload struct {
 	slug      string
 }
 
-// openUpload invia PUT e legge i tre comandi della prima risposta.
+// openUpload sends a PUT and reads the three commands from the first response.
 func openUpload(t *testing.T, ctx context.Context, url string, body io.Reader) *upload {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, body)
@@ -100,10 +100,10 @@ func openUpload(t *testing.T, ctx context.Context, url string, body io.Reader) *
 	return openUploadRequest(t, ctx, req)
 }
 
-// openUploadRequest invia req e legge i tre comandi della prima risposta.
+// openUploadRequest sends req and reads the three commands from the first response.
 func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *upload {
 	t.Helper()
-	resp := within(t, 5*time.Second, "risposta PUT", func() *http.Response {
+	resp := within(t, 5*time.Second, "PUT response", func() *http.Response {
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Error(err)
@@ -116,7 +116,7 @@ func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *up
 	}
 	br := bufio.NewReader(resp.Body)
 	var curl, wget, aria2 string
-	within(t, 5*time.Second, "righe dei comandi", func() bool {
+	within(t, 5*time.Second, "command rows", func() bool {
 		for i := 0; i < 20 && (curl == "" || wget == "" || aria2 == ""); i++ {
 			l, err := br.ReadString('\n')
 			switch c := cmdOf(l); {
@@ -136,8 +136,8 @@ func openUploadRequest(t *testing.T, ctx context.Context, req *http.Request) *up
 	return &upload{resp: resp, br: br, curlLine: curl, wgetLine: wget, aria2Line: aria2, slug: slugOf(curl)}
 }
 
-// readCurlLine legge la risposta del mittente fino alla riga del comando curl e ne restituisce il
-// comando, senza le colonne della tabella.
+// readCurlLine reads the sender's response up to the curl command line and returns its
+// command, without the table columns.
 func readCurlLine(br *bufio.Reader) (string, error) {
 	for {
 		l, err := br.ReadString('\n')
@@ -150,16 +150,16 @@ func readCurlLine(br *bufio.Reader) (string, error) {
 	}
 }
 
-// finish legge il resto della risposta del mittente e verifica lo stato 200.
+// finish reads the rest of the sender's response and checks for status 200.
 func (u *upload) finish(t *testing.T) {
 	t.Helper()
 	defer u.resp.Body.Close()
-	within(t, 10*time.Second, "fine risposta PUT", func() error {
+	within(t, 10*time.Second, "end of PUT response", func() error {
 		_, err := io.ReadAll(u.br)
 		return err
 	})
 	if u.resp.StatusCode != http.StatusOK {
-		t.Fatalf("stato PUT %d, atteso 200", u.resp.StatusCode)
+		t.Fatalf("PUT status %d, expected 200", u.resp.StatusCode)
 	}
 }
 
@@ -201,13 +201,13 @@ func TestUploadReturnsCommandsBeforeBody(t *testing.T) {
 
 	u := openUpload(t, ctx, srv.URL+"/", pr)
 	if !strings.HasPrefix(u.curlLine, `curl -f -OJ "`) {
-		t.Errorf("riga curl: %q", u.curlLine)
+		t.Errorf("curl line: %q", u.curlLine)
 	}
 	if !strings.HasPrefix(u.wgetLine, `wget --content-disposition "`) {
-		t.Errorf("riga wget: %q", u.wgetLine)
+		t.Errorf("wget line: %q", u.wgetLine)
 	}
 	if len(u.slug) != 10 {
-		t.Errorf("slug %q non di 10 caratteri", u.slug)
+		t.Errorf("slug %q not 10 characters long", u.slug)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestRelayRoundTripSHA(t *testing.T) {
 			u := openUpload(t, ctx, srv.URL+"/file.bin", bytes.NewReader(data))
 			dl := get(t, ctx, srv.URL+"/"+u.slug)
 			if dl.StatusCode != http.StatusOK {
-				t.Fatalf("download stato %d", dl.StatusCode)
+				t.Fatalf("download status %d", dl.StatusCode)
 			}
 			h := sha256.New()
 			n, err := io.Copy(h, dl.Body)
@@ -232,24 +232,24 @@ func TestRelayRoundTripSHA(t *testing.T) {
 				t.Fatal(err)
 			}
 			if n != int64(size) || !bytes.Equal(h.Sum(nil), want[:]) {
-				t.Fatalf("byte %d su %d, sha256 diverso", n, size)
+				t.Fatalf("byte %d of %d, sha256 differs", n, size)
 			}
 			u.finish(t)
 
 			again := get(t, ctx, srv.URL+"/"+u.slug)
 			again.Body.Close()
 			if again.StatusCode != http.StatusGone {
-				t.Errorf("secondo download stato %d, atteso 410", again.StatusCode)
+				t.Errorf("second download status %d, expected 410", again.StatusCode)
 			}
 			if reg.Len() != 0 {
-				t.Errorf("sessioni vive %d, attese 0", reg.Len())
+				t.Errorf("live sessions %d, expected 0", reg.Len())
 			}
 		})
 	}
 }
 
-// TestUploadExpectContinue: client con "Expect: 100-continue" (come curl per upload grandi).
-// Il body deve arrivare intero; senza il 100 esplicito Go chiude il body alla risposta.
+// TestUploadExpectContinue: client with "Expect: 100-continue" (as curl does for large uploads).
+// The body must arrive whole; without an explicit 100, Go closes the body at the response.
 func TestUploadExpectContinue(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -262,7 +262,7 @@ func TestUploadExpectContinue(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Header.Set("Expect", "100-continue")
-	resp := within(t, 5*time.Second, "risposta PUT con Expect", func() *http.Response {
+	resp := within(t, 5*time.Second, "PUT response with Expect", func() *http.Response {
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Error(err)
@@ -274,7 +274,7 @@ func TestUploadExpectContinue(t *testing.T) {
 		t.FailNow()
 	}
 	br := bufio.NewReader(resp.Body)
-	line := within(t, 5*time.Second, "riga curl con Expect", func() string {
+	line := within(t, 5*time.Second, "curl line with Expect", func() string {
 		l, _ := readCurlLine(br)
 		return l
 	})
@@ -283,10 +283,10 @@ func TestUploadExpectContinue(t *testing.T) {
 	n, err := io.Copy(h, dl.Body)
 	dl.Body.Close()
 	if err != nil {
-		t.Fatalf("download con Expect: %v", err)
+		t.Fatalf("download with Expect: %v", err)
 	}
 	if n != int64(len(data)) || !bytes.Equal(h.Sum(nil), want[:]) {
-		t.Fatalf("ricevuti %d byte su %d, sha256 diverso", n, len(data))
+		t.Fatalf("received %d bytes of %d, sha256 differs", n, len(data))
 	}
 	resp.Body.Close()
 }
@@ -299,7 +299,7 @@ func TestGetUnknown404(t *testing.T) {
 		resp := get(t, ctx, srv.URL+p)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
-			t.Errorf("GET %s stato %d, atteso 404", p, resp.StatusCode)
+			t.Errorf("GET %s status %d, expected 404", p, resp.StatusCode)
 		}
 	}
 }
@@ -312,13 +312,13 @@ func TestGetSecondClaim410(t *testing.T) {
 	defer pw.Close()
 
 	u := openUpload(t, ctx, srv.URL+"/x.bin", pr)
-	// La prima GET riceve gli header solo dopo l'aggancio e lo start del relay.
+	// The first GET receives headers only after attachment and relay start.
 	first := get(t, ctx, srv.URL+"/"+u.slug)
 	defer first.Body.Close()
 	second := get(t, ctx, srv.URL+"/"+u.slug)
 	second.Body.Close()
 	if second.StatusCode != http.StatusGone {
-		t.Fatalf("secondo claim stato %d, atteso 410", second.StatusCode)
+		t.Fatalf("second claim status %d, expected 410", second.StatusCode)
 	}
 
 	payload := []byte("payload")
@@ -326,12 +326,12 @@ func TestGetSecondClaim410(t *testing.T) {
 		_, _ = pw.Write(payload)
 		_ = pw.Close()
 	}()
-	got := within(t, 10*time.Second, "lettura primo download", func() []byte {
+	got := within(t, 10*time.Second, "first download read", func() []byte {
 		b, _ := io.ReadAll(first.Body)
 		return b
 	})
 	if !bytes.Equal(got, payload) {
-		t.Fatalf("primo download %q, atteso %q", got, payload)
+		t.Fatalf("first download %q, expected %q", got, payload)
 	}
 	u.finish(t)
 }
@@ -353,7 +353,7 @@ func TestSenderAbortFailsReceiver(t *testing.T) {
 	for slug == "" {
 		line, err := br.ReadString('\n')
 		if err != nil {
-			t.Fatalf("lettura comandi: %v", err)
+			t.Fatalf("command read: %v", err)
 		}
 		if c := cmdOf(line); strings.HasPrefix(c, "curl ") {
 			slug = slugOf(c)
@@ -385,13 +385,13 @@ func TestSenderAbortFailsReceiver(t *testing.T) {
 	select {
 	case r := <-recv:
 		if r.err == nil {
-			t.Fatalf("il ricevente non ha visto errore con %d byte", r.n)
+			t.Fatalf("the receiver did not see an error with %d bytes", r.n)
 		}
 		if r.n >= total {
-			t.Fatalf("ricevuti %d byte, attesi meno di %d", r.n, total)
+			t.Fatalf("received %d bytes, expected fewer than %d", r.n, total)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("il ricevente non termina dopo l'abort del mittente")
+		t.Fatal("the receiver does not finish after the sender aborts")
 	}
 }
 
@@ -418,7 +418,7 @@ func TestReceiverAbortCleansSession(t *testing.T) {
 	rctx, rcancel := context.WithCancel(context.Background())
 	dl := get(t, rctx, srv.URL+"/"+u.slug)
 	if _, err := io.CopyN(io.Discard, dl.Body, 1<<20); err != nil {
-		t.Fatalf("lettura ricevente: %v", err)
+		t.Fatalf("receiver read: %v", err)
 	}
 	rcancel()
 	dl.Body.Close()
@@ -428,12 +428,12 @@ func TestReceiverAbortCleansSession(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d dopo abort del ricevente, attese 0", reg.Len())
+		t.Fatalf("live sessions %d after receiver abort, expected 0", reg.Len())
 	}
 	select {
 	case <-writeErr:
 	case <-time.After(5 * time.Second):
-		t.Fatal("la scrittura del mittente non è fallita")
+		t.Fatal("the sender's write did not fail")
 	}
 }
 
@@ -446,10 +446,10 @@ func TestUploadMethodNotAllowed(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed {
-		t.Fatalf("DELETE stato %d, atteso 405", resp.StatusCode)
+		t.Fatalf("DELETE status %d, expected 405", resp.StatusCode)
 	}
 	if !strings.Contains(resp.Header.Get("Allow"), "PUT") {
-		t.Fatalf("Allow %q, atteso PUT", resp.Header.Get("Allow"))
+		t.Fatalf("Allow %q, expected PUT", resp.Header.Get("Allow"))
 	}
 }
 
@@ -470,7 +470,7 @@ func TestUploadUnknownLength(t *testing.T) {
 
 		dl := get(t, ctx, srv.URL+"/"+u.slug)
 		if dl.ContentLength != -1 || dl.Header.Get("Content-Length") != "" {
-			t.Errorf("download con lunghezza nota: CL=%d header=%q", dl.ContentLength, dl.Header.Get("Content-Length"))
+			t.Errorf("download with known length: CL=%d header=%q", dl.ContentLength, dl.Header.Get("Content-Length"))
 		}
 		h := sha256.New()
 		n, err := io.Copy(h, dl.Body)
@@ -479,7 +479,7 @@ func TestUploadUnknownLength(t *testing.T) {
 			t.Fatal(err)
 		}
 		if n != int64(size) || !bytes.Equal(h.Sum(nil), want[:]) {
-			t.Fatalf("size %d: ricevuti %d byte, sha256 diverso", size, n)
+			t.Fatalf("size %d: received %d bytes, sha256 differs", size, n)
 		}
 		u.finish(t)
 	}
@@ -494,11 +494,11 @@ func TestUploadNameFromPath(t *testing.T) {
 
 	u := openUpload(t, ctx, srv.URL+"/mydir.tgz", pr)
 	if name := downloadName(t, ctx, srv.URL, u.slug); name != "mydir.tgz" {
-		t.Errorf("nome scaricato %q, atteso mydir.tgz", name)
+		t.Errorf("downloaded name %q, expected mydir.tgz", name)
 	}
 }
 
-// downloadName reclama lo slug e restituisce il nome del file indicato da Content-Disposition.
+// downloadName claims the slug and returns the file name given by Content-Disposition.
 func downloadName(t *testing.T, ctx context.Context, base, slug string) string {
 	t.Helper()
 	resp := get(t, ctx, base+"/"+slug)
@@ -511,8 +511,8 @@ func downloadName(t *testing.T, ctx context.Context, base, slug string) string {
 	return params["filename"]
 }
 
-// TestUploadIdleTimeout: il mittente scrive 1 KiB di 1 MiB dichiarato e si ferma.
-// Con IdleTimeout il relay deve interrompere il ricevente e liberare la sessione (D15).
+// TestUploadIdleTimeout: the sender writes 1 KiB of the declared 1 MiB and then stops.
+// With IdleTimeout the relay must interrupt the receiver and free the session (D15).
 func TestUploadIdleTimeout(t *testing.T) {
 	reg := relay.NewRegistry(100, time.Hour)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 200 * time.Millisecond}))
@@ -533,7 +533,7 @@ func TestUploadIdleTimeout(t *testing.T) {
 	for slug == "" {
 		line, err := br.ReadString('\n')
 		if err != nil {
-			t.Fatalf("lettura comandi: %v", err)
+			t.Fatalf("command read: %v", err)
 		}
 		if c := cmdOf(line); strings.HasPrefix(c, "curl ") {
 			slug = slugOf(c)
@@ -551,7 +551,7 @@ func TestUploadIdleTimeout(t *testing.T) {
 		defer resp.Body.Close()
 		n, err := io.Copy(io.Discard, resp.Body)
 		if err == nil && n < total {
-			err = fmt.Errorf("ricevuti %d byte senza errore", n)
+			err = fmt.Errorf("received %d bytes without error", n)
 		}
 		recv <- err
 	}()
@@ -562,22 +562,22 @@ func TestUploadIdleTimeout(t *testing.T) {
 	select {
 	case err := <-recv:
 		if err == nil {
-			t.Fatal("il ricevente non ha visto errore dopo l'inattività")
+			t.Fatal("the receiver did not see an error after inactivity")
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("il ricevente non termina dopo IdleTimeout")
+		t.Fatal("the receiver does not finish after IdleTimeout")
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for reg.Len() != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d dopo IdleTimeout, attese 0", reg.Len())
+		t.Fatalf("live sessions %d after IdleTimeout, expected 0", reg.Len())
 	}
 }
 
-// TestDownloadHeaders: lunghezza nota → Content-Length; sconosciuta → nessun Content-Length.
-// Content-Disposition riporta il nome usato nei comandi.
+// TestDownloadHeaders: known length → Content-Length; unknown → no Content-Length.
+// Content-Disposition reports the name used in the commands.
 func TestDownloadHeaders(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -590,13 +590,13 @@ func TestDownloadHeaders(t *testing.T) {
 	dl.Body.Close()
 	u.finish(t)
 	if got := dl.Header.Get("Content-Length"); got != fmt.Sprint(len(data)) {
-		t.Errorf("Content-Length %q, atteso %d", got, len(data))
+		t.Errorf("Content-Length %q, expected %d", got, len(data))
 	}
 	if got := dl.Header.Get("Content-Disposition"); got != `attachment; filename="strano nome.zip"` {
 		t.Errorf("Content-Disposition %q", got)
 	}
 	if got := dl.Header.Get("Accept-Ranges"); got != "none" {
-		t.Errorf("Accept-Ranges %q, atteso none", got)
+		t.Errorf("Accept-Ranges %q, expected none", got)
 	}
 
 	pr, pw := io.Pipe()
@@ -610,12 +610,12 @@ func TestDownloadHeaders(t *testing.T) {
 	dl2.Body.Close()
 	u2.finish(t)
 	if got := dl2.Header.Get("Content-Length"); got != "" {
-		t.Errorf("Content-Length %q con lunghezza sconosciuta, atteso assente", got)
+		t.Errorf("Content-Length %q with unknown length, expected none", got)
 	}
 }
 
-// TestStalledReceiverReleasesSession: un ricevente connesso che non legge mai non deve bloccare
-// per sempre mittente e sessione. Il timeout di scrittura (IdleTimeout) interrompe il relay.
+// TestStalledReceiverReleasesSession: a connected receiver that never reads must not block
+// the sender and session forever. The write timeout (IdleTimeout) interrupts the relay.
 func TestStalledReceiverReleasesSession(t *testing.T) {
 	reg := relay.NewRegistry(100, time.Hour)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 200 * time.Millisecond}))
@@ -648,12 +648,12 @@ func TestStalledReceiverReleasesSession(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d con ricevente fermo, attese 0", reg.Len())
+		t.Fatalf("live sessions %d with a stalled receiver, expected 0", reg.Len())
 	}
 }
 
-// TestUploadExpiredClosesSender: senza ricevente, allo scadere dell'attesa il mittente è
-// interrotto (nessuna risposta completa) e lo slug risponde 410.
+// TestUploadExpiredClosesSender: without a receiver, when the wait expires the sender is
+// interrupted (no complete response) and the slug answers 410.
 func TestUploadExpiredClosesSender(t *testing.T) {
 	srv, reg := newTestServerWait(t, 100*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -662,22 +662,22 @@ func TestUploadExpiredClosesSender(t *testing.T) {
 	defer pw.Close()
 	u := openUpload(t, ctx, srv.URL+"/w.bin", pr)
 
-	within(t, 5*time.Second, "chiusura mittente scaduto", func() error {
+	within(t, 5*time.Second, "sender closed after expiry", func() error {
 		_, err := io.ReadAll(u.br)
 		return err
 	})
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d dopo scadenza, attese 0", reg.Len())
+		t.Fatalf("live sessions %d after expiry, expected 0", reg.Len())
 	}
 	resp := get(t, ctx, srv.URL+"/"+u.slug)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("slug scaduto: stato %d, atteso 410", resp.StatusCode)
+		t.Fatalf("expired slug: status %d, expected 410", resp.StatusCode)
 	}
 }
 
-// TestCommandLineHasNoShellExpansion: il nome nei comandi non contiene espansioni di shell
-// ($, backtick, !) né virgolette: l'utente incolla la riga in una shell.
+// TestCommandLineHasNoShellExpansion: the name in the commands contains no shell expansions
+// ($, backtick, !) or quotes: the user pastes the line into a shell.
 func TestCommandLineHasNoShellExpansion(t *testing.T) {
 	srv, _ := newTestServerWait(t, 200*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -690,13 +690,13 @@ func TestCommandLineHasNoShellExpansion(t *testing.T) {
 		name := line[strings.Index(line, `"`)+1:]
 		name = name[:strings.Index(name, `"`)]
 		if strings.ContainsAny(name, "$`!\\") {
-			t.Errorf("nome non sicuro nella riga %q", line)
+			t.Errorf("unsafe name in line %q", line)
 		}
 	}
 }
 
-// TestDownloadHeadersNonASCII: nome non ASCII codificato con filename* (RFC 6266), preceduto da
-// filename con i byte UTF-8 per curl -OJ, che legge solo filename.
+// TestDownloadHeadersNonASCII: non-ASCII name encoded with filename* (RFC 6266), preceded by
+// filename with the UTF-8 bytes for curl -OJ, which reads only filename.
 func TestDownloadHeadersNonASCII(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -712,16 +712,16 @@ func TestDownloadHeadersNonASCII(t *testing.T) {
 		t.Fatalf("Content-Disposition %q: filename %q err %v", cd, params["filename"], err)
 	}
 	if want := `attachment; filename="città.zip"; filename*=utf-8''citt%C3%A0.zip`; cd != want {
-		t.Errorf("Content-Disposition %q, atteso %q", cd, want)
+		t.Errorf("Content-Disposition %q, expected %q", cd, want)
 	}
 	if dl.Header.Get("Cache-Control") != "no-store" || dl.Header.Get("X-Content-Type-Options") != "nosniff" {
-		t.Errorf("header di sicurezza mancanti: %v", dl.Header)
+		t.Errorf("missing security headers: %v", dl.Header)
 	}
 }
 
-// TestConcurrentTransfers: molti trasferimenti simultanei, di dimensioni e modalità diverse
-// (lunghezza nota e chunked), ciascuno verificato con sha256. Sotto -race rileva data race
-// nel registry e nel passaggio mittente-ricevente.
+// TestConcurrentTransfers: many simultaneous transfers of different sizes and modes
+// (known length and chunked), each verified with sha256. Under -race it detects data races
+// in the registry and in the sender-receiver handoff.
 func TestConcurrentTransfers(t *testing.T) {
 	reg := relay.NewRegistry(500, time.Hour)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 10 * time.Second}))
@@ -742,7 +742,7 @@ func TestConcurrentTransfers(t *testing.T) {
 				want := sha256.Sum256(data)
 				var body io.Reader = bytes.NewReader(data)
 				if i%2 == 1 {
-					body = io.NopCloser(bytes.NewReader(data)) // lunghezza ignota: chunked
+					body = io.NopCloser(bytes.NewReader(data)) // unknown length: chunked
 				}
 				req, err := http.NewRequest(http.MethodPut, srv.URL+"/f.bin", body)
 				if err != nil {
@@ -769,7 +769,7 @@ func TestConcurrentTransfers(t *testing.T) {
 					return err
 				}
 				if n != int64(len(data)) || !bytes.Equal(h.Sum(nil), want[:]) {
-					return fmt.Errorf("worker %d: %d byte su %d, sha256 diverso", i, n, len(data))
+					return fmt.Errorf("worker %d: %d bytes of %d, sha256 differs", i, n, len(data))
 				}
 				_, err = io.Copy(io.Discard, br)
 				return err
@@ -788,12 +788,12 @@ func TestConcurrentTransfers(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+		t.Fatalf("live sessions %d, expected 0", reg.Len())
 	}
 }
 
-// TestKeepAliveAfterDownload: dopo un download con IdleTimeout la stessa connessione serve
-// un'altra richiesta (il deadline di scrittura non deve restare impostato).
+// TestKeepAliveAfterDownload: after a download with IdleTimeout the same connection serves
+// another request (the write deadline must not stay set).
 func TestKeepAliveAfterDownload(t *testing.T) {
 	reg := relay.NewRegistry(100, time.Hour)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 300 * time.Millisecond}))
@@ -815,19 +815,19 @@ func TestKeepAliveAfterDownload(t *testing.T) {
 	dl.Body.Close()
 	u.finish(t)
 
-	time.Sleep(600 * time.Millisecond) // oltre IdleTimeout: un deadline residuo sarebbe scaduto
+	time.Sleep(600 * time.Millisecond) // beyond IdleTimeout: a leftover deadline would have expired
 	req2, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/", nil)
 	resp, err := client.Do(req2)
 	if err != nil {
-		t.Fatalf("seconda richiesta sulla stessa connessione: %v", err)
+		t.Fatalf("second request on the same connection: %v", err)
 	}
 	defer resp.Body.Close()
 	if _, err := io.ReadAll(resp.Body); err != nil || resp.StatusCode != http.StatusOK {
-		t.Fatalf("seconda richiesta: stato %d err %v", resp.StatusCode, err)
+		t.Fatalf("second request: status %d err %v", resp.StatusCode, err)
 	}
 }
 
-// TestTransferLogHasNoSlug: il log dell'esito non contiene slug né nome del file.
+// TestTransferLogHasNoSlug: the outcome log contains neither the slug nor the file name.
 func TestTransferLogHasNoSlug(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -849,10 +849,10 @@ func TestTransferLogHasNoSlug(t *testing.T) {
 	}
 	out := buf.String()
 	if !strings.Contains(out, "outcome=ok") || !strings.Contains(out, "bytes=3") {
-		t.Fatalf("log senza esito: %q", out)
+		t.Fatalf("log without outcome: %q", out)
 	}
 	if strings.Contains(out, u.slug) || strings.Contains(out, "segreto") {
-		t.Fatalf("il log espone slug o nome: %q", out)
+		t.Fatalf("log exposes slug or name: %q", out)
 	}
 }
 
@@ -873,8 +873,8 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// TestRejectedUploadDoesNotHoldConnection: dopo un 401 con body dichiarato e mai inviato,
-// il server chiude la connessione entro drainTimeout invece di aspettare il body all'infinito.
+// TestRejectedUploadDoesNotHoldConnection: after a 401 with a declared body that is never sent,
+// the server closes the connection within drainTimeout instead of waiting for the body forever.
 func TestRejectedUploadDoesNotHoldConnection(t *testing.T) {
 	reg := relay.NewRegistry(100, time.Hour)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{Authorize: BasicAuth("u", "p")}))
@@ -889,12 +889,12 @@ func TestRejectedUploadDoesNotHoldConnection(t *testing.T) {
 	n, err := io.Copy(io.Discard, conn)
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		t.Fatalf("connessione ancora aperta dopo %d byte di risposta", n)
+		t.Fatalf("connection still open after %d bytes of response", n)
 	}
 }
 
-// TestNoGoroutineLeak: trasferimenti riusciti, scaduti, con ricevente caduto e con mittente
-// caduto non lasciano goroutine né sessioni. Il numero di goroutine torna al valore iniziale.
+// TestNoGoroutineLeak: successful transfers, expired ones, ones with a receiver that drops and
+// ones with a sender that drops leave no goroutines or sessions. The goroutine count returns to its initial value.
 func TestNoGoroutineLeak(t *testing.T) {
 	reg := relay.NewRegistry(1000, 80*time.Millisecond)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{IdleTimeout: 300 * time.Millisecond}))
@@ -929,7 +929,7 @@ func TestNoGoroutineLeak(t *testing.T) {
 		}
 		slug := slugOf(line)
 		switch i % 3 {
-		case 0: // riuscito
+		case 0: // successful
 			go func() { _, _ = pw.Write([]byte("dati")); _ = pw.Close() }()
 			dl, err := client.Get(srv.URL + "/" + slug)
 			if err != nil {
@@ -937,9 +937,9 @@ func TestNoGoroutineLeak(t *testing.T) {
 			}
 			_, _ = io.Copy(io.Discard, dl.Body)
 			dl.Body.Close()
-		case 1: // scade senza ricevente
+		case 1: // expires without a receiver
 			time.Sleep(150 * time.Millisecond)
-		case 2: // ricevente cade a metà
+		case 2: // receiver drops midway
 			go func() {
 				block := make([]byte, 64<<10)
 				for {
@@ -968,19 +968,19 @@ func TestNoGoroutineLeak(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+		t.Fatalf("live sessions %d, expected 0", reg.Len())
 	}
 	client.CloseIdleConnections()
 	after := settle()
 	if after > baseline+3 {
 		buf := make([]byte, 1<<16)
 		buf = buf[:runtime.Stack(buf, true)]
-		t.Fatalf("goroutine: %d prima, %d dopo\n%s", baseline, after, buf)
+		t.Fatalf("goroutines: %d before, %d after\n%s", baseline, after, buf)
 	}
 }
 
-// TestUnsafeHostRejected: senza PublicURL la base dei comandi viene da Host; un Host con
-// caratteri che la shell interpreta tra virgolette doppie ($, !, spazi) riceve 400 e nessuno slug.
+// TestUnsafeHostRejected: without PublicURL the command base comes from Host; a Host with
+// characters the shell interprets inside double quotes ($, !, spaces) gets 400 and no slug.
 func TestUnsafeHostRejected(t *testing.T) {
 	srv, reg := newTestServer(t)
 	for _, host := range []string{"x$(id)", "x!(id)"} {
@@ -998,16 +998,16 @@ func TestUnsafeHostRejected(t *testing.T) {
 			body, _ := io.ReadAll(resp.Body)
 			conn.Close()
 			if resp.StatusCode != http.StatusBadRequest || strings.Contains(string(body), host) {
-				t.Fatalf("%s Host %q: stato %d body %q, atteso 400 senza Host", line, host, resp.StatusCode, body)
+				t.Fatalf("%s Host %q: status %d body %q, expected 400 without Host", line, host, resp.StatusCode, body)
 			}
 		}
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d dopo Host non valido, attese 0", reg.Len())
+		t.Fatalf("live sessions %d after invalid Host, expected 0", reg.Len())
 	}
 }
 
-// TestPublicURLIgnoresHost: con PublicURL impostata Host non entra nei comandi, anche se non valido.
+// TestPublicURLIgnoresHost: with PublicURL set, Host does not enter the commands, even if invalid.
 func TestPublicURLIgnoresHost(t *testing.T) {
 	reg := relay.NewRegistry(100, 200*time.Millisecond)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{PublicURL: "https://pub.example/"}))
@@ -1024,11 +1024,11 @@ func TestPublicURLIgnoresHost(t *testing.T) {
 	u := openUploadRequest(t, ctx, req)
 	want := `"https://pub.example/` + u.slug + `"`
 	if !strings.HasSuffix(strings.TrimSpace(u.curlLine), want) || strings.Contains(u.curlLine, "$") {
-		t.Fatalf("riga curl %q, attesa base pubblica %s", u.curlLine, want)
+		t.Fatalf("curl line %q, expected public base %s", u.curlLine, want)
 	}
 }
 
-// TestExpiredLogsExpired: lo scadere dell'attesa è registrato come scadenza, non come mittente caduto.
+// TestExpiredLogsExpired: the expiry of the wait is recorded as an expiry, not as a sender that dropped.
 func TestExpiredLogsExpired(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -1040,7 +1040,7 @@ func TestExpiredLogsExpired(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	u := openUpload(t, ctx, srv.URL+"/w.bin", pr)
-	within(t, 5*time.Second, "chiusura mittente scaduto", func() error {
+	within(t, 5*time.Second, "sender closed after expiry", func() error {
 		_, err := io.ReadAll(u.br)
 		return err
 	})
@@ -1052,12 +1052,12 @@ func TestExpiredLogsExpired(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "outcome=expired") || !strings.Contains(out, relay.ErrExpired.Error()) ||
 		strings.Contains(out, relay.ErrSenderGone.Error()) {
-		t.Fatalf("log della scadenza: %q", out)
+		t.Fatalf("expiry log: %q", out)
 	}
 }
 
-// TestUploadCapacity503: oltre BASHT_MAX_SESSIONS il PUT riceve 503 senza comandi; liberata la
-// sessione, un nuovo upload riesce.
+// TestUploadCapacity503: beyond BASHT_MAX_SESSIONS the PUT gets 503 without commands; once the
+// session is released, a new upload succeeds.
 func TestUploadCapacity503(t *testing.T) {
 	reg := relay.NewRegistry(1, time.Hour)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{}))
@@ -1070,7 +1070,7 @@ func TestUploadCapacity503(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := within(t, 5*time.Second, "PUT oltre capacità", func() *http.Response {
+	resp := within(t, 5*time.Second, "PUT beyond capacity", func() *http.Response {
 		r, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Error(err)
@@ -1084,7 +1084,7 @@ func TestUploadCapacity503(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "curl -f -OJ") {
-		t.Fatalf("PUT oltre capacità: stato %d body %q, atteso 503", resp.StatusCode, body)
+		t.Fatalf("PUT beyond capacity: status %d body %q, expected 503", resp.StatusCode, body)
 	}
 
 	dl := get(t, ctx, srv.URL+"/"+u.slug)
@@ -1097,11 +1097,11 @@ func TestUploadCapacity503(t *testing.T) {
 	dl2.Body.Close()
 	u2.finish(t)
 	if string(got) != "ghi" {
-		t.Fatalf("upload dopo capacità liberata: %q", got)
+		t.Fatalf("upload after capacity freed: %q", got)
 	}
 }
 
-// TestEmptyUpload: un file vuoto (Content-Length 0) arriva come risposta 200 vuota, non come errore.
+// TestEmptyUpload: an empty file (Content-Length 0) arrives as an empty 200 response, not as an error.
 func TestEmptyUpload(t *testing.T) {
 	srv, reg := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1116,17 +1116,17 @@ func TestEmptyUpload(t *testing.T) {
 	got, err := io.ReadAll(dl.Body)
 	dl.Body.Close()
 	if err != nil || dl.StatusCode != http.StatusOK || len(got) != 0 || dl.ContentLength != 0 {
-		t.Fatalf("download vuoto: stato %d len %d CL %d err %v", dl.StatusCode, len(got), dl.ContentLength, err)
+		t.Fatalf("empty download: status %d len %d CL %d err %v", dl.StatusCode, len(got), dl.ContentLength, err)
 	}
 	u.finish(t)
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+		t.Fatalf("live sessions %d, expected 0", reg.Len())
 	}
 }
 
-// newTestServerConn avvia il server con ConnContext, come main: serve al rilevamento del
-// mittente caduto durante l'attesa. L'attesa massima è 10 s: se il rilevamento non funziona,
-// la scadenza chiude comunque gli handler e srv.Close non resta bloccato.
+// newTestServerConn starts the server with ConnContext, as in main: it is used to detect a
+// sender that disconnects while waiting. The maximum wait is 10 s: if detection fails,
+// expiry still closes the handlers and srv.Close does not stay blocked.
 func newTestServerConn(t *testing.T, logger *slog.Logger) (*httptest.Server, *relay.Registry) {
 	t.Helper()
 	reg := relay.NewRegistry(100, 10*time.Second)
@@ -1137,7 +1137,7 @@ func newTestServerConn(t *testing.T, logger *slog.Logger) (*httptest.Server, *re
 	return srv, reg
 }
 
-// openRawUpload invia un PUT con Content-Length 100 e 10 byte di body, e restituisce lo slug.
+// openRawUpload sends a PUT with Content-Length 100 and 10 bytes of body, and returns the slug.
 func openRawUpload(t *testing.T, addr string) (net.Conn, string) {
 	t.Helper()
 	conn, err := net.Dial("tcp", addr)
@@ -1152,18 +1152,18 @@ func openRawUpload(t *testing.T, addr string) (net.Conn, string) {
 	}
 	line, err := readCurlLine(bufio.NewReader(resp.Body))
 	if err != nil {
-		t.Fatalf("riga curl: %v", err)
+		t.Fatalf("curl line: %v", err)
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 	return conn, slugOf(line)
 }
 
-// TestWaitingSenderGoneFreesSlug: un mittente che chiude mentre attende (body non letto) viene
-// rilevato entro pochi secondi: la sessione si libera e lo slug risponde 410. Un mittente ancora
-// connesso resta in attesa.
+// TestWaitingSenderGoneFreesSlug: a sender that closes while waiting (body not read) is
+// detected within a few seconds: the session is freed and the slug answers 410. A sender still
+// connected keeps waiting.
 func TestWaitingSenderGoneFreesSlug(t *testing.T) {
 	if !peerCheckSupported {
-		t.Skip("rilevamento disponibile solo su Linux")
+		t.Skip("detection only available on Linux")
 	}
 	var buf syncBuffer
 	srv, reg := newTestServerConn(t, slog.New(slog.NewTextHandler(&buf, nil)))
@@ -1179,23 +1179,23 @@ func TestWaitingSenderGoneFreesSlug(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if reg.Len() != 1 {
-		t.Fatalf("sessioni vive %d, attesa 1 (solo il mittente connesso)", reg.Len())
+		t.Fatalf("live sessions %d, expected 1 (only the connected sender)", reg.Len())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resp := get(t, ctx, srv.URL+"/"+goneSlug)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusGone {
-		t.Fatalf("slug del mittente caduto: stato %d, atteso 410", resp.StatusCode)
+		t.Fatalf("gone sender's slug: status %d, expected 410", resp.StatusCode)
 	}
 	if out := buf.String(); !strings.Contains(out, "outcome=sender_gone") {
-		t.Fatalf("log senza sender_gone: %q", out)
+		t.Fatalf("log without sender_gone: %q", out)
 	}
 }
 
-// TestOkLogIgnoresReceiverCloseAfterLastByte: con Content-Length il ricevente chiude appena ha
-// letto tutti i byte, anche prima che il mittente concluda; l'esito resta ok, senza errore nel log.
-// Con lunghezza ignota una chiusura prima del chunk finale è invece un'interruzione
+// TestOkLogIgnoresReceiverCloseAfterLastByte: with Content-Length the receiver closes as soon as
+// it has read all bytes, even before the sender finishes; the outcome stays ok, with no error in the log.
+// With unknown length, a close before the final chunk is instead an interruption
 // (TestReceiverGoneInterruptsIdleSender).
 func TestOkLogIgnoresReceiverCloseAfterLastByte(t *testing.T) {
 	var buf syncBuffer
@@ -1228,11 +1228,11 @@ func TestOkLogIgnoresReceiverCloseAfterLastByte(t *testing.T) {
 	}
 	out := buf.String()
 	if !strings.Contains(out, "outcome=ok") || strings.Contains(out, "err=") {
-		t.Fatalf("log: %q, atteso outcome=ok senza err", out)
+		t.Fatalf("log: %q, expected outcome=ok without err", out)
 	}
 }
 
-// TestUploadNameEncodedSlash: un %2F nel nome non rende il path multi-segmento; resta l'ultima parte.
+// TestUploadNameEncodedSlash: a %2F in the name does not make the path multi-segment; the last part remains.
 func TestUploadNameEncodedSlash(t *testing.T) {
 	srv, _ := newTestServerWait(t, 200*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1241,18 +1241,18 @@ func TestUploadNameEncodedSlash(t *testing.T) {
 	defer pw.Close()
 	u := openUpload(t, ctx, srv.URL+"/a%2Fb.txt", pr)
 	if name := downloadName(t, ctx, srv.URL, u.slug); name != "b.txt" {
-		t.Fatalf("nome scaricato %q, atteso b.txt", name)
+		t.Fatalf("downloaded name %q, expected b.txt", name)
 	}
 	resp := get(t, ctx, srv.URL+"/AbC%2F12345")
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("GET con %%2F: stato %d, atteso 404", resp.StatusCode)
+		t.Fatalf("GET with %%2F: status %d, expected 404", resp.StatusCode)
 	}
 }
 
-// TestUploadCommands: le tre righe usano lo stesso URL e nessuna contiene il nome del file (arriva
-// da Content-Disposition); aria2c usa una sola connessione. La risposta al mittente chiude la
-// connessione.
+// TestUploadCommands: the three lines use the same URL and none contains the file name (it arrives
+// from Content-Disposition); aria2c uses a single connection. The response to the sender closes the
+// connection.
 func TestUploadCommands(t *testing.T) {
 	srv, _ := newTestServerWait(t, 200*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1268,11 +1268,11 @@ func TestUploadCommands(t *testing.T) {
 	}
 	for i, got := range []string{u.curlLine, u.wgetLine, u.aria2Line} {
 		if got != want[i] {
-			t.Errorf("riga %d: %q, attesa %q", i+1, got, want[i])
+			t.Errorf("line %d: %q, expected %q", i+1, got, want[i])
 		}
 	}
 	if !u.resp.Close {
-		t.Error("risposta al mittente senza Connection: close")
+		t.Error("response to the sender without Connection: close")
 	}
 }
 
@@ -1311,12 +1311,12 @@ func TestRangeFromStart(t *testing.T) {
 			h.Set("If-Range", c.ifRange)
 		}
 		if got := rangeFromStart(h); got != c.want {
-			t.Errorf("Range %q If-Range %q: %v, atteso %v", c.rng, c.ifRange, got, c.want)
+			t.Errorf("Range %q If-Range %q: %v, expected %v", c.rng, c.ifRange, got, c.want)
 		}
 	}
 }
 
-// getWithRange esegue un GET con l'header Range indicato.
+// getWithRange performs a GET with the given Range header.
 func getWithRange(t *testing.T, ctx context.Context, url, rng string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -1331,9 +1331,9 @@ func getWithRange(t *testing.T, ctx context.Context, url, rng string) *http.Resp
 	return resp
 }
 
-// TestRangeResumeDoesNotClaim: una ripresa (Range da un byte > 0) riceve 400 senza consumare
-// lo slug; il download completo successivo riesce. Su slug sconosciuti, reclamati o conclusi la
-// risposta è quella di un GET normale. Range da 0 è servito con 200 e il body intero.
+// TestRangeResumeDoesNotClaim: a resume (Range from a byte > 0) gets 400 without consuming
+// the slug; the following full download succeeds. For unknown, claimed or concluded slugs the
+// response is that of a normal GET. Range from 0 is served with 200 and the whole body.
 func TestRangeResumeDoesNotClaim(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1346,40 +1346,40 @@ func TestRangeResumeDoesNotClaim(t *testing.T) {
 		resp := getWithRange(t, ctx, url, rng)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Accept-Ranges") != "none" {
-			t.Fatalf("Range %q: stato %d Accept-Ranges %q, atteso 400 e none", rng, resp.StatusCode, resp.Header.Get("Accept-Ranges"))
+			t.Fatalf("Range %q: status %d Accept-Ranges %q, expected 400 and none", rng, resp.StatusCode, resp.Header.Get("Accept-Ranges"))
 		}
 	}
 	unknown := getWithRange(t, ctx, srv.URL+"/ZZZZZZZZZZ", "bytes=100-")
 	unknown.Body.Close()
 	if unknown.StatusCode != http.StatusNotFound {
-		t.Fatalf("Range su slug sconosciuto: stato %d, atteso 404", unknown.StatusCode)
+		t.Fatalf("Range on unknown slug: status %d, expected 404", unknown.StatusCode)
 	}
 
 	dl := getWithRange(t, ctx, url, "bytes=0-")
 	if dl.StatusCode != http.StatusOK {
-		t.Fatalf("Range da 0: stato %d, atteso 200", dl.StatusCode)
+		t.Fatalf("Range from 0: status %d, expected 200", dl.StatusCode)
 	}
 	claimed := getWithRange(t, ctx, url, "bytes=100-")
 	claimed.Body.Close()
 	if claimed.StatusCode != http.StatusGone {
-		t.Fatalf("Range su slug reclamato: stato %d, atteso 410", claimed.StatusCode)
+		t.Fatalf("Range on claimed slug: status %d, expected 410", claimed.StatusCode)
 	}
 	got, err := io.ReadAll(dl.Body)
 	dl.Body.Close()
 	if err != nil || !bytes.Equal(got, data) {
-		t.Fatalf("download dopo i rifiuti: %d byte, %v", len(got), err)
+		t.Fatalf("download after the rejections: %d bytes, %v", len(got), err)
 	}
 	u.finish(t)
 	gone := getWithRange(t, ctx, url, "bytes=100-")
 	gone.Body.Close()
 	if gone.StatusCode != http.StatusGone {
-		t.Fatalf("Range su slug concluso: stato %d, atteso 410", gone.StatusCode)
+		t.Fatalf("Range on concluded slug: status %d, expected 410", gone.StatusCode)
 	}
 }
 
-// TestReceiverGoneInterruptsIdleSender: il ricevente chiude mentre il mittente non sta inviando
-// (lettura del body in attesa). Il relay si interrompe subito, senza attendere il prossimo byte
-// del mittente o IdleTimeout: la sessione si libera e il mittente vede un errore.
+// TestReceiverGoneInterruptsIdleSender: the receiver closes while the sender is not sending
+// (reading the body while waiting). The relay stops at once, without waiting for the next byte
+// from the sender or IdleTimeout: the session is freed and the sender sees an error.
 func TestReceiverGoneInterruptsIdleSender(t *testing.T) {
 	for _, idle := range []time.Duration{0, time.Minute} {
 		t.Run(fmt.Sprint("idle=", idle), func(t *testing.T) {
@@ -1406,33 +1406,33 @@ func TestReceiverGoneInterruptsIdleSender(t *testing.T) {
 			dcancel()
 			dl.Body.Close()
 
-			err := within(t, 5*time.Second, "fine risposta del mittente", func() error {
+			err := within(t, 5*time.Second, "end of sender response", func() error {
 				_, err := io.ReadAll(u.br)
 				return err
 			})
 			u.resp.Body.Close()
 			if err == nil {
-				t.Fatal("risposta del mittente completa dopo la caduta del ricevente, atteso errore")
+				t.Fatal("sender response complete after the receiver dropped, expected error")
 			}
 			deadline := time.Now().Add(2 * time.Second)
 			for reg.Len() != 0 && time.Now().Before(deadline) {
 				time.Sleep(10 * time.Millisecond)
 			}
 			if reg.Len() != 0 {
-				t.Fatalf("sessioni vive %d, attese 0", reg.Len())
+				t.Fatalf("live sessions %d, expected 0", reg.Len())
 			}
 			for !strings.Contains(buf.String(), "outcome=") && time.Now().Before(deadline) {
 				time.Sleep(10 * time.Millisecond)
 			}
 			if out := buf.String(); !strings.Contains(out, "outcome=aborted") || !strings.Contains(out, `err="receiver gone"`) {
-				t.Fatalf("log %q, atteso outcome=aborted con receiver gone", out)
+				t.Fatalf("log %q, expected outcome=aborted with receiver gone", out)
 			}
 		})
 	}
 }
 
-// TestPeerClosedOnClosedConn: una connessione già chiusa dal server conta come caduta, così un
-// mittente in attesa non resta appeso dopo srv.Close.
+// TestPeerClosedOnClosedConn: a connection already closed by the server counts as dropped, so a
+// sender waiting does not stay hung after srv.Close.
 func TestPeerClosedOnClosedConn(t *testing.T) {
 	if !peerCheckSupported {
 		t.Skip("rilevamento disponibile solo su Linux")
@@ -1452,15 +1452,15 @@ func TestPeerClosedOnClosedConn(t *testing.T) {
 		t.Fatal(err)
 	}
 	if peerClosed(conn) {
-		t.Fatal("connessione aperta segnalata come chiusa")
+		t.Fatal("open connection reported as closed")
 	}
 	conn.Close()
 	if !peerClosed(conn) {
-		t.Fatal("connessione chiusa non segnalata")
+		t.Fatal("connection closed not reported")
 	}
 }
 
-// jsonLines decodifica le righe JSON del log.
+// jsonLines decodes the JSON lines of the log.
 func jsonLines(t *testing.T, out string) []map[string]any {
 	t.Helper()
 	var lines []map[string]any
@@ -1470,16 +1470,16 @@ func jsonLines(t *testing.T, out string) []map[string]any {
 		}
 		var m map[string]any
 		if err := json.Unmarshal([]byte(l), &m); err != nil {
-			t.Fatalf("riga di log non JSON %q: %v", l, err)
+			t.Fatalf("log line not JSON %q: %v", l, err)
 		}
 		lines = append(lines, m)
 	}
 	return lines
 }
 
-// TestTransferLogFields: a livello debug una sessione completa produce upload_accepted,
-// download_claimed, receiver_attached e transfer con lo stesso id; transfer ha byte, lunghezza,
-// tempi e velocità. Nessuna riga contiene slug, nome o path.
+// TestTransferLogFields: at debug level a complete session produces upload_accepted,
+// download_claimed, receiver_attached and transfer with the same id; transfer has bytes, length,
+// times and speed. No line contains slug, name or path.
 func TestTransferLogFields(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -1501,7 +1501,7 @@ func TestTransferLogFields(t *testing.T) {
 	}
 	out := buf.String()
 	if strings.Contains(out, u.slug) || strings.Contains(out, "segreto") {
-		t.Fatalf("il log espone slug o nome: %q", out)
+		t.Fatalf("the log exposes slug or name: %q", out)
 	}
 	byMsg := map[string]map[string]any{}
 	for _, m := range jsonLines(t, out) {
@@ -1509,15 +1509,15 @@ func TestTransferLogFields(t *testing.T) {
 	}
 	tr := byMsg["transfer"]
 	if tr == nil {
-		t.Fatalf("evento transfer mancante: %q", out)
+		t.Fatalf("missing transfer event: %q", out)
 	}
 	id, _ := tr["id"].(string)
 	if len(id) != 16 {
-		t.Fatalf("id %q, attesi 16 caratteri esadecimali", id)
+		t.Fatalf("id %q, expected 16 hexadecimal characters", id)
 	}
 	for _, msg := range []string{"upload_accepted", "download_claimed", "receiver_attached"} {
 		if byMsg[msg] == nil || byMsg[msg]["id"] != id || byMsg[msg]["level"] != "DEBUG" {
-			t.Errorf("evento %s: %v, atteso a DEBUG con id %s", msg, byMsg[msg], id)
+			t.Errorf("event %s: %v, expected at DEBUG with id %s", msg, byMsg[msg], id)
 		}
 	}
 	if tr["level"] != "INFO" || tr["outcome"] != "ok" || tr["bytes"] != float64(len(data)) || tr["length"] != float64(len(data)) {
@@ -1525,16 +1525,16 @@ func TestTransferLogFields(t *testing.T) {
 	}
 	for _, k := range []string{"wait_s", "transfer_s", "rate_mbs"} {
 		if _, ok := tr[k].(float64); !ok {
-			t.Errorf("transfer: campo %s non numerico: %v", k, tr[k])
+			t.Errorf("transfer: field %s not numeric: %v", k, tr[k])
 		}
 	}
 	if _, ok := tr["err"]; ok {
-		t.Errorf("transfer ok con err: %v", tr)
+		t.Errorf("transfer ok with err: %v", tr)
 	}
 }
 
-// TestRejectionLogs: i rifiuti sono registrati come request_rejected con stato e motivo, al
-// livello previsto, senza path né credenziali.
+// TestRejectionLogs: rejections are recorded as request_rejected with status and reason, at the
+// expected level, without path or credentials.
 func TestRejectionLogs(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -1557,7 +1557,7 @@ func TestRejectionLogs(t *testing.T) {
 
 	out := buf.String()
 	if strings.Contains(out, "segreto") || strings.Contains(out, "passwordsbagliata") || strings.Contains(out, "ZZZZZZZZZZ") {
-		t.Fatalf("il log espone path o credenziali: %q", out)
+		t.Fatalf("the log exposes path or credentials: %q", out)
 	}
 	want := []struct {
 		level, reason string
@@ -1565,18 +1565,18 @@ func TestRejectionLogs(t *testing.T) {
 	}{{"WARN", "unauthorized", 401}, {"DEBUG", "not_found", 404}}
 	lines := jsonLines(t, out)
 	if len(lines) != len(want) {
-		t.Fatalf("righe %d, attese %d: %q", len(lines), len(want), out)
+		t.Fatalf("lines %d, expected %d: %q", len(lines), len(want), out)
 	}
 	for i, w := range want {
 		m := lines[i]
 		if m["msg"] != "request_rejected" || m["level"] != w.level || m["reason"] != w.reason || m["status"] != w.status {
-			t.Errorf("riga %d: %v, attesi %s %s %v", i, m, w.level, w.reason, w.status)
+			t.Errorf("line %d: %v, expected %s %s %v", i, m, w.level, w.reason, w.status)
 		}
 	}
 }
 
-// TestAbortedTransferLogsWarn: un relay interrotto a metà è registrato a WARN con l'errore; la
-// scadenza dell'attesa resta INFO.
+// TestAbortedTransferLogsWarn: a relay interrupted midway is logged at WARN with the error; the
+// expiry of the wait stays INFO.
 func TestAbortedTransferLogsWarn(t *testing.T) {
 	var buf syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
@@ -1590,7 +1590,7 @@ func TestAbortedTransferLogsWarn(t *testing.T) {
 	req.ContentLength = 1 << 20
 	u := openUploadRequest(t, ctx, req)
 	dl := get(t, ctx, srv.URL+"/"+u.slug)
-	go func() { _, _ = pw.Write(make([]byte, 1000)); pw.CloseWithError(errors.New("mittente caduto")) }()
+	go func() { _, _ = pw.Write(make([]byte, 1000)); pw.CloseWithError(errors.New("sender dropped")) }()
 	_, _ = io.Copy(io.Discard, dl.Body)
 	dl.Body.Close()
 
@@ -1600,7 +1600,7 @@ func TestAbortedTransferLogsWarn(t *testing.T) {
 	}
 	lines := jsonLines(t, buf.String())
 	if len(lines) != 1 {
-		t.Fatalf("righe %d: %q", len(lines), buf.String())
+		t.Fatalf("lines %d: %q", len(lines), buf.String())
 	}
 	m := lines[0]
 	if m["level"] != "WARN" || m["outcome"] != "aborted" || m["err"] == nil || m["length"] != float64(1<<20) {
@@ -1608,8 +1608,8 @@ func TestAbortedTransferLogsWarn(t *testing.T) {
 	}
 }
 
-// TestUploadH2C verifica il relay su HTTP/2 in chiaro (proxy Apache h2c://): il 100 Continue
-// arriva anche senza Expect, i comandi precedono il body e il file passa intatto.
+// TestUploadH2C checks the relay over plain HTTP/2 (Apache h2c:// proxy): the 100 Continue
+// arrives even without Expect, the commands precede the body and the file passes intact.
 func TestUploadH2C(t *testing.T) {
 	reg := relay.NewRegistry(100, time.Hour)
 	srv := httptest.NewUnstartedServer(New(reg, relay.NewCopier(64<<10), Options{}))
@@ -1651,15 +1651,15 @@ func TestUploadH2C(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	if resp.ProtoMajor != 2 {
-		t.Fatalf("protocollo %s, atteso HTTP/2", resp.Proto)
+		t.Fatalf("protocol %s, expected HTTP/2", resp.Proto)
 	}
 	select {
 	case <-continued:
 	default:
-		t.Error("100 Continue non ricevuto")
+		t.Error("100 Continue not received")
 	}
 	if c := resp.Header.Get("Connection"); c != "" {
-		t.Errorf("header Connection %q su HTTP/2", c)
+		t.Errorf("header Connection %q on HTTP/2", c)
 	}
 	br := bufio.NewReader(resp.Body)
 	line, _ := readCurlLine(br)
@@ -1671,12 +1671,12 @@ func TestUploadH2C(t *testing.T) {
 		return b
 	})
 	if sha256.Sum256(got) != sha256.Sum256(data) {
-		t.Errorf("contenuto diverso: %d byte, attesi %d", len(got), len(data))
+		t.Errorf("different content: %d bytes, expected %d", len(got), len(data))
 	}
 }
 
-// TestUploadH2CHeartbeat verifica che su HTTP/2 un mittente in attesa riceva "\r" periodici
-// dopo i comandi: è la scrittura che fa cadere lo stream quando un proxy h2c ha perso il mittente.
+// TestUploadH2CHeartbeat checks that over HTTP/2 a waiting sender receives periodic "\r"
+// after the commands: it is the write that drops the stream when an h2c proxy has lost the sender.
 func TestUploadH2CHeartbeat(t *testing.T) {
 	old := heartbeatInterval
 	heartbeatInterval = 20 * time.Millisecond
@@ -1716,18 +1716,18 @@ func TestUploadH2CHeartbeat(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	br := bufio.NewReader(resp.Body)
-	// Dopo la tabella dei comandi (che termina con "\n") il primo byte è l'heartbeat.
+	// After the command table (which ends with "\n") the first byte is the heartbeat.
 	tail := within(t, 5*time.Second, "heartbeat", func() string {
 		s, _ := br.ReadString('\r')
 		return s
 	})
 	if !strings.HasSuffix(tail, "+\n\r") || !strings.Contains(tail, "aria2c") {
-		t.Errorf("dopo la tabella: %q, atteso un heartbeat \"\\r\"", tail)
+		t.Errorf("after the table: %q, expected a heartbeat \"\\r\"", tail)
 	}
 }
 
-// TestHomeBrowser: con Accept text/html la home è la pagina di cortesia, con la base dei comandi
-// e la CSP; senza (curl) resta il testo delle istruzioni.
+// TestHomeBrowser: with Accept text/html the home is the courtesy page, with the command base
+// and the CSP; without it (curl) the instructions text remains.
 func TestHomeBrowser(t *testing.T) {
 	srv, _ := newTestServer(t)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
@@ -1739,13 +1739,13 @@ func TestHomeBrowser(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("stato %d", resp.StatusCode)
+		t.Fatalf("status %d", resp.StatusCode)
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
 		t.Errorf("Content-Type %q", ct)
 	}
 	if resp.Header.Get("Content-Security-Policy") == "" {
-		t.Error("CSP mancante")
+		t.Error("missing CSP")
 	}
 	for _, want := range []string{
 		"<title>Bashtransfer</title>",
@@ -1758,11 +1758,11 @@ func TestHomeBrowser(t *testing.T) {
 		`rel="icon"`,
 		"sudo apt install curl wget aria2 zip unzip",
 		"brew install curl wget aria2 zip unzip",
-		// Base http: la pagina non promette HTTPS.
+		// Base http: the page does not promise HTTPS.
 		"Not encrypted.",
 	} {
 		if !strings.Contains(string(body), want) {
-			t.Errorf("la pagina non contiene %q", want)
+			t.Errorf("the page does not contain %q", want)
 		}
 	}
 	if strings.Contains(string(body), "Encrypted in transit") {
@@ -1772,11 +1772,11 @@ func TestHomeBrowser(t *testing.T) {
 	plain := get(t, context.Background(), srv.URL+"/")
 	defer plain.Body.Close()
 	if ct := plain.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
-		t.Errorf("senza Accept html: Content-Type %q", ct)
+		t.Errorf("without Accept html: Content-Type %q", ct)
 	}
 }
 
-// TestHomeEscapesBase: la base pubblica finisce nell'HTML solo con escape.
+// TestHomeEscapesBase: the public base reaches the HTML only escaped.
 func TestHomeEscapesBase(t *testing.T) {
 	reg := relay.NewRegistry(10, time.Hour)
 	h := New(reg, relay.NewCopier(64<<10), Options{PublicURL: `https://x.it/"><script>alert(1)</script>`})
@@ -1785,13 +1785,13 @@ func TestHomeEscapesBase(t *testing.T) {
 	req.Header.Set("Accept", "text/html")
 	h.ServeHTTP(rec, req)
 	if strings.Contains(rec.Body.String(), "<script>alert(1)") {
-		t.Error("base non escapata nell'HTML")
+		t.Error("base not escaped in the HTML")
 	}
 }
 
-// TestCommandsTable: tabella ASCII a due colonne (strumento, comando); tutte le righe hanno la
-// stessa larghezza, anche con un URL corto (titolo e nota più larghi dei comandi), con un URL
-// lunghissimo e con caratteri non ASCII; le tre righe di comando restituiscono i comandi interi.
+// TestCommandsTable: two-column ASCII table (tool, command); all rows have the
+// same width, even with a short URL (title and note wider than the commands), with a very long URL
+// and with non-ASCII characters; the three command lines return the whole commands.
 func TestCommandsTable(t *testing.T) {
 	for _, u := range []string{"http://h/AbC123xY9z", "https://h.it/AbC123xY9z",
 		"https://perché.è.così.it/AbC123xY9z", "https://" + strings.Repeat("x", 120) + ".it/AbC123xY9z"} {
@@ -1806,14 +1806,14 @@ func checkCommandsTable(t *testing.T, out, u string) {
 	var cmds []string
 	for _, l := range lines {
 		if !strings.HasPrefix(l, "+") && !strings.HasPrefix(l, "|") {
-			t.Errorf("riga fuori dalla tabella: %q", l)
+			t.Errorf("line outside the table: %q", l)
 			continue
 		}
 		if width == -1 {
 			width = utf8.RuneCountInString(l)
 		}
 		if n := utf8.RuneCountInString(l); n != width {
-			t.Errorf("riga di larghezza %d, attesa %d: %q", n, width, l)
+			t.Errorf("line of width %d, expected %d: %q", n, width, l)
 		}
 		if c := cmdOf(l); c != "" {
 			cmds = append(cmds, c)
@@ -1826,13 +1826,13 @@ func checkCommandsTable(t *testing.T, out, u string) {
 		u,
 	}
 	if !slices.Equal(cmds, want) {
-		t.Errorf("comandi %q, attesi %q", cmds, want)
+		t.Errorf("commands %q, expected %q", cmds, want)
 	}
 }
 
-// TestDefaultDisposition: ogni risposta che non è un download porta un Content-Disposition con un
-// nome innocuo, così curl -J apre il file con O_EXCL invece di troncare il nome preso dall'URL. La
-// home non ne ha, il download porta il nome vero.
+// TestDefaultDisposition: every response that is not a download carries a Content-Disposition with a
+// harmless name, so curl -J opens the file with O_EXCL instead of truncating the name taken from the URL. The
+// home has none, the download carries the real name.
 func TestDefaultDisposition(t *testing.T) {
 	srv, _ := newTestServerWait(t, 200*time.Millisecond)
 	ctx := context.Background()
@@ -1840,9 +1840,9 @@ func TestDefaultDisposition(t *testing.T) {
 	defer pw.Close()
 	u := openUpload(t, ctx, srv.URL+"/x.bin", pr)
 	if cd := u.resp.Header.Get("Content-Disposition"); cd != defaultDisposition {
-		t.Errorf("PUT: Content-Disposition %q, atteso %q", cd, defaultDisposition)
+		t.Errorf("PUT: Content-Disposition %q, expected %q", cd, defaultDisposition)
 	}
-	within(t, 5*time.Second, "scadenza dell'attesa", func() error {
+	within(t, 5*time.Second, "expiry of the wait", func() error {
 		_, err := io.ReadAll(u.br)
 		return err
 	})
@@ -1859,11 +1859,11 @@ func TestDefaultDisposition(t *testing.T) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode != status || resp.Header.Get("Content-Disposition") != want {
-			t.Errorf("%s %s: stato %d, Content-Disposition %q; attesi %d, %q",
+			t.Errorf("%s %s: status %d, Content-Disposition %q; expected %d, %q",
 				method, path, resp.StatusCode, resp.Header.Get("Content-Disposition"), status, want)
 		}
 	}
-	// Anche le pagine HTML (download ed errori) portano il nome innocuo.
+	// HTML pages too (download and errors) carry the harmless name.
 	for _, accept = range []string{"*/*", "text/html"} {
 		check(http.MethodGet, "/"+u.slug, http.StatusGone, defaultDisposition)
 		check(http.MethodPost, "/"+u.slug, http.StatusGone, defaultDisposition)
@@ -1875,7 +1875,7 @@ func TestDefaultDisposition(t *testing.T) {
 	}
 }
 
-// newConnServer è il server di produzione per i test dell'esito: ConnContext come in main, HTTP/1
+// newConnServer is the production server for the outcome tests: ConnContext as in main, HTTP/1
 // e h2c.
 func newConnServer(t *testing.T, wait time.Duration) *httptest.Server {
 	t.Helper()
@@ -1889,14 +1889,14 @@ func newConnServer(t *testing.T, wait time.Duration) *httptest.Server {
 	return srv
 }
 
-// outcomeClients sono i client dei test dell'esito: HTTP/1 diretto e h2c (come Apache).
+// outcomeClients are the clients of the outcome tests: direct HTTP/1 and h2c (as Apache does).
 func outcomeClients() map[string]*http.Client {
 	tr := &http.Transport{Protocols: new(http.Protocols)}
 	tr.Protocols.SetUnencryptedHTTP2(true)
 	return map[string]*http.Client{"http1": http.DefaultClient, "h2c": {Transport: tr}}
 }
 
-// putOutcome invia il PUT con client e restituisce la risposta, il suo reader dopo la riga curl e
+// putOutcome sends the PUT with a client and returns the response, its reader after the curl line and
 // lo slug.
 func putOutcome(t *testing.T, client *http.Client, url string, body io.Reader, length int64) (*http.Response, *bufio.Reader, string) {
 	t.Helper()
@@ -1916,26 +1916,26 @@ func putOutcome(t *testing.T, client *http.Client, url string, body io.Reader, l
 	br := bufio.NewReader(resp.Body)
 	line, err := readCurlLine(br)
 	if err != nil {
-		t.Fatalf("riga curl: %v", err)
+		t.Fatalf("curl line: %v", err)
 	}
 	return resp, br, slugOf(line)
 }
 
-// readOutcome legge il resto della risposta del mittente: il testo e l'errore di lettura.
+// readOutcome reads the rest of the sender's response: the text and the read error.
 func readOutcome(t *testing.T, br *bufio.Reader) (string, error) {
 	t.Helper()
 	type res struct {
 		s   string
 		err error
 	}
-	r := within(t, 5*time.Second, "esito al mittente", func() res {
+	r := within(t, 5*time.Second, "outcome to the sender", func() res {
 		b, err := io.ReadAll(br)
 		return res{string(b), err}
 	})
 	return r.s, r.err
 }
 
-// TestSenderOutcomeOK: a trasferimento riuscito l'ultima riga per il mittente è l'esito, con
+// TestSenderOutcomeOK: on a successful transfer the last line for the sender is the outcome, with
 // lunghezza nota e ignota (pipe), e la risposta termina regolarmente.
 func TestSenderOutcomeOK(t *testing.T) {
 	srv := newConnServer(t, time.Hour)
@@ -1953,12 +1953,12 @@ func TestSenderOutcomeOK(t *testing.T) {
 				got, err := io.ReadAll(dl.Body)
 				dl.Body.Close()
 				if err != nil || !bytes.Equal(got, data) {
-					t.Fatalf("download: %d byte, err %v", len(got), err)
+					t.Fatalf("download: %d bytes, err %v", len(got), err)
 				}
 				out, err := readOutcome(t, br)
-				want := "+\n\nOK: download completato, 300000 byte (293.0 KiB) consegnati al ricevente in "
+				want := "+\n\nOK: download completed, 300000 bytes (293.0 KiB) delivered to the receiver in "
 				if err != nil || !strings.Contains(out, want) || !strings.HasSuffix(out, ".\n") {
-					t.Fatalf("esito %q (err %v), atteso %q...", out, err, want)
+					t.Fatalf("outcome %q (err %v), expected %q...", out, err, want)
 				}
 			})
 		}
@@ -1994,18 +1994,18 @@ func TestRelayReportsReceiverFlushFailure(t *testing.T) {
 			body := relay.NewIdleReader(strings.NewReader("ab"), 0, func(time.Time) error { return nil })
 			n, err := h.copyUntilAbort(s, rr, body)
 			if !errors.Is(err, relay.ErrReceiverGone) {
-				t.Fatalf("flush fallito: copia %d byte, errore %v invece di ErrReceiverGone", n, err)
+				t.Fatalf("flush failed: copy %d bytes, error %v instead of ErrReceiverGone", n, err)
 			}
 			if failAt == 1 && n != 0 {
-				t.Fatalf("le intestazioni non sono arrivate ma il body è stato letto: %d byte", n)
+				t.Fatalf("headers did not arrive but the body was read: %d bytes", n)
 			}
 		})
 	}
 }
 
-// TestSenderOutcomeReceiverGone: il ricevente cade dopo 4096 byte. Il mittente legge l'errore come
-// ultima riga; su HTTP/1 la risposta resta troncata (curl esce con errore), su HTTP/2 termina
-// regolarmente (un proxy h2c aggiungerebbe una sua pagina 502 a un reset).
+// TestSenderOutcomeReceiverGone: the receiver drops after 4096 bytes. The sender reads the error as the
+// last line; on HTTP/1 the response stays truncated (curl exits with an error), on HTTP/2 it ends
+// normally (an h2c proxy would add its own 502 page to a reset).
 func TestSenderOutcomeReceiverGone(t *testing.T) {
 	srv := newConnServer(t, time.Hour)
 	for proto, client := range outcomeClients() {
@@ -2027,19 +2027,19 @@ func TestSenderOutcomeReceiverGone(t *testing.T) {
 				out, err := readOutcome(t, br)
 				done := "4096"
 				if length >= 0 {
-					done += " di 1048576"
+					done += " of 1048576"
 				}
-				want := "\nERRORE: download NON completato dopo " + done + " byte: il ricevente si è disconnesso o ha smesso di ricevere.\n"
+				want := "\nERRORE: download NOT completed after " + done + " bytes: the receiver disconnected or stopped receiving.\n"
 				if (err == nil) != (proto == "h2c") || !strings.HasSuffix(out, want) {
-					t.Fatalf("esito %q (err %v), atteso %q, troncato solo su HTTP/1", out, err, want)
+					t.Fatalf("outcome %q (err %v), expected %q, truncated only on HTTP/1", out, err, want)
 				}
 			})
 		}
 	}
 }
 
-// TestSenderOutcomeExpired: nessun ricevente entro l'attesa. Il mittente legge l'errore; la
-// risposta resta troncata solo su HTTP/1.
+// TestSenderOutcomeExpired: no receiver within the wait. The sender reads the error; the response
+// stays truncated only on HTTP/1.
 func TestSenderOutcomeExpired(t *testing.T) {
 	srv := newConnServer(t, 200*time.Millisecond)
 	for proto, client := range outcomeClients() {
@@ -2049,9 +2049,9 @@ func TestSenderOutcomeExpired(t *testing.T) {
 			resp, br, _ := putOutcome(t, client, srv.URL+"/x.bin", pr, 1<<20)
 			defer resp.Body.Close()
 			out, err := readOutcome(t, br)
-			want := "\nERRORE: download NON avvenuto: nessun ricevente si è collegato in "
-			if (err == nil) != (proto == "h2c") || !strings.Contains(out, want) || !strings.HasSuffix(out, ", il link è stato chiuso.\n") {
-				t.Fatalf("esito %q (err %v), atteso %q..., troncato solo su HTTP/1", out, err, want)
+			want := "\nERRORE: download NOT completed: no receiver connected in "
+			if (err == nil) != (proto == "h2c") || !strings.Contains(out, want) || !strings.HasSuffix(out, ", the link has been closed.\n") {
+				t.Fatalf("outcome %q (err %v), expected %q..., truncated only on HTTP/1", out, err, want)
 			}
 		})
 	}
@@ -2059,11 +2059,11 @@ func TestSenderOutcomeExpired(t *testing.T) {
 
 func TestSizeText(t *testing.T) {
 	for n, want := range map[int64]string{
-		0: "0 byte", 1023: "1023 byte", 1024: "1024 byte (1.0 KiB)",
-		3000000: "3000000 byte (2.9 MiB)", 5 << 30: "5368709120 byte (5.0 GiB)",
+		0: "0 bytes", 1023: "1023 bytes", 1024: "1024 bytes (1.0 KiB)",
+		3000000: "3000000 bytes (2.9 MiB)", 5 << 30: "5368709120 bytes (5.0 GiB)",
 	} {
 		if got := sizeText(n); got != want {
-			t.Errorf("sizeText(%d) = %q, atteso %q", n, got, want)
+			t.Errorf("sizeText(%d) = %q, expected %q", n, got, want)
 		}
 	}
 }

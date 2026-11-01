@@ -1,5 +1,5 @@
-// Command bashtransfer è il server di relay: riceve un upload, risponde con i comandi
-// di download e inoltra il body al primo ricevente, senza salvarlo su disco.
+// Command bashtransfer is the relay server: it receives an upload, replies with the
+// download commands and forwards the body to the first receiver, without saving it to disk.
 package main
 
 import (
@@ -26,7 +26,7 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
-	healthcheck := flag.Bool("healthcheck", false, "controlla il server locale (BASHT_LISTEN) ed esce 0 se risponde")
+	healthcheck := flag.Bool("healthcheck", false, "checks the local server (BASHT_LISTEN) and exits 0 if it responds")
 	flag.Parse()
 	if *healthcheck {
 		if err := checkHealth(os.Getenv("BASHT_LISTEN")); err != nil {
@@ -67,31 +67,31 @@ func run() error {
 		opts.Authorize = server.BasicAuth(cfg.AuthUser, cfg.AuthPassword)
 	}
 	handler := server.New(reg, relay.NewCopier(cfg.BufSize), opts)
-	// Nessun ReadTimeout né WriteTimeout: bloccherebbero il relay in streaming.
+	// No ReadTimeout or WriteTimeout: they would block the streaming relay.
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    16 << 10,
-		// Errori interni di net/http (accept, header malformati): evento http_error.
+		// Internal net/http errors (accept, malformed headers): http_error event.
 		ErrorLog: slog.NewLogLogger(logger.With("component", "net/http").Handler(), slog.LevelWarn),
-		// Serve all'handler per rilevare un mittente caduto mentre attende il ricevente.
+		// Lets the handler detect a sender that dropped while waiting for the receiver.
 		ConnContext: server.ConnContext,
-		// HTTP/1.1 e HTTP/2 in chiaro (h2c): un proxy HTTP/1.1 (Apache mod_proxy_http, nginx http)
-		// invia tutto il body prima di leggere la risposta e blocca il mittente, che non vedrebbe i
-		// comandi. Con h2c (Apache: ProxyPass h2c://) richiesta e risposta scorrono insieme.
+		// Plaintext HTTP/1.1 and HTTP/2 (h2c): an HTTP/1.1 proxy (Apache mod_proxy_http, nginx http)
+		// sends the whole body before reading the response and blocks the sender, which would not see
+		// the commands. With h2c (Apache: ProxyPass h2c://) request and response flow together.
 		Protocols: protocols(),
 	}
-	// All'arresto il listener chiude: nessun ricevente può più arrivare, quindi i mittenti in
-	// attesa vengono chiusi subito e il periodo di grazia resta ai trasferimenti in corso.
+	// On shutdown the listener closes: no receiver can arrive anymore, so waiting senders are
+	// closed immediately and the grace period is kept for transfers in progress.
 	srv.RegisterOnShutdown(reg.ExpireWaiting)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Listen prima del log: server_listening compare solo quando la porta accetta connessioni, e un
-	// indirizzo occupato fa fallire run subito.
+	// Listen before logging: server_listening appears only once the port accepts connections, and a
+	// busy address makes run fail immediately.
 	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		return err
@@ -110,8 +110,8 @@ func run() error {
 		return err
 	case <-ctx.Done():
 	}
-	// Dal secondo segnale torna il comportamento predefinito: un altro Ctrl-C termina subito il
-	// processo invece di attendere shutdownTimeout.
+	// After the first signal the default behavior is restored: another Ctrl-C terminates the
+	// process immediately instead of waiting for shutdownTimeout.
 	stop()
 
 	start := time.Now()
@@ -129,7 +129,7 @@ func run() error {
 	return nil
 }
 
-// newLogger crea il logger del server: text (logfmt) o json, una riga per evento, su w.
+// newLogger creates the server logger: text (logfmt) or json, one line per event, to w.
 func newLogger(w io.Writer, format string, level slog.Level) *slog.Logger {
 	opts := &slog.HandlerOptions{Level: level}
 	if format == config.LogJSON {
@@ -138,15 +138,15 @@ func newLogger(w io.Writer, format string, level slog.Level) *slog.Logger {
 	return slog.New(slog.NewTextHandler(w, opts))
 }
 
-// healthURL ricava l'URL locale dall'indirizzo di ascolto: un host vuoto o non specificato
-// diventa il loopback.
+// healthURL derives the local URL from the listen address: an empty or unspecified host
+// becomes the loopback.
 func healthURL(listen string) (string, error) {
 	if listen == "" {
 		listen = ":8080"
 	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
-		return "", fmt.Errorf("BASHT_LISTEN non valida: %q: %w", listen, err)
+		return "", fmt.Errorf("BASHT_LISTEN invalid: %q: %w", listen, err)
 	}
 	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
 		host = "127.0.0.1"
@@ -154,7 +154,7 @@ func healthURL(listen string) (string, error) {
 	return "http://" + net.JoinHostPort(host, port) + "/", nil
 }
 
-// checkHealth esegue GET / sul server locale. Nessun proxy e nessuna rete esterna.
+// checkHealth performs GET / on the local server. No proxy and no external network.
 func checkHealth(listen string) error {
 	u, err := healthURL(listen)
 	if err != nil {
@@ -167,12 +167,12 @@ func checkHealth(listen string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("stato %d", resp.StatusCode)
+		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
 }
 
-// protocols abilita HTTP/1.1 e HTTP/2 senza TLS sulla stessa porta.
+// protocols enables HTTP/1.1 and HTTP/2 without TLS on the same port.
 func protocols() *http.Protocols {
 	p := new(http.Protocols)
 	p.SetHTTP1(true)

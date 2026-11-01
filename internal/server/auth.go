@@ -6,9 +6,9 @@ import (
 	"net/http"
 )
 
-// BasicAuth restituisce il controllo di autorizzazione per il PUT (D9).
-// I digest SHA-256 di user e password sono calcolati una volta; per ogni richiesta
-// entrambi i confronti sono eseguiti, senza ritorno anticipato.
+// BasicAuth returns the authorization check for the PUT (D9).
+// The SHA-256 digests of user and password are computed once; for each request
+// both comparisons are performed, without early return.
 func BasicAuth(user, password string) func(*http.Request) bool {
 	wantUser := sha256.Sum256([]byte(user))
 	wantPass := sha256.Sum256([]byte(password))

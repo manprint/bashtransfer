@@ -1,13 +1,13 @@
-# Stack di produzione bashtransfer: nginx pubblica 80 e 443 (TLS in stream), app resta su una rete
-# interna senza porte e senza accesso all'esterno. L'immagine di app è quella pubblicata dal
-# workflow (.github/workflows/image.yml); per costruirla in locale: compose.build.yaml.
-# Variabili da impostare sull'host o in un file .env non versionato (README, docs/operazioni.md).
+# Bashtransfer production stack: nginx exposes 80 and 443 (stream TLS); app stays on an internal
+# network without published ports or outbound access. The app image is published by the
+# workflow (.github/workflows/image.yml); use compose.build.yaml for a local build.
+# Set variables on the host or in an untracked .env file (README, docs/operazioni.md).
 services:
   app:
-    image: ${BASHT_IMAGE:?impostare BASHT_IMAGE, es. ghcr.io/owner/bashtransfer:1.0.0}
+    image: ${BASHT_IMAGE:?set BASHT_IMAGE, e.g. ghcr.io/owner/bashtransfer:1.0.0}
     environment:
       BASHT_LISTEN: ":8080"
-      BASHT_PUBLIC_URL: ${BASHT_PUBLIC_URL:?impostare BASHT_PUBLIC_URL, es. https://bashtransfer.mydomain.it}
+      BASHT_PUBLIC_URL: ${BASHT_PUBLIC_URL:?set BASHT_PUBLIC_URL, e.g. https://bashtransfer.mydomain.it}
       BASHT_AUTH_USER: ${BASHT_AUTH_USER:-}
       BASHT_AUTH_PASSWORD: ${BASHT_AUTH_PASSWORD:-}
       BASHT_WAIT_TIMEOUT: ${BASHT_WAIT_TIMEOUT:-}
@@ -15,7 +15,7 @@ services:
       BASHT_SENDER_GRACE: ${BASHT_SENDER_GRACE:-}
       BASHT_MAX_SESSIONS: ${BASHT_MAX_SESSIONS:-}
       BASHT_BUF_SIZE: ${BASHT_BUF_SIZE:-}
-      # JSON: un oggetto per riga, pronto per docker logs | jq o per un raccoglitore di log.
+      # JSON: one object per line, ready for docker logs | jq or a log collector.
       BASHT_LOG_FORMAT: ${BASHT_LOG_FORMAT:-json}
       BASHT_LOG_LEVEL: ${BASHT_LOG_LEVEL:-}
     expose:
@@ -23,14 +23,14 @@ services:
     networks:
       - backend
     restart: unless-stopped
-    # Il binario è statico e non scrive su disco: filesystem in sola lettura, nessuna capability.
+    # Static binary with no disk writes: read-only filesystem, no capabilities.
     read_only: true
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # I trasferimenti attivi hanno al più 10 s di grazia (shutdownTimeout): stop_grace_period
-    # deve restare sopra, altrimenti Docker invia SIGKILL durante l'arresto ordinato.
+    # Active transfers get at most 10 s grace (shutdownTimeout): stop_grace_period must
+    # exceed this, otherwise Docker sends SIGKILL during graceful shutdown.
     stop_grace_period: 15s
     logging: &logging
       driver: json-file
@@ -48,14 +48,14 @@ services:
       - "443:443"
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - ${BASHT_CERTS_DIR:?impostare BASHT_CERTS_DIR con fullchain.pem e privkey.pem}:/etc/nginx/certs:ro
+      - ${BASHT_CERTS_DIR:?set BASHT_CERTS_DIR with fullchain.pem and privkey.pem}:/etc/nginx/certs:ro
     networks:
       - frontend
       - backend
     restart: unless-stopped
-    # Filesystem in sola lettura: nginx scrive solo pid e file temporanei, su tmpfs. Il master
-    # parte come root per leggere i certificati e aprire 80/443, poi i worker passano all'utente
-    # nginx: servono solo queste capability.
+    # Read-only filesystem: nginx writes only pid and temporary files on tmpfs. The master
+    # starts as root to read certificates and open 80/443; workers switch to the nginx
+    # user: only these capabilities are required.
     read_only: true
     tmpfs:
       - /var/cache/nginx
@@ -70,15 +70,15 @@ services:
       - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true
-    # Arresto ordinato (SIGQUIT): nginx attende la fine dei trasferimenti in corso fino a
-    # stop_grace_period, poi Docker invia SIGKILL.
+    # Graceful shutdown (SIGQUIT): nginx waits for active transfers until
+    # stop_grace_period, then Docker sends SIGKILL.
     stop_signal: SIGQUIT
     stop_grace_period: 30s
-    # TCP verso i client (README, "Prestazioni di rete"). Valgono solo nel namespace di rete di
-    # nginx, che termina le connessioni di mittente e ricevente; il trasporto verso app è locale.
-    # BBR tiene la banda con perdita e RTT alti dove cubic crolla; buffer massimi a 32 MiB per
-    # coprire il BDP di 1 Gbit/s fino a ~150 ms. Richiede il modulo tcp_bbr caricato sull'host:
-    # un container non può caricarlo.
+    # Client-facing TCP (README, "Network performance"). Applies only to nginx's network
+    # namespace, where sender and receiver connections terminate; transport to app is local.
+    # BBR maintains bandwidth with loss and high RTT where cubic drops; 32 MiB max buffers
+    # cover a 1 Gbit/s BDP up to ~150 ms. Requires tcp_bbr loaded on the host:
+    # a container cannot load it.
     sysctls:
       net.ipv4.tcp_congestion_control: ${BASHT_TCP_CC:-bbr}
       net.ipv4.tcp_rmem: "4096 131072 33554432"
@@ -87,8 +87,8 @@ services:
     logging: *logging
 
 networks:
-  # Porte pubblicate: solo nginx.
+  # Published ports: nginx only.
   frontend: {}
-  # app non raggiunge l'esterno e non è raggiungibile se non da nginx.
+  # app has no outbound access and is reachable only through nginx.
   backend:
     internal: true

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Misura D13: relay contro baseline a due hop su loopback, con buffer 64 KiB, 256 KiB e 1 MiB.
-# Stampa ambiente, righe grezze e la mediana dei campioni MB/s per benchmark e buffer.
-# Eseguire senza -race: il race detector altera il throughput.
+# D13 measurement: relay versus a two-hop loopback baseline, with 64 KiB, 256 KiB and 1 MiB buffers.
+# Print the environment, raw rows and median MB/s samples for each benchmark and buffer.
+# Run without -race: the race detector affects throughput.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,7 +19,7 @@ for buf in 65536 262144 1048576; do
 	BASHT_BENCH_BUF="$buf" go test -run '^$' \
 		-bench 'BenchmarkRelayLoopback|BenchmarkBaselineRelay' \
 		-benchtime 3x -count 5 ./internal/server | tee "$out"
-	# Mediana dei campioni MB/s per benchmark (campo precedente a "MB/s").
+	# Median MB/s samples per benchmark (the field before "MB/s").
 	awk '/^Benchmark.* MB\/s/ {
 		name = $1; sub(/-[0-9]+$/, "", name)
 		for (i = 2; i <= NF; i++) if ($i == "MB/s") v = $(i - 1)
@@ -29,7 +29,7 @@ for buf in 65536 262144 1048576; do
 		END {
 			for (name in n) {
 				mid = int((n[name] + 1) / 2)
-				printf "median %s: %s MB/s (%d campioni)\n", name, sorted[name, mid], n[name]
+				printf "median %s: %s MB/s (%d samples)\n", name, sorted[name, mid], n[name]
 			}
 		}'
 done

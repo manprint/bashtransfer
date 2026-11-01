@@ -14,11 +14,11 @@ import (
 	"bashtransfer/internal/relay"
 )
 
-// benchSize è il trasferimento per iterazione (D13).
+// benchSize is the transfer per iteration (D13).
 const benchSize = 256 << 20
 
-// benchBufSize legge il buffer da BASHT_BENCH_BUF (byte); default 256 KiB.
-// Relay e baseline usano lo stesso valore.
+// benchBufSize reads the buffer from BASHT_BENCH_BUF (bytes); default 256 KiB.
+// Relay and baseline use the same value.
 func benchBufSize(tb testing.TB) int {
 	tb.Helper()
 	v := os.Getenv("BASHT_BENCH_BUF")
@@ -27,12 +27,12 @@ func benchBufSize(tb testing.TB) int {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
-		tb.Fatalf("BASHT_BENCH_BUF %q non valido", v)
+		tb.Fatalf("BASHT_BENCH_BUF %q invalid", v)
 	}
 	return n
 }
 
-// cyclicReader genera byte da un buffer ciclico: nessun costo di generazione per byte.
+// cyclicReader generates bytes from a cyclic buffer: no per-byte generation cost.
 type cyclicReader struct {
 	buf []byte
 	off int
@@ -52,10 +52,10 @@ func benchPattern() []byte {
 	return p
 }
 
-// receiverPath ricava il percorso del ricevente dalla risposta del PUT.
+// receiverPath derives the receiver's path from the PUT response.
 type receiverPath func(br *bufio.Reader) (string, error)
 
-// slugPath cerca la riga curl della risposta del relay e ne prende lo slug.
+// slugPath looks for the curl line in the relay response and takes its slug.
 func slugPath(br *bufio.Reader) (string, error) {
 	for {
 		line, err := br.ReadString('\n')
@@ -68,12 +68,12 @@ func slugPath(br *bufio.Reader) (string, error) {
 	}
 }
 
-// fixedPath è il percorso del ricevente del baseline, che non ha slug.
+// fixedPath is the baseline receiver's path, which has no slug.
 func fixedPath(p string) receiverPath {
 	return func(*bufio.Reader) (string, error) { return p, nil }
 }
 
-// transfer invia size byte con PUT e li riceve con GET; verifica il conteggio esatto.
+// transfer sends size bytes with PUT and receives them with GET; it verifies the exact count.
 func transfer(tb testing.TB, base string, recv receiverPath, size int64) {
 	tb.Helper()
 	req, err := http.NewRequest(http.MethodPut, base+"/bench.bin", io.LimitReader(&cyclicReader{buf: benchPattern()}, size))
@@ -87,12 +87,12 @@ func transfer(tb testing.TB, base string, recv receiverPath, size int64) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		tb.Fatalf("PUT stato %d", resp.StatusCode)
+		tb.Fatalf("PUT status %d", resp.StatusCode)
 	}
 	br := bufio.NewReader(resp.Body)
 	path, err := recv(br)
 	if err != nil {
-		tb.Fatalf("percorso ricevente: %v", err)
+		tb.Fatalf("receiver path: %v", err)
 	}
 	dl, err := http.Get(base + path)
 	if err != nil {
@@ -104,15 +104,15 @@ func transfer(tb testing.TB, base string, recv receiverPath, size int64) {
 		tb.Fatalf("download: %v", err)
 	}
 	if n != size {
-		tb.Fatalf("ricevuti %d byte, attesi %d", n, size)
+		tb.Fatalf("received %d bytes, expected %d", n, size)
 	}
 	if _, err := io.Copy(io.Discard, br); err != nil {
-		tb.Fatalf("fine PUT: %v", err)
+		tb.Fatalf("end of PUT: %v", err)
 	}
 }
 
-// minimalRelay è il baseline di D13: stessa catena a due hop, stesso buffer e flush per blocco,
-// senza registry, slug, comandi o header extra.
+// minimalRelay is the D13 baseline: same two-hop chain, same buffer and per-block flush,
+// without registry, slug, commands or extra headers.
 type minimalRelay struct {
 	buf    int
 	attach chan handover
@@ -153,7 +153,7 @@ func (m *minimalRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// copyFlush copia src in dst con flush dopo ogni scrittura, come relay.Copier.
+// copyFlush copies src to dst, flushing after each write, like relay.Copier.
 func copyFlush(dst http.ResponseWriter, src io.Reader, buf []byte) error {
 	rc := http.NewResponseController(dst)
 	for {
@@ -193,7 +193,7 @@ func BenchmarkBaselineRelay(b *testing.B) {
 	}
 }
 
-// TestBenchHarnessSmoke: una iterazione per lato con 1 MiB; protegge il benchmark da misurare zero byte.
+// TestBenchHarnessSmoke: one iteration per side with 1 MiB; protects the benchmark from measuring zero bytes.
 func TestBenchHarnessSmoke(t *testing.T) {
 	const size = 1 << 20
 	srv := httptest.NewServer(New(relay.NewRegistry(100, time.Minute), relay.NewCopier(256<<10), Options{}))

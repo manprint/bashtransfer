@@ -1,82 +1,82 @@
-# Phase 2 — Autenticazione, limiti e sanitizzazione
+# Phase 2 — Authentication, limits and sanitization
 
-Intent: il server rifiuta upload non autorizzati quando l'auth è attiva, protegge da sessioni abbandonate e da nomi file pericolosi, e il download riceve gli header corretti.
-Prerequisites: P1 chiuso (`phase_02.md`). Artefatti: `internal/server/handler.go` con hook `Options.Authorize`; `internal/relay/registry.go` con `Create`, `Claim`, `expire`.
-Phase closure: P2; review by agent-1 (claude-haiku-5-5, self-review dello stesso modello).
+Intent: the server rejects unauthorized uploads when auth is active, protects against abandoned sessions and dangerous file names, and the download receives the correct headers.
+Prerequisites: P1 closed (`phase_02.md`). Artifacts: `internal/server/handler.go` with hook `Options.Authorize`; `internal/relay/registry.go` with `Create`, `Claim`, `expire`.
+Phase closure: P2; review by agent-1 (claude-haiku-5-5, self-review by the same model).
 
 ## State and ownership contract
 Read STATE.md §0–1 first for scope, ownership, recovery, checks and commit rules.
-Open before edits; checkpoint at a recovery boundary; close with evidence. Unità 2.1 non dipende da decisioni aperte: Q1 è risolta (auth solo su PUT).
+Open before edits; checkpoint at a recovery boundary; close with evidence. Unit 2.1 does not depend on open decisions: Q1 is resolved (auth only on PUT).
 
 ## Local design context
 Plan revision: 1.
-- D9: auth opzionale, coppia `BASHT_AUTH_USER`/`BASHT_AUTH_PASSWORD`, solo sul `PUT` (Q1 risolta). Confronto costante su digest SHA-256 (`subtle.ConstantTimeCompare` sui due digest). Risposta `401` con `WWW-Authenticate: Basic realm="bashtransfer"`.
-- D7: timeout di attesa già in registry (1.1). Qui si aggiunge il timeout di inattività del relay (vedi 2.2).
-- D5: sanitizzazione nome file (regole in overview D5), default `download`.
-- D6: header del ricevente; `Content-Length` solo se noto.
-- D8: abort protocol di fase 1 invariato.
-- D11: limite sessioni già in registry; qui si verifica il codice `503`.
+- D9: optional auth, pair `BASHT_AUTH_USER`/`BASHT_AUTH_PASSWORD`, only on the `PUT` (Q1 resolved). Constant-time comparison on SHA-256 digests (`subtle.ConstantTimeCompare` on the two digests). `401` response with `WWW-Authenticate: Basic realm="bashtransfer"`.
+- D7: wait timeout already in the registry (1.1). The relay idle timeout is added here (see 2.2).
+- D5: file name sanitization (rules in overview D5), default `download`.
+- D6: receiver headers; `Content-Length` only if known.
+- D8: phase 1 abort protocol unchanged.
+- D11: session limit already in the registry; here the `503` code is verified.
 
-Q1 risolta dall'utente: auth solo su `PUT`; download pubblico con solo lo slug.
+Q1 resolved by the user: auth only on `PUT`; public download with only the slug.
 
 ## Sub-phases
 
-### 2.1 Basic auth sul percorso di upload (solo PUT)
+### 2.1 Basic auth on the upload path (PUT only)
 - **Model:** agent-2 (claude-haiku-5-5)
-- **Assignment:** implementazione; review agent-1 sul contratto `Authorize` e sul test di timing (nessun confronto non costante).
+- **Assignment:** implementation; agent-1 review of the `Authorize` contract and of the timing test (no non-constant comparison).
 - **Files:**
-  - WRITE `internal/config/config.go` (verifica validazione coppia già presente da 1.1; nessuna modifica attesa).
+  - WRITE `internal/config/config.go` (verify the pair validation already present from 1.1; no change expected).
   - NEW `internal/server/auth.go`, `internal/server/auth_test.go`: `func BasicAuth(user, password string) func(*http.Request) bool`.
-  - WRITE `cmd/bashtransfer/main.go`: collegare `Options.Authorize` quando la config ha auth.
+  - WRITE `cmd/bashtransfer/main.go`: wire `Options.Authorize` when the config has auth.
 - **Change:**
-  Preconditions: 1.2 chiuso. Q1 risolta dall'utente: auth solo su `PUT` (D9). Il ramo `GET /<slug>` non viene toccato.
-  Contract: `BasicAuth` calcola `sha256(user)`, `sha256(password)` una volta alla costruzione; per ogni richiesta legge `r.BasicAuth()`, calcola i digest dei valori ricevuti e confronta con `subtle.ConstantTimeCompare` **entrambi** (nessun early return tra user e password). `ok` solo se entrambi uguali.
+  Preconditions: 1.2 closed. Q1 resolved by the user: auth only on `PUT` (D9). The `GET /<slug>` branch is not touched.
+  Contract: `BasicAuth` computes `sha256(user)` and `sha256(password)` once at construction; for each request it reads `r.BasicAuth()`, computes the digests of the received values and compares **both** with `subtle.ConstantTimeCompare` (no early return between user and password). `ok` only if both are equal.
   Steps:
-  1. S1 — `BasicAuth` con digest precalcolati; expected: funzione pura testabile.
-  2. S2 — collegamento in `main.go` quando `cfg.AuthUser != ""`; expected: senza auth nessun comportamento cambia (test regressione 1.2 invariati).
-  3. S3 — test di regressione: `GET /<slug>` con auth attiva funziona senza credenziali; expected: stesso comportamento di 1.2.
-  Recovery boundary: dopo S1 (checkpoint con file creati).
-  Failure handling: un fallimento di test di 2.1 va escalato a agent-1; nessuna dipendenza da 2.2.
+  1. S1 — `BasicAuth` with precomputed digests; expected: pure, testable function.
+  2. S2 — wiring in `main.go` when `cfg.AuthUser != ""`; expected: without auth no behaviour changes (1.2 regression tests unchanged).
+  3. S3 — regression test: `GET /<slug>` with auth active works without credentials; expected: same behaviour as 1.2.
+  Recovery boundary: after S1 (checkpoint with created files).
+  Failure handling: a test failure in 2.1 is escalated to agent-1; no dependency on 2.2.
 - **Unit tests:**
-  - `TestBasicAuthAcceptsCorrect`, `TestBasicAuthRejectsWrongUser`, `TestBasicAuthRejectsWrongPassword`, `TestBasicAuthRejectsMissingHeader` (401 con `WWW-Authenticate`), `TestBasicAuthConstantWork` (verifica che il codice calcola entrambi i confronti: test con mock di funzione di confronto contabile, oppure revisione del diff da agent-1 registrata come evidenza).
-  - Test server: `TestUploadRequiresAuth` (PUT senza credenziali → 401, con credenziali → 200 con comandi).
-  - Comando: `go test ./internal/server -run 'TestBasicAuth|TestUploadRequiresAuth' -v -count=1 -race`; discovery: 6.
-- **e2e tests:** `scripts/e2e.sh` con variabili `BASHT_AUTH_USER`/`BASHT_AUTH_PASSWORD` impostate: upload con `-u` riesce; upload senza credenziali → 401; download senza credenziali riesce. Gate G-E2E2.
-- **Done:** test e e2e pass con conteggio; review agent-1 registrata; unità chiusa.
+  - `TestBasicAuthAcceptsCorrect`, `TestBasicAuthRejectsWrongUser`, `TestBasicAuthRejectsWrongPassword`, `TestBasicAuthRejectsMissingHeader` (401 with `WWW-Authenticate`), `TestBasicAuthConstantWork` (verifies that the code performs both comparisons: a test with a counting mock of the comparison function, or an agent-1 review of the diff recorded as evidence).
+  - Server test: `TestUploadRequiresAuth` (PUT without credentials → 401, with credentials → 200 with commands).
+  - Command: `go test ./internal/server -run 'TestBasicAuth|TestUploadRequiresAuth' -v -count=1 -race`; discovery: 6.
+- **e2e tests:** `scripts/e2e.sh` with variables `BASHT_AUTH_USER`/`BASHT_AUTH_PASSWORD` set: upload with `-u` succeeds; upload without credentials → 401; download without credentials succeeds. Gate G-E2E2.
+- **Done:** tests and e2e pass with count; agent-1 review recorded; unit closed.
 
-### 2.2 Limiti di relay, sanitizzazione del nome e header del ricevente
+### 2.2 Relay limits, name sanitization and receiver headers
 - **Model:** agent-2 (claude-haiku-5-5)
-- **Assignment:** implementazione dei punti sotto; review agent-1 sul timeout di inattività (lifecycle, rischio di goroutine bloccate).
+- **Assignment:** implementation of the points below; agent-1 review of the idle timeout (lifecycle, risk of blocked goroutines).
 - **Files:**
-  - WRITE `internal/relay/copy.go`: deadline di inattività per lettura del body.
-  - WRITE `internal/server/handler.go`: sanitizzazione del nome, header del ricevente, mapping errori.
+  - WRITE `internal/relay/copy.go`: idle deadline for reading the body.
+  - WRITE `internal/server/handler.go`: name sanitization, receiver headers, error mapping.
   - NEW `internal/server/name.go`, `internal/server/name_test.go`: `func SanitizeName(raw string) string`.
-  - WRITE `internal/config/config.go`, `config_test.go`: campo `IdleTimeout time.Duration`, env `BASHT_IDLE_TIMEOUT`, default `2m`, minimo `1s`. Aggiunta registrata come decisione D15 (vedi sotto).
+  - WRITE `internal/config/config.go`, `config_test.go`: field `IdleTimeout time.Duration`, env `BASHT_IDLE_TIMEOUT`, default `2m`, minimum `1s`. Addition recorded as decision D15 (see below).
 - **Change:**
-  Preconditions: 1.2 chiuso.
-  D15 (nuova decisione del supervisore, dentro i requisiti approvati): il relay ha un timeout di inattività `BASHT_IDLE_TIMEOUT`: se il mittente non produce byte per questo intervallo durante il relay, la copia fallisce con `ErrIdle` (abort di mittente e ricevente, I-3, I-4). Motivo: senza questo, un mittente fermo lascia il ricevente bloccato su `Finished()` senza limite (rischio in overview § Risks). Implementazione: `http.NewResponseController(w).SetReadDeadline(time.Now().Add(idle))` prima di ogni `Read` del body nel mittente (tramite wrapper `deadlineReader` che il `Copier` usa tramite `io.Reader`). Non è una modifica del contratto HTTP pubblico.
-  Contract sanitizzazione (`SanitizeName`): 1) prende solo l'ultimo elemento dopo `/` e `\`; 2) rimuove caratteri di controllo (`< 0x20`, `0x7f`) e `"`, `\`; 3) rimuove `..` come nome e spazi iniziali/finali; 4) tronca a 128 caratteri in rune; 5) se vuoto → `download`.
-  Contract header ricevente: `Content-Disposition: attachment; filename="<SanitizeName>"`; il nome nel blocco comandi usa lo stesso valore sanitizzato (coerenza: stesso nome in comandi e header, D5).
-  Contract errori: `ErrIdle` → abort; `ErrSlugCollision`/`ErrCapacity` → 503; `ErrClaimed` → 410; `ErrNotFound` → 404; path slug non valido → 404 senza accesso al registry.
+  Preconditions: 1.2 closed.
+  D15 (new supervisor decision, within the approved requirements): the relay has an idle timeout `BASHT_IDLE_TIMEOUT`: if the sender produces no bytes for this interval during the relay, the copy fails with `ErrIdle` (abort of sender and receiver, I-3, I-4). Reason: without this, a stalled sender leaves the receiver blocked on `Finished()` without limit (risk in overview § Risks). Implementation: `http.NewResponseController(w).SetReadDeadline(time.Now().Add(idle))` before each `Read` of the body on the sender side (via a `deadlineReader` wrapper that the `Copier` uses through `io.Reader`). This is not a change to the public HTTP contract.
+  Sanitization contract (`SanitizeName`): 1) takes only the last element after `/` and `\`; 2) removes control characters (`< 0x20`, `0x7f`) and `"`, `\`; 3) removes `..` as a name and leading/trailing spaces; 4) truncates to 128 characters in runes; 5) if empty → `download`.
+  Receiver header contract: `Content-Disposition: attachment; filename="<SanitizeName>"`; the name in the command block uses the same sanitized value (consistency: same name in commands and headers, D5).
+  Error contract: `ErrIdle` → abort; `ErrSlugCollision`/`ErrCapacity` → 503; `ErrClaimed` → 410; `ErrNotFound` → 404; invalid slug path → 404 without accessing the registry.
   Steps:
-  1. S1 — `SanitizeName` con tabella di casi; expected: test passano.
-  2. S2 — `deadlineReader` + `ErrIdle`; expected: test di inattività passa entro il tempo atteso.
-  3. S3 — header ricevente e nome coerente; expected: `TestDownloadHeaders`.
-  Recovery boundary: dopo S2 (checkpoint).
-  Failure handling: se `SetReadDeadline` non è supportato dall'adattatore in un test, usare un adattatore di test che implementa il metodo, senza cambiare il contratto di produzione.
+  1. S1 — `SanitizeName` with a table of cases; expected: tests pass.
+  2. S2 — `deadlineReader` + `ErrIdle`; expected: idle test passes within the expected time.
+  3. S3 — receiver header and consistent name; expected: `TestDownloadHeaders`.
+  Recovery boundary: after S2 (checkpoint).
+  Failure handling: if `SetReadDeadline` is not supported by the adapter in a test, use a test adapter that implements the method, without changing the production contract.
 - **Unit tests:**
-  - `TestSanitizeName` (tabella): `../../etc/passwd` → `passwd`; `a"b\c.zip` → `abc.zip`; `\x01x` → `x`; stringa vuota → `download`; `..` → `download`; 200 caratteri → 128 rune; nome UTF-8 `città.zip` invariato.
-  - `TestUploadIdleTimeout`: mittente invia 1 KiB, poi si ferma; con `BASHT_IDLE_TIMEOUT=200ms`, il ricevente riceve errore entro 3 s; registry `Len()==0`.
-  - `TestDownloadHeaders`: con Content-Length dichiarato → header `Content-Length` presente; senza (-1) → assente; `Content-Disposition` coerente con nome nei comandi.
-  - `TestConfigIdleTimeout`: default 2m, `0s` → errore, `500ms` → errore (minimo 1 s).
-  - Comando: `go test ./internal/server ./internal/config ./internal/relay -v -count=1 -race`; discovery: 4 + 1 + 1 + 1 + tutti i test di fase 1 (nessuna regressione).
-- **e2e tests:** `scripts/e2e.sh` esteso con upload di nome `"strano nome.zip"` (con spazi) → download con `-o` esplicito; il nome nei comandi è sanitizzato coerentemente. Gate G-E2E2.
-- **Done:** test listati pass con `-race`; regressione di fase 1 invariata; revisione agent-1 registrata su D15; unità chiusa.
+  - `TestSanitizeName` (table): `../../etc/passwd` → `passwd`; `a"b\c.zip` → `abc.zip`; `\x01x` → `x`; empty string → `download`; `..` → `download`; 200 characters → 128 runes; UTF-8 name `città.zip` unchanged.
+  - `TestUploadIdleTimeout`: sender sends 1 KiB, then stops; with `BASHT_IDLE_TIMEOUT=200ms`, the receiver gets an error within 3 s; registry `Len()==0`.
+  - `TestDownloadHeaders`: with declared Content-Length → `Content-Length` header present; without (-1) → absent; `Content-Disposition` consistent with the name in the commands.
+  - `TestConfigIdleTimeout`: default 2m, `0s` → error, `500ms` → error (minimum 1 s).
+  - Command: `go test ./internal/server ./internal/config ./internal/relay -v -count=1 -race`; discovery: 4 + 1 + 1 + 1 + all phase 1 tests (no regression).
+- **e2e tests:** `scripts/e2e.sh` extended with an upload named `"strano nome.zip"` (“strange name.zip”, with spaces) → download with explicit `-o`; the name in the commands is sanitized consistently. Gate G-E2E2.
+- **Done:** listed tests pass with `-race`; phase 1 regression unchanged; agent-1 review recorded on D15; unit closed.
 
 ## Phase gates and closure
-- Required gates: G-U2.2 (comando sopra), G-P2 = `go test -race -count=1 ./...` con conteggio non zero + `scripts/e2e.sh` esteso (G-E2E2).
-- Assertions: D5 completo, D7 con inattività (D15), D9 solo su PUT.
-- README obligation: comportamento auth e limiti da documentare in 4.3 (responsabile). Verifica di chiusura P2: obbligo pendente su 4.3 in STATE §11.
-- Every sub-phase DONE. Se 2.1 o 2.2 fallisce un gate, P2 **non** chiude; 3.1 (indipendente) può procedere.
-- Supervisor agent-1 reviews: D15 e lifecycle dell'inattività; contratto auth (2.1) prima della chiusura.
-- Chiusura P2: unità `P2` in STATE §4 solo quando 2.1 e 2.2 sono DONE.
+- Required gates: G-U2.2 (command above), G-P2 = `go test -race -count=1 ./...` with non-zero count + extended `scripts/e2e.sh` (G-E2E2).
+- Assertions: D5 complete, D7 with idle timeout (D15), D9 only on PUT.
+- README obligation: auth behaviour and limits to be documented in 4.3 (owner). P2 closure check: obligation pending on 4.3 in STATE §11.
+- Every sub-phase DONE. If 2.1 or 2.2 fails a gate, P2 **does not** close; 3.1 (independent) may proceed.
+- Supervisor agent-1 reviews: D15 and idle lifecycle; auth contract (2.1) before closure.
+- Closure of P2: unit `P2` in STATE §4 only when 2.1 and 2.2 are DONE.

@@ -13,19 +13,19 @@ import (
 	"bashtransfer/internal/relay"
 )
 
-// responseReceiver adatta la risposta HTTP del ricevente a relay.Receiver.
-// start viene chiamata solo dalla goroutine del mittente, prima della copia.
-// started è letto dal ricevente solo dopo Finished (happens-before via chiusura del canale).
+// responseReceiver adapts the receiver's HTTP response to relay.Receiver.
+// start is called only from the sender's goroutine, before the copy.
+// started is read by the receiver only after Finished (happens-before via channel close).
 type responseReceiver struct {
 	w  http.ResponseWriter
 	rc *http.ResponseController
-	// writeTimeout, se > 0, è il tempo massimo per una singola scrittura verso il ricevente:
-	// un ricevente connesso che non legge bloccherebbe altrimenti mittente e sessione senza fine.
+	// writeTimeout, if > 0, is the maximum time for a single write to the receiver:
+	// a connected receiver that does not read would otherwise block the sender and the session forever.
 	writeTimeout time.Duration
 	mu           sync.Mutex
 	started      bool
 	stopped      atomic.Bool
-	// L'errore del flush è letto e scritto solo dalla goroutine che copia il file.
+	// The flush error is read and written only by the goroutine copying the file.
 	flushErr error
 }
 
@@ -33,7 +33,7 @@ func newResponseReceiver(w http.ResponseWriter, writeTimeout time.Duration) *res
 	return &responseReceiver{w: w, rc: http.NewResponseController(w), writeTimeout: writeTimeout}
 }
 
-// start imposta gli header di download e invia 200 con flush.
+// start sets the download headers and sends 200 with a flush.
 func (r *responseReceiver) start(name string, length int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -46,7 +46,7 @@ func (r *responseReceiver) start(name string, length int64) {
 	h.Set("Content-Disposition", contentDisposition(name))
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
-	// Il relay non serve intervalli: aria2 e i download manager non aprono connessioni aggiuntive.
+	// The relay does not serve ranges: aria2 and download managers do not open additional connections.
 	h.Set("Accept-Ranges", "none")
 	if length >= 0 {
 		h.Set("Content-Length", strconv.FormatInt(length, 10))
@@ -66,7 +66,7 @@ func (r *responseReceiver) Write(p []byte) (int, error) {
 	r.armWriteDeadline()
 	n, err := r.w.Write(p)
 	if err != nil {
-		// Una scrittura fallita dipende sempre dal ricevente: disconnesso, o fermo oltre writeTimeout.
+		// A failed write always depends on the receiver: disconnected, or stalled beyond writeTimeout.
 		err = fmt.Errorf("%w: %w", relay.ErrReceiverGone, err)
 	}
 	return n, err
@@ -94,18 +94,18 @@ func (r *responseReceiver) armWriteDeadline() {
 	}
 }
 
-// clearWriteDeadline toglie la scadenza lasciata dall'ultima scrittura: la connessione può essere
-// riusata (keep-alive) e un deadline passato farebbe fallire la risposta successiva.
+// clearWriteDeadline removes the deadline left by the last write: the connection may be
+// reused (keep-alive) and a past deadline would make the next response fail.
 func (r *responseReceiver) clearWriteDeadline() {
 	if r.writeTimeout > 0 || r.stopped.Load() {
 		_ = r.rc.SetWriteDeadline(time.Time{})
 	}
 }
 
-// contentDisposition codifica il nome (RFC 6266): ASCII tra virgolette, altrimenti filename*.
-// Con filename* aggiunge prima filename="..." con i byte UTF-8 del nome: curl -OJ legge solo
-// filename (senza, salverebbe il file con il nome dello slug), i browser preferiscono filename*.
-// Il nome è già ripulito da SanitizeName: niente virgolette, backslash o caratteri di controllo.
+// contentDisposition encodes the name (RFC 6266): ASCII in quotes, otherwise filename*.
+// With filename* it first adds filename="..." with the UTF-8 bytes of the name: curl -OJ reads only
+// filename (without it, it would save the file under the slug name), while browsers prefer filename*.
+// The name is already cleaned by SanitizeName: no quotes, backslashes or control characters.
 func contentDisposition(name string) string {
 	v := mime.FormatMediaType("attachment", map[string]string{"filename": name})
 	if v == "" {

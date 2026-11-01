@@ -182,10 +182,10 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var drop = $("drop"), input = $("file"), xfer = $("xfer"), bar = $("x-bar");
-  // link è la prenotazione (slug e token), ctl chiude il suo stream, xhr invia il file.
+  // link holds the reservation (slug and token), ctl closes its stream, xhr sends the file.
   var link = null, ctl = null, xhr = null, busy = false, attached = false, total = 0, samples = [], ticker = 0;
-  // Tolleranza del server per un mittente caduto (secondi; 0 se disattivata, BASHT_SENDER_GRACE): la
-  // pagina si riaggancia alla stessa prenotazione. lostAt è l'inizio della caduta, 0 se connessa.
+  // Server grace for a disconnected sender (seconds; 0 disables it, BASHT_SENDER_GRACE):
+  // reattach to the same reservation. lostAt marks disconnection time, or 0 while connected.
   var grace = 0, lostAt = 0, retry = 0, reserved = false, chosen = null, pulse = 0, sharing = false;
   var readyTimer = 0, readyTTL = 5000;
 
@@ -215,7 +215,7 @@
   function setError(msg) { var e = $("drop-error"); e.textContent = msg; e.hidden = !msg; }
   function status(msg) { $("x-status").textContent = msg; }
 
-  // Byte consegnati al ricevente, come li conta il server; velocità media sugli ultimi 3 secondi.
+  // Bytes delivered to the receiver, counted by the server; average rate over the last 3 seconds.
   function delivered() { return samples.length ? samples[samples.length - 1].b : 0; }
   function sample(b) {
     var now = Date.now();
@@ -245,8 +245,8 @@
     sender_gone: "The upload from this browser was interrupted. If you switched to another app, the phone may have stopped it: keep this page in the foreground and send the file again.",
     expired: "No receiver started the download in time: the link is closed."
   };
-  // cancelLink chiude il link sul server. keepalive: la richiesta parte anche mentre la pagina si
-  // chiude. Dietro un proxy la sola chiusura delle connessioni arriva al server in ritardo.
+  // cancelLink closes the server link. keepalive sends the request even during page closure.
+  // Behind a proxy, connection closure alone reaches the server late.
   function cancelLink() {
     if (!link) return;
     try {
@@ -283,7 +283,7 @@
     res.hidden = false;
     $("x-again").focus();
   }
-  // shown marca un errore il cui messaggio è per l'utente.
+  // shown marks an error whose message is intended for the user.
   function shown(msg) { var e = new Error(msg); e.shown = true; return e; }
   function outcome(o) {
     sample(o.bytes);
@@ -319,8 +319,8 @@
     connect(file, JSON.stringify({ name: file.name, size: file.size, foreground: document.visibilityState !== "hidden", readiness: true }), {});
   }
 
-  // Al riaggancio il server decide se sostituire il PUT in attesa oppure recuperare solo
-  // l'avanzamento di un relay già iniziato.
+  // On reattachment the server chooses whether to replace a waiting PUT or recover only
+  // progress for a relay that has already started.
   function connect(file, body, headers) {
     readiness(false);
     if (ctl) { var old = ctl; ctl = null; old.abort(); }
@@ -368,7 +368,7 @@
           link = null;
           outcome(m);
         } else if (m.event === "attached") {
-          // La velocità parte dal primo avanzamento: il primo blocco riempie solo i buffer di rete.
+          // Rate measurement starts with progress: the first block only fills network buffers.
           if (!attached) samples = [];
           attached = true;
           render();
@@ -393,9 +393,9 @@
       return pump();
     }).catch(function (e) {
       if (!busy || ctl !== mine) return;
-      // Già in riconnessione: il tentativo è fallito, si riprova dopo un secondo.
+      // Already reconnecting: this attempt failed, retry after one second.
       if (!e.shown && lostAt) { clearTimeout(retry); retry = setTimeout(reconnect, 1000); return; }
-      // Anche durante la copia si può recuperare il solo stream di avanzamento.
+      // Even during copying, the progress stream alone can be recovered.
       if (!e.shown && reserved && grace > 0) { lost(); return; }
       if (busy) cancelLink();
       finish(false, e.shown ? e.message : (reserved
@@ -404,8 +404,8 @@
     });
   }
 
-  // Non interrompere il PUT qui: il server potrebbe aver iniziato il relay prima
-  // che questa pagina ricevesse attached.
+  // Do not stop the PUT here: the server may have started relaying before this page
+  // received attached.
   function lost() {
     if (!busy || lostAt || !link) return;
     lostAt = Date.now();
@@ -422,7 +422,7 @@
     var h = {};
     h["X-Bashtransfer-Token"] = link.token;
     connect(chosen, JSON.stringify({ resume: link.slug, rebind: true, readiness: true }), h);
-    // Se la risposta non arriva (rete ancora assente) riprova: la richiesta non fallisce subito.
+    // Retry if no response arrives (network still unavailable): requests do not fail immediately.
     retry = setTimeout(reconnect, 5000);
   }
 
@@ -476,14 +476,14 @@
     } catch (e) {}
   }
 
-  // L'esito arriva anche sul PUT se il browser può leggerne la risposta. Su HTTP/1
-  // una risposta troncata è un errore di rete: in quel caso decide lo stream.
+  // Outcome also arrives on the PUT if the browser can read its response. On HTTP/1
+  // a truncated response is a network error: the control stream decides in that case.
   function send(file, res) {
     if (xhr) { var prev = xhr; xhr = null; prev.abort(); }
     var req = xhr = new XMLHttpRequest();
     req.open("PUT", "/" + encodeURIComponent(res.slug));
     req.setRequestHeader("X-Bashtransfer-Token", res.token);
-    // Una connessione del PUT persa prima del ricevente, con la tolleranza, è una caduta come quella dello stream.
+    // With grace, a PUT connection lost before the receiver is handled like a lost stream.
     req.onerror = function () { if (xhr === req && busy && !attached && grace > 0) lost(); };
     req.onload = function () {
       var lines = req.responseText.split("\n").map(function (l) { return l.trim(); }).filter(Boolean), o = null;
@@ -547,14 +547,14 @@
     drop.classList.remove("over");
     choose(e.dataTransfer.files, e.dataTransfer.items);
   });
-  // Un file lasciato fuori dal riquadro non deve aprirsi al posto della pagina.
+  // Dropping a file outside the box must not navigate away from the page.
   window.addEventListener("dragover", function (e) { e.preventDefault(); });
   window.addEventListener("drop", function (e) { e.preventDefault(); });
   window.addEventListener("beforeunload", function (e) { if (busy) { e.preventDefault(); e.returnValue = ""; } });
-  // Con la tolleranza, una pagina che entra nella cache avanti/indietro (persisted) non annulla il
-  // link: al ritorno si riaggancia. Una chiusura vera lo annulla subito.
+  // With grace, entering the back/forward cache (persisted) does not cancel the link:
+  // reattach on return. An actual page closure cancels it immediately.
   window.addEventListener("pagehide", function (e) { if (busy && !(grace > 0 && e.persisted)) cancelLink(); });
-  // Il telefono torna in primo piano o la rete ricompare: riprova subito senza attendere il timer.
+  // Foreground return or restored network: retry immediately without waiting for the timer.
   function resume() {
     if (!busy || !link || document.visibilityState === "hidden" || sharing) return;
     foreground(true);

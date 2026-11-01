@@ -10,7 +10,7 @@ import (
 
 const peerCheckSupported = true
 
-// Costanti di poll(2) su Linux; il pacchetto syscall non le esporta.
+// poll(2) constants on Linux; the syscall package does not export them.
 const (
 	pollErr   = 0x8
 	pollHup   = 0x10
@@ -23,10 +23,10 @@ type pollFd struct {
 	revents int16
 }
 
-// peerClosed riporta se il client ha chiuso la connessione (FIN o RST). POLLRDHUP segnala la
-// chiusura anche con byte del body ancora non letti nel buffer di ricezione, che una lettura
-// vedrebbe solo dopo averli consumati. Una connessione già chiusa dal server (srv.Close) conta
-// come caduta. La chiamata non blocca (timeout zero).
+// peerClosed reports whether the client has closed the connection (FIN or RST). POLLRDHUP signals
+// the close even with body bytes still unread in the receive buffer, which a read would only
+// see after consuming them. A connection already closed by the server (srv.Close) counts
+// as dropped. The call does not block (zero timeout).
 func peerClosed(c net.Conn) bool {
 	sc, ok := c.(syscall.Conn)
 	if !ok {

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Test frontend con Playwright (scripts/ui/ui.mjs) contro il binario appena compilato.
-#   bash scripts/ui/run.sh          server diretti su 127.0.0.1 (HTTP/1.1)
-#   bash scripts/ui/run.sh apache   attraverso Apache 2.4 in Docker, proxy h2c come nel README
-# Ogni modo avvia quattro server: attesa lunga, BASHT_WAIT_TIMEOUT=3s, Basic auth (u:p) e
-# BASHT_SENDER_GRACE=8 (tolleranza per il mittente dal browser caduto).
-# Prima volta, da scripts/ui: npm ci && npx playwright-core install chromium
-# (su un sistema senza le librerie di Chromium: install --with-deps chromium).
-# BASHT_UI_OUT: cartella in cui creare quella dei file e degli screenshot, che resta; senza, è
-# temporanea e rimossa se tutti i test passano. Le altre variabili sono passate a ui.mjs (ONLY, CHROME).
+# Frontend tests with Playwright (scripts/ui/ui.mjs) against the freshly built binary.
+#   bash scripts/ui/run.sh          direct servers on 127.0.0.1 (HTTP/1.1)
+#   bash scripts/ui/run.sh apache   through Apache 2.4 in Docker, h2c proxy as in README
+# Each mode starts four servers: long wait, BASHT_WAIT_TIMEOUT=3s, Basic auth (u:p) and
+# BASHT_SENDER_GRACE=8 (grace for a disconnected browser sender).
+# First setup, from scripts/ui: npm ci && npx playwright-core install chromium
+# (without Chromium system libraries: install --with-deps chromium).
+# BASHT_UI_OUT: parent directory for preserved files/screenshots; otherwise the directory is
+# temporary and removed if all tests pass. Other variables pass through to ui.mjs (ONLY, CHROME).
 set -euo pipefail
 
 MODE="${1:-direct}"
-case "$MODE" in direct | apache) ;; *) echo "uso: $0 [direct|apache]" >&2; exit 2 ;; esac
+case "$MODE" in direct | apache) ;; *) echo "usage: $0 [direct|apache]" >&2; exit 2 ;; esac
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$DIR/../.." && pwd)"
@@ -23,12 +23,12 @@ else
 	OUT="$TMP/out"
 fi
 PIDS=()
-# Immagine fissata per digest (2.4.69); i nomi dei container sono quelli di httpd.conf.
+# Image pinned by digest (2.4.69); container names match httpd.conf.
 HTTPD_IMAGE="httpd:2.4.69@sha256:d3accb516506c05ae0068bb54ba6798a10b249b64db91268fca692326cb02b4b"
 CONTAINERS=(bt-ui-apache bt-ui-app bt-ui-app-short bt-ui-app-auth bt-ui-app-grace)
 NET=bt-ui-net
 
-# I server sono locali: nessun proxy per curl, node e Chromium.
+# Local servers: no proxy for curl, Node or Chromium.
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 
 cleanup() {
@@ -46,7 +46,7 @@ wait_up() {
 		if curl -sf -o /dev/null "$1/"; then return 0; fi
 		sleep 0.1
 	done
-	echo "UI FAIL: nessuna risposta da $1" >&2
+	echo "UI FAIL: no response from $1" >&2
 	return 1
 }
 
@@ -54,7 +54,7 @@ free_port() {
 	python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
 }
 
-# Statica: nel modo apache gira in un container.
+# Static binary: runs in a container in Apache mode.
 (cd "$ROOT" && CGO_ENABLED=0 go build -o "$TMP/bashtransfer" ./cmd/bashtransfer)
 
 if [[ "$MODE" == direct ]]; then
@@ -76,7 +76,7 @@ else
 	docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true
 	docker network rm "$NET" >/dev/null 2>&1 || true
 	docker network create "$NET" >/dev/null
-	# L'immagine di Apache fa da base anche per l'app: il binario statico è montato in sola lettura.
+	# Use Apache's image as the app base too: mount the static binary read-only.
 	app() {
 		docker run -d --name "$1" --network "$NET" --entrypoint /bashtransfer \
 			-v "$TMP/bashtransfer:/bashtransfer:ro" -e BASHT_LISTEN=:8080 -e BASHT_LOG_LEVEL=debug \
@@ -109,8 +109,8 @@ if [[ $status -ne 0 ]]; then
 	fi
 	if [[ -z "${BASHT_UI_OUT:-}" ]]; then
 		cp -r "$OUT" "${TMPDIR:-/tmp}/bashtransfer-ui-$MODE-$$"
-		echo "file e screenshot: ${TMPDIR:-/tmp}/bashtransfer-ui-$MODE-$$" >&2
+		echo "files and screenshots: ${TMPDIR:-/tmp}/bashtransfer-ui-$MODE-$$" >&2
 	fi
 fi
-if [[ -n "${BASHT_UI_OUT:-}" ]]; then echo "file e screenshot: $OUT"; fi
+if [[ -n "${BASHT_UI_OUT:-}" ]]; then echo "files and screenshots: $OUT"; fi
 exit $status

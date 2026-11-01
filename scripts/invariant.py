@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Invariante di bashtransfer: la sorgente non viene mai alterata.
+"""Bashtransfer invariant: the source is never altered.
 
-Esegue i comandi stampati al mittente, le loro varianti sbagliate (flag omessi o aggiunti, file di
-configurazione dell'utente) e i comandi di invio, con la sorgente (file, cartella, link simbolico)
-proprio dove il ricevente salva: la sua cartella è quella del mittente. Per ogni caso confronta
-un'istantanea della sorgente (contenuto, dimensione, permessi, mtime, ctime, inode) prima e dopo.
+Run the commands printed for the sender, their incorrect variants (omitted/added flags,
+user configuration files) and sending commands, with the source (file, directory, symlink)
+where the receiver saves: in the sender's directory. Compare a source snapshot (content,
+size, permissions, mtime, ctime, inode) before and after each case.
 
-Ogni caso deve anche provare di aver esercitato lo stato dichiarato: un link valido risulta
-consumato dalla variante, oppure ancora valido e scaricato subito dopo con il comando stampato;
-gli stati di errore sono controllati prima e dopo. Un caso che non prova nulla è un errore.
+Each case must prove it exercised the declared state: a valid link is consumed by the
+variant or remains valid and is immediately downloaded with the printed command;
+error states are checked before and after. A case that proves nothing is an error.
 
-uso: invariant.py BINARIO
-    BINARIO             bashtransfer compilato (go build ./cmd/bashtransfer)
-    BASHT_INV_REQUIRE   strumenti obbligatori, es. "curl,wget,aria2c,busybox": se uno manca il
-                        test fallisce invece di saltarlo (CI)
-    BASHT_INV_JOBS      casi in parallelo (default 8)
-Esce con 1 se un caso altera la sorgente o non prova nulla. I limiti noti (README, "La sorgente
-non viene mai alterata") sono eseguiti e riportati, senza esito.
+usage: invariant.py BINARY
+    BINARY              compiled bashtransfer (go build ./cmd/bashtransfer)
+    BASHT_INV_REQUIRE   required tools, e.g. "curl,wget,aria2c,busybox": missing tools
+                        fail the test instead of being skipped (CI)
+    BASHT_INV_JOBS      parallel cases (default 8)
+Exit 1 if a case changes the source or proves nothing. Known limitations (README,
+"The source is never altered") are exercised and reported without asserting an outcome.
 """
 
 import concurrent.futures
@@ -46,14 +46,14 @@ JOBS = int(os.environ.get("BASHT_INV_JOBS", "8"))
 REQUIRE = [t for t in os.environ.get("BASHT_INV_REQUIRE", "").split(",") if t]
 SIZE = 1 << 20
 NAME = "perché è.bin"
-SHORT_WAIT = 2  # BASHT_WAIT_TIMEOUT del server per i link scaduti, in secondi
+SHORT_WAIT = 2  # Server BASHT_WAIT_TIMEOUT for expired links, in seconds
 
-# Nessun proxy e nessuna configurazione dell'utente che lancia il test.
+# Ignore proxies and configuration belonging to the user running the test.
 ENV = {k: v for k, v in os.environ.items()
        if not k.lower().endswith("_proxy") and k not in ("CURL_HOME", "WGETRC", "XDG_CONFIG_HOME")}
 OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 PROCS = []
-PRINTED = {}  # "rows": tabella stampata per un link, modello dei comandi negli stati di errore
+PRINTED = {}  # "rows": printed link table, a command template for error states
 TABLE_ROW = re.compile(r"^\| (curl|wget|aria2c) +\| (.*?) +\|$", re.M)
 
 
@@ -63,7 +63,7 @@ def fail(msg):
 
 
 def status(url, headers=None, limit=None):
-    """Status di un GET; con limit legge al più limit byte del body e chiude."""
+    """GET status; if limit is set, read at most that many body bytes and close."""
     try:
         with OPENER.open(urllib.request.Request(url, headers=headers or {}), timeout=15) as r:
             r.read(limit) if limit else r.read()
@@ -73,7 +73,7 @@ def status(url, headers=None, limit=None):
 
 
 def probe(url):
-    """Stato del link senza reclamarlo: 400 valido, 410 usato o scaduto, 404 sconosciuto."""
+    """Non-consuming link state: 400 valid, 410 used/expired, 404 unknown."""
     return status(url, {"Range": "bytes=1-"})
 
 
@@ -91,7 +91,7 @@ def start_server(name, **env):
                 return base
         except OSError:
             time.sleep(0.1)
-    fail(f"il server {name} non risponde")
+    fail(f"server {name} not responding")
 
 
 def make_home(name, files):
@@ -117,7 +117,7 @@ def sha256(path):
 
 
 def snapshot(path):
-    """Istantanea di path, di ciò che contiene e, se è un link, di ciò a cui punta."""
+    """Snapshot a path, its contents and, for a symlink, its target."""
     out = []
 
     def add(p, rel):
@@ -155,7 +155,7 @@ def case_dir():
 
 
 def make_source(kind, d, name):
-    """Crea la sorgente name in d: file, cartella o link simbolico a un file fuori da d."""
+    """Create source name in d: a file, directory or symlink to a file outside d."""
     path = os.path.join(d, name)
     if kind == "file":
         with open(path, "wb") as f:
@@ -176,12 +176,12 @@ def make_source(kind, d, name):
 
 
 class Sender:
-    """Comando di invio (bash -c) avviato in d, in un proprio gruppo di processi."""
+    """Sending command (bash -c) started in d in its own process group."""
 
     def __init__(self, cmd, d, home, out):
         self.d, self.out = d, out
-        # Uscita su un terminale, come per chi lo lancia a mano: verso un file curl la bufferizza e
-        # la tabella comparirebbe solo alla fine.
+        # Use terminal output as in a manual invocation: curl buffers output to a file,
+        # which would make the table appear only after completion.
         master, slave = pty.openpty()
         self.p = subprocess.Popen(["bash", "-c", cmd], cwd=d, env=tool_env(home), stdin=subprocess.DEVNULL,
                                   stdout=slave, stderr=slave, start_new_session=True)
@@ -203,7 +203,7 @@ class Sender:
         os.close(master)
 
     def texts(self, skip):
-        """Uscita del comando e file nuovi in d (curl -OJ scrive la risposta in bashtransfer.txt)."""
+        """Command output and new files in d (curl -OJ writes to bashtransfer.txt)."""
         paths = [self.out] + [os.path.join(self.d, n) for n in os.listdir(self.d) if n != skip]
         for p in paths:
             try:
@@ -214,7 +214,7 @@ class Sender:
                 pass
 
     def table(self, skip, timeout=10):
-        """Comandi stampati {strumento: riga}, cercati nell'uscita e nei file nuovi; None se assenti."""
+        """Printed {tool: row} commands from output/new files; None if missing."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             for t in self.texts(skip):
@@ -259,13 +259,13 @@ def url_of(rows):
     return shlex.split(rows["curl"])[-1]
 
 
-# --- Varianti dei comandi del ricevente -------------------------------------------------------
-# Ognuna trasforma i token della riga stampata nel comando eseguito. residuo: limite noto,
-# eseguito e riportato senza esito.
+# --- Receiver command variants --------------------------------------------------------------
+# Each transforms the printed row's tokens into the executed command. residuo: a known
+# limitation, exercised and reported without asserting an outcome.
 
 def receiver_variants():
     v = []
-    # curl -f -OJ URL: ogni sottoinsieme di -f, -O, -J; aggiunte comuni.
+    # curl -f -OJ URL: every subset of -f, -O, -J and common additions.
     v.append(("curl", "stampato", lambda t: t, None))
     for f, o, j in itertools.product((1, 0), repeat=3):
         flags = ["-f"] * f + ["-O"] * o + ["-J"] * j
@@ -273,9 +273,9 @@ def receiver_variants():
     for extra in (["-C", "-"], ["-L"], ["-k"], ["--remote-name-all"]):
         v.append(("curl", "stampato " + " ".join(extra), lambda t, e=extra: t[:-1] + e + t[-1:], None))
     v.append(("curl", "stampato --clobber", lambda t: t[:-1] + ["--clobber"] + t[-1:],
-              "--clobber chiede esplicitamente di sovrascrivere"))
-    # wget --content-disposition URL: con e senza --content-disposition, aggiunte comuni.
-    # "stampato" è sempre la riga della tabella così com'è, non la sua ricostruzione.
+              "--clobber explicitly requests overwriting"))
+    # wget --content-disposition URL: with/without --content-disposition and common additions.
+    # "stampato" always means the original table row, not a reconstruction.
     for cd in (True, False):
         for extra in ([], ["-c"], ["-N"], ["-nc"], ["-c", "-N"]):
             flags = ["--content-disposition"] * cd + extra
@@ -283,12 +283,12 @@ def receiver_variants():
                 v.append(("wget", "stampato", lambda t: t, None))
             else:
                 v.append(("wget", " ".join(flags) or "senza flag", lambda t, fl=flags: ["wget", *fl, t[-1]], None))
-    # busybox wget riceve la riga di wget: non conosce --content-disposition (esce con errore
-    # senza scrivere) e ignora -nc.
+    # busybox wget receives the wget row: --content-disposition is unsupported (it exits
+    # with an error without writing) and -nc is ignored.
     v.append(("busybox", "stampato", lambda t: ["busybox", *t], None))
     for flags in ([], ["-c"], ["-q"], ["--content-disposition", "-c"]):
         v.append(("busybox", " ".join(flags) or "senza flag", lambda t, fl=flags: ["busybox", "wget", *fl, t[-1]], None))
-    # aria2c -x1 -s1 --allow-overwrite=false URL: ogni sottoinsieme dei flag; aggiunte comuni.
+    # aria2c -x1 -s1 --allow-overwrite=false URL: every subset of flags and common additions.
     printed = ["-x1", "-s1", "--allow-overwrite=false"]
     for keep in itertools.product((1, 0), repeat=3):
         flags = [f for f, k in zip(printed, keep) if k]
@@ -299,11 +299,11 @@ def receiver_variants():
     for extra in (["-c"], ["--auto-file-renaming=false"], ["-x4", "-s4"]):
         v.append(("aria2c", "stampato " + " ".join(extra), lambda t, e=extra: t[:-1] + e + t[-1:], None))
     v.append(("aria2c", "-x1 -s1 --allow-overwrite=true", lambda t: ["aria2c", "-x1", "-s1", "--allow-overwrite=true", t[-1]],
-              "--allow-overwrite=true chiede esplicitamente di sovrascrivere"))
+              "--allow-overwrite=true explicitly requests overwriting"))
     return v
 
 
-# Configurazioni dell'utente ricevente: vuota e due ostili.
+# Receiver user configurations: empty and two hostile ones.
 CONFIGS = {
     "vuota": {},
     "ostile-1": {".curlrc": "remote-name-all\n", ".wgetrc": "continue = on\ncontent_disposition = on\n",
@@ -315,11 +315,11 @@ CONFIGS = {
 
 def config_residual(tool, argv, cfg):
     if cfg == "ostile-1" and tool == "aria2c" and "--allow-overwrite=false" not in argv:
-        return "aria2.conf con allow-overwrite=true e --allow-overwrite=false tolto"
+        return "aria2.conf with allow-overwrite=true and --allow-overwrite=false removed"
     return None
 
 
-# Sorgenti nella cartella del ricevente, con il nome che il download userebbe.
+# Sources in the receiver's directory, named as the download would be.
 KINDS = [("file", NAME), ("file", "bashtransfer.txt"), ("dir", "cartella"), ("link", NAME)]
 
 
@@ -331,7 +331,7 @@ def sender_cmd(kind, name, base):
 
 
 def receiver_valid(tool, label, fn, residuo, kind, name, cfg):
-    """Link valido: il mittente invia la sorgente dalla cartella in cui il ricevente lancia la variante."""
+    """Valid link: send the source from the directory where the receiver runs the variant."""
     c = case_dir()
     d = os.path.join(c, "cartella")
     os.mkdir(d)
@@ -342,17 +342,17 @@ def receiver_valid(tool, label, fn, residuo, kind, name, cfg):
     r = dict(side="ricevente", tool=tool, label=label, kind=kind, name=name, state="valido", cfg=cfg, residuo=residuo)
     if rows is None:
         snd.wait(1)
-        return dict(r, error="nessuna tabella dal mittente")
+        return dict(r, error="no table from sender")
     if probe(url_of(rows)) != 400:
         snd.wait(1)
-        return dict(r, error="link non valido prima della variante")
+        return dict(r, error="link not valid before variant")
     line = rows["wget" if tool == "busybox" else tool]
     argv = fn(shlex.split(line))
     r["argv"] = argv
     r["residuo"] = residuo or config_residual(tool, argv, cfg)
     r["rc"], r["err"] = run(argv, d, HOMES[cfg])
-    # Prova dello stato: la variante ha consumato il link, oppure il link è ancora valido e il
-    # comando stampato lo scarica subito dopo (in una cartella vuota) con il contenuto giusto.
+    # State evidence: the variant consumed the link, or it is still valid and the printed
+    # command downloads it immediately afterward into an empty directory with correct content.
     st = probe(url_of(rows))
     if st == 400:
         ctl = os.path.join(c, "controllo")
@@ -360,16 +360,16 @@ def receiver_valid(tool, label, fn, residuo, kind, name, cfg):
         rc, err = run(shlex.split(rows["curl"]), ctl, HOMES["vuota"])
         got = os.listdir(ctl)
         if rc != 0 or got != [name]:
-            r["error"] = f"controllo dopo la variante: rc={rc} file={got} {err}"
+            r["error"] = f"check after variant: rc={rc} files={got} {err}"
         elif kind != "dir" and sha256(os.path.join(ctl, name)) != sha256(os.path.realpath(src)):
-            r["error"] = "controllo dopo la variante: contenuto diverso"
+            r["error"] = "check after variant: content mismatch"
         r["link"] = "non consumato"
     elif st == 410:
         r["link"] = "consumato"
     else:
-        r["error"] = f"link in stato {st} dopo la variante"
+        r["error"] = f"link in state {st} after variant"
     if snd.wait() == "timeout":
-        r["error"] = "il mittente non termina"
+        r["error"] = "sender did not exit"
     r["after_ok"] = snapshot(src) == before
     r["files"] = sorted(os.listdir(d))
     return r
@@ -381,7 +381,7 @@ def receiver_error_state(tool, label, fn, residuo, kind, name, cfg, state, url):
     os.mkdir(d)
     src = make_source(kind, d, name)
     before = snapshot(src)
-    # La riga stampata per un altro link, con l'URL di questo stato.
+    # The row printed for another link, using this state's URL.
     rows = PRINTED["rows"]
     line = rows["wget" if tool == "busybox" else tool].replace(url_of(rows), url)
     argv = fn(shlex.split(line))
@@ -391,8 +391,8 @@ def receiver_error_state(tool, label, fn, residuo, kind, name, cfg, state, url):
                 after_ok=snapshot(src) == before, files=sorted(os.listdir(d)))
 
 
-# --- Comandi del mittente ---------------------------------------------------------------------
-# {F} sorgente, {U} URL con il nome, {B} base. residuo come sopra.
+# --- Sender commands -------------------------------------------------------------------------
+# {F} source, {U} URL including filename, {B} base. residuo as above.
 
 SENDERS = [
     ("curl -T F B", "curl -sS -T {F} {B}", None),
@@ -403,17 +403,17 @@ SENDERS = [
     ("curl -N -T F B/F", "curl -sS -N -T {F} {U}", None),
     ("curl -f -T F B/F", "curl -sS -f -T {F} {U}", None),
     ("curl -T F -J B/F", "curl -sS -T {F} -J {U}", None),
-    # Con -OJ la tabella va in bashtransfer.txt e senza -N curl la scrive solo alla fine: -N la
-    # rende visibile al test, il file aperto è lo stesso.
+    # With -OJ the table goes to bashtransfer.txt; without -N curl writes it only at the end.
+    # -N makes it visible to the test while opening the same file.
     ("curl -N -T F -OJ B/F", "curl -sS -N -T {F} -OJ {U}", "ojerr"),
     ("curl -N -T F -OJ B", "curl -sS -N -T {F} -OJ {B}", "ojerr"),
     ("curl -T F -L B/F", "curl -sS -T {F} -L {U}", None),
     ("cat F | curl -T - B/F", "cat {F} | curl -sS -T - {U}", None),
     ("curl -T - B/F < F", "curl -sS -T - {U} < {F}", None),
     ("cat F | curl -N -T - -OJ B/F", "cat {F} | curl -sS -N -T - -OJ {U}", "ojerr"),
-    ("curl -T F -O B/F", "curl -sS -T {F} -O {U}", "curl -O scrive la risposta nel file con il nome dell'URL: la sorgente"),
-    ("curl -T F -O B/", "curl -sS -T {F} -O {B}/", "con / finale curl aggiunge all'URL il nome della sorgente, e -O lo usa"),
-    ("curl -T F -o F B", "curl -sS -T {F} -o {F} {B}", "-o con il nome della sorgente"),
+    ("curl -T F -O B/F", "curl -sS -T {F} -O {U}", "curl -O writes the response to the URL's filename: the source"),
+    ("curl -T F -O B/", "curl -sS -T {F} -O {B}/", "with trailing / curl adds the source filename to the URL and -O uses it"),
+    ("curl -T F -o F B", "curl -sS -T {F} -o {F} {B}", "-o with the source filename"),
 ]
 DIR_SENDERS = [
     ("tar c D | curl -T - B/D.tar", "tar -cf - {F} | curl -sS -T - {U}.tar", None),
@@ -433,7 +433,7 @@ def sender_case(label, tmpl, residuo, kind, name, outcome):
     base = {"scaduto": SHORT, "401": AUTH, "503": CAP}.get(outcome, MAIN)
     cmd = tmpl.format(F=shlex.quote(name), U=shlex.quote(base + "/" + urllib.parse.quote(name)), B=shlex.quote(base))
     if residuo == "ojerr":
-        residuo = "curl -OJ su una risposta di errore: curl recenti ignorano Content-Disposition" \
+        residuo = "curl -OJ on an error response: recent curl versions ignore Content-Disposition" \
             if outcome in ("401", "503") else None
     r = dict(side="mittente", tool="curl", label=label, kind=kind, name=name, state=outcome, cfg="vuota",
              argv=["bash", "-c", cmd], residuo=residuo)
@@ -448,9 +448,9 @@ def sender_case(label, tmpl, residuo, kind, name, outcome):
                 os.mkdir(ctl)
                 rc, err = run(["curl", "-sS", "-f", "-o", os.path.join(ctl, "x"), url], ctl, HOMES["vuota"])
                 if rc != 0:
-                    r["error"] = f"download di controllo: rc={rc} {err}"
+                    r["error"] = f"control download: rc={rc} {err}"
                 elif kind != "dir" and sha256(os.path.join(ctl, "x")) != sha256(os.path.realpath(src)):
-                    r["error"] = "download di controllo: contenuto diverso"
+                    r["error"] = "control download: content mismatch"
             elif outcome == "ricevente-caduto":
                 status(url, limit=65536)
             else:
@@ -458,23 +458,23 @@ def sender_case(label, tmpl, residuo, kind, name, outcome):
             evidence = "tabella"
     rc = snd.wait()
     r["rc"] = rc
-    if outcome == "scaduto" and snd.said(name, "nessun ricevente si è collegato"):
+    if outcome == "scaduto" and snd.said(name, "no receiver connected"):
         evidence = "scadenza"
     if outcome in ("401", "503"):
         evidence = "controllato all'avvio"
     if evidence is None and rc == 23:
-        # curl -OJ non può creare bashtransfer.txt (esiste già: è la sorgente) e si ferma.
+        # curl -OJ cannot create bashtransfer.txt (it already exists as the source) and stops.
         evidence = "curl rifiuta di scrivere"
     if evidence is None and residuo is None:
-        r["error"] = "nessuna prova che il server abbia risposto"
+        r["error"] = "no evidence that the server responded"
     if rc == "timeout":
-        r["error"] = "il mittente non termina"
+        r["error"] = "sender did not exit"
     r["after_ok"] = snapshot(src) == before
     r["files"] = sorted(os.listdir(d))
     return r
 
 
-# --- Avvio ------------------------------------------------------------------------------------
+# --- Startup ----------------------------------------------------------------------------------
 
 def tool_version(tool):
     argv = {"busybox": ["busybox"], "aria2c": ["aria2c", "--version"]}.get(tool, [tool, "--version"])
@@ -495,10 +495,10 @@ def main():
         if v:
             tools[t] = v
         elif t in REQUIRE:
-            fail(f"{t} richiesto (BASHT_INV_REQUIRE) ma non disponibile")
+            fail(f"{t} required (BASHT_INV_REQUIRE) but unavailable")
     if "curl" not in tools:
-        fail("curl non disponibile")
-    print("strumenti: " + " | ".join(tools.values()))
+        fail("curl unavailable")
+    print("tools: " + " | ".join(tools.values()))
 
     global MAIN, SHORT, AUTH, CAP, HOMES
     MAIN = start_server("main")
@@ -507,20 +507,20 @@ def main():
     CAP = start_server("cap", BASHT_MAX_SESSIONS="1")
     HOMES = {name: make_home(name, files) for name, files in CONFIGS.items()}
 
-    # Il server con capacità 1 resta pieno: ogni PUT risponde 503.
+    # Keep the capacity-1 server full: every PUT returns 503.
     hold_dir = case_dir()
     with open(os.path.join(hold_dir, "h"), "wb") as f:
         f.write(b"x" * 1000)
     hold = Sender(f"curl -sS -N -T h {CAP}/h", hold_dir, HOMES["vuota"], os.path.join(hold_dir, "out"))
     if hold.table("h") is None:
-        fail("sessione di riempimento non avviata")
+        fail("capacity-filling session not started")
     for base, want in ((AUTH, 401), (CAP, 503)):
         got = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-T", os.path.join(hold_dir, "h"),
                               base + "/x"], capture_output=True, env=ENV).stdout.decode()
         if got != str(want):
-            fail(f"controllo iniziale: PUT su {base} ha risposto {got}, atteso {want}")
+            fail(f"initial check: PUT to {base} returned {got}, expected {want}")
 
-    # Link negli stati di errore, condivisi da tutte le varianti.
+    # Links in error states, shared by every variant.
     states = {"sconosciuto": (MAIN + "/ABCDEFGHIJ", 404)}
     d = case_dir()
     with open(os.path.join(d, "s"), "wb") as f:
@@ -546,14 +546,14 @@ def main():
     states["mittente-caduto"] = (url_of(rows), 410)
     for st, (url, want) in states.items():
         if probe(url) != want:
-            fail(f"link {st}: stato {probe(url)}, atteso {want}")
+            fail(f"link {st}: state {probe(url)}, expected {want}")
 
     variants = [v for v in receiver_variants() if v[0] in tools]
     jobs = []
     for tool, label, fn, residuo in variants:
         for cfg in CONFIGS:
             if tool == "busybox" and cfg != "vuota":
-                continue  # busybox wget non legge file di configurazione
+                continue  # busybox wget does not read configuration files
             for kind, name in KINDS:
                 jobs.append((receiver_valid, (tool, label, fn, residuo, kind, name, cfg)))
                 for st, (url, _) in states.items():
@@ -572,10 +572,10 @@ def main():
     hold.signal(signal.SIGKILL)
     for st, (url, want) in states.items():
         if probe(url) != want:
-            fail(f"link {st}: stato cambiato durante il test ({probe(url)}, atteso {want})")
+            fail(f"link {st}: state changed during the test ({probe(url)}, expected {want})")
 
-    # Controlli positivi: ogni comando stampato, in una cartella vuota, salva una copia identica
-    # con il nome giusto (busybox: senza --content-disposition, con il nome dello slug).
+    # Positive controls: every printed command saves an identical copy with the correct
+    # filename in an empty directory (busybox: no --content-disposition, named after the slug).
     positive = []
     for tool in tools:
         for r in results:
@@ -592,14 +592,14 @@ def main():
         snd = Sender(f"curl -sS -N -T orig {u}", c, HOMES["vuota"], os.path.join(c, "tx.out"))
         rows = snd.table("orig")
         if rows is None:
-            fail(f"controllo positivo {r['tool']}: nessuna tabella dal mittente")
+            fail(f"positive control {r['tool']}: no table from sender")
         argv = r["argv"][:-1] + [url_of(rows)]
         rc, err = run(argv, d, HOMES["vuota"])
         snd.wait()
         got = os.listdir(d)
         want = os.path.basename(urllib.parse.urlsplit(url_of(rows)).path) if r["tool"] == "busybox" else NAME
         if rc != 0 or got != [want] or sha256(os.path.join(d, want)) != sha256(src):
-            fail(f"controllo positivo {r['tool']} {argv}: rc={rc} file={got} {err}")
+            fail(f"positive control {r['tool']} {argv}: rc={rc} files={got} {err}")
 
     if os.environ.get("BASHT_INV_DUMP"):
         with open(os.environ["BASHT_INV_DUMP"], "w") as f:
@@ -612,15 +612,15 @@ def main():
         by = {}
         for r in rs:
             by.setdefault((r["tool"], r["state"]), []).append(r)
-        print(f"{side}: {len(rs)} casi, {sum(not r['after_ok'] for r in rs)} sorgenti alterate")
+        print(f"{side}: {len(rs)} cases, {sum(not r['after_ok'] for r in rs)} altered sources")
         for (tool, st), group in sorted(by.items()):
             extra = ""
             if st == "valido":
                 n = sum(r.get("link") == "consumato" for r in group)
-                extra = f" (link consumato dalla variante in {n}, scaricato dopo con il comando stampato negli altri)"
-            print(f"  {tool:8} {st:17} {len(group):4} casi{extra}")
-    print(f"controlli positivi: {len(positive)} ok ({', '.join(r['tool'] for r in positive)})")
-    print("limiti noti (eseguiti, senza esito):")
+                extra = f" (variant consumed the link in {n}; otherwise downloaded afterward with the printed command)"
+            print(f"  {tool:8} {st:17} {len(group):4} cases{extra}")
+    print(f"positive controls: {len(positive)} ok ({', '.join(r['tool'] for r in positive)})")
+    print("known limitations (exercised without asserting outcomes):")
     seen = set()
     for r in residual:
         key = (r["side"], r["label"], r["cfg"], r["residuo"])
@@ -628,16 +628,16 @@ def main():
         tot = sum(1 for x in residual if (x["side"], x["label"], x["cfg"], x["residuo"]) == key)
         if key not in seen:
             seen.add(key)
-            print(f"  {r['side']:9} {r['label']:34} cfg={r['cfg']:8} alterata in {alt}/{tot}: {r['residuo']}")
-    print(f"durata: {time.time() - t0:.0f} s")
+            print(f"  {r['side']:9} {r['label']:34} cfg={r['cfg']:8} altered in {alt}/{tot}: {r['residuo']}")
+    print(f"duration: {time.time() - t0:.0f} s")
     if bad:
         for r in bad[:40]:
-            what = r.get("error") or "SORGENTE ALTERATA"
-            print(f"FAIL {what}: {r['side']} {r['tool']} [{r['label']}] {r['kind']} {r['name']!r} stato={r['state']} "
+            what = r.get("error") or "SOURCE ALTERED"
+            print(f"FAIL {what}: {r['side']} {r['tool']} [{r['label']}] {r['kind']} {r['name']!r} state={r['state']} "
                   f"cfg={r['cfg']} argv={r.get('argv')} rc={r.get('rc')} file={r.get('files')} {r.get('err', '')}",
                   file=sys.stderr)
-        fail(f"{len(bad)} casi su {len(results)}")
-    print("INVARIANTE OK")
+        fail(f"{len(bad)} cases out of {len(results)}")
+    print("INVARIANT OK")
 
 
 try:

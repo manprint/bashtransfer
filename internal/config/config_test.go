@@ -14,13 +14,13 @@ func env(m map[string]string) func(string) string {
 func TestLoadDefaults(t *testing.T) {
 	cfg, err := Load(env(nil))
 	if err != nil {
-		t.Fatalf("Load senza variabili: %v", err)
+		t.Fatalf("Load without variables: %v", err)
 	}
 	if cfg.Listen != ":8080" || cfg.PublicURL != "" || cfg.AuthUser != "" || cfg.AuthPassword != "" {
-		t.Errorf("default stringhe errati: %+v", cfg)
+		t.Errorf("wrong string defaults: %+v", cfg)
 	}
 	if cfg.WaitTimeout != time.Hour || cfg.MaxSessions != 1000 || cfg.BufSize != 262144 {
-		t.Errorf("default numerici errati: %+v", cfg)
+		t.Errorf("wrong numeric defaults: %+v", cfg)
 	}
 }
 
@@ -31,15 +31,15 @@ func TestLoadAuthPairRequired(t *testing.T) {
 	} {
 		_, err := Load(env(m))
 		if err == nil {
-			t.Fatalf("attesa errore per %v", m)
+			t.Fatalf("expected error for %v", m)
 		}
 		if !strings.Contains(err.Error(), "BASHT_AUTH_USER") {
-			t.Errorf("messaggio senza nome variabile: %v", err)
+			t.Errorf("message without variable name: %v", err)
 		}
 	}
 	cfg, err := Load(env(map[string]string{"BASHT_AUTH_USER": "u", "BASHT_AUTH_PASSWORD": "p"}))
 	if err != nil || cfg.AuthUser != "u" || cfg.AuthPassword != "p" {
-		t.Errorf("coppia valida rifiutata: %+v %v", cfg, err)
+		t.Errorf("valid pair rejected: %+v %v", cfg, err)
 	}
 }
 
@@ -51,7 +51,7 @@ func TestConfigIdleTimeout(t *testing.T) {
 	for _, v := range []string{"0s", "500ms"} {
 		_, err := Load(env(map[string]string{"BASHT_IDLE_TIMEOUT": v}))
 		if err == nil || !strings.Contains(err.Error(), "BASHT_IDLE_TIMEOUT") {
-			t.Errorf("BASHT_IDLE_TIMEOUT=%s: errore %v, atteso errore con nome variabile", v, err)
+			t.Errorf("BASHT_IDLE_TIMEOUT=%s: error %v, want error with variable name", v, err)
 		}
 	}
 }
@@ -62,20 +62,20 @@ func TestLoadRejectsBadNumbers(t *testing.T) {
 		key  string
 		val  string
 	}{
-		{"timeout non parsabile", "BASHT_WAIT_TIMEOUT", "abc"},
-		{"timeout zero", "BASHT_WAIT_TIMEOUT", "0s"},
-		{"sessioni zero", "BASHT_MAX_SESSIONS", "0"},
-		{"buffer sotto minimo", "BASHT_BUF_SIZE", "1024"},
-		{"buffer sopra massimo", "BASHT_BUF_SIZE", "8388609"},
+		{"unparsable timeout", "BASHT_WAIT_TIMEOUT", "abc"},
+		{"zero timeout", "BASHT_WAIT_TIMEOUT", "0s"},
+		{"zero sessions", "BASHT_MAX_SESSIONS", "0"},
+		{"buffer below minimum", "BASHT_BUF_SIZE", "1024"},
+		{"buffer above maximum", "BASHT_BUF_SIZE", "8388609"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			_, err := Load(env(map[string]string{c.key: c.val}))
 			if err == nil {
-				t.Fatalf("attesa errore per %s=%s", c.key, c.val)
+				t.Fatalf("expected error for %s=%s", c.key, c.val)
 			}
 			if !strings.Contains(err.Error(), c.key) {
-				t.Errorf("messaggio senza nome variabile: %v", err)
+				t.Errorf("message without variable name: %v", err)
 			}
 		})
 	}
@@ -93,11 +93,11 @@ func TestLoadPublicURL(t *testing.T) {
 	for _, v := range bad {
 		_, err := Load(env(map[string]string{"BASHT_PUBLIC_URL": v}))
 		if err == nil {
-			t.Errorf("BASHT_PUBLIC_URL=%q accettata, attesa rifiutata", v)
+			t.Errorf("BASHT_PUBLIC_URL=%q accepted, expected rejection", v)
 			continue
 		}
 		if !strings.Contains(err.Error(), "BASHT_PUBLIC_URL") {
-			t.Errorf("errore senza nome della variabile: %v", err)
+			t.Errorf("error without variable name: %v", err)
 		}
 	}
 }
@@ -117,18 +117,18 @@ func TestLoadLogging(t *testing.T) {
 	} {
 		_, err := Load(env(m))
 		if err == nil {
-			t.Errorf("%v: atteso errore", m)
+			t.Errorf("%v: expected error", m)
 			continue
 		}
 		for k := range m {
 			if !strings.Contains(err.Error(), k) {
-				t.Errorf("errore %q non nomina %s", err, k)
+				t.Errorf("error %q does not name %s", err, k)
 			}
 		}
 	}
 }
 
-// TestConfigSenderGrace: secondi interi; default 120, 0 disattiva la tolleranza.
+// TestConfigSenderGrace: whole seconds; default 120, 0 disables the tolerance.
 func TestConfigSenderGrace(t *testing.T) {
 	for _, tc := range []struct {
 		value string
@@ -136,13 +136,13 @@ func TestConfigSenderGrace(t *testing.T) {
 	}{{"", 2 * time.Minute}, {"0", 0}, {"120", 2 * time.Minute}} {
 		cfg, err := Load(env(map[string]string{"BASHT_SENDER_GRACE": tc.value}))
 		if err != nil || cfg.SenderGrace != tc.want {
-			t.Errorf("BASHT_SENDER_GRACE=%q: %v %v, attesa %v", tc.value, cfg.SenderGrace, err, tc.want)
+			t.Errorf("BASHT_SENDER_GRACE=%q: %v %v, want %v", tc.value, cfg.SenderGrace, err, tc.want)
 		}
 	}
 	for _, v := range []string{"-1", "1.5", "2m", "abc", "86401"} {
 		_, err := Load(env(map[string]string{"BASHT_SENDER_GRACE": v}))
 		if err == nil || !strings.Contains(err.Error(), "BASHT_SENDER_GRACE") {
-			t.Errorf("BASHT_SENDER_GRACE=%s: errore %v, atteso errore con nome variabile", v, err)
+			t.Errorf("BASHT_SENDER_GRACE=%s: error %v, want error with variable name", v, err)
 		}
 	}
 }

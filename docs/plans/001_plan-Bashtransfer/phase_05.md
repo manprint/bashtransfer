@@ -1,81 +1,81 @@
-# Phase 4 — Deploy Docker, nginx e documentazione
+# Phase 4 — Docker deploy, nginx and documentation
 
-Intent: il servizio gira con `docker compose` (nginx davanti, app dietro su rete interna) e la documentazione descrive installazione, uso, configurazione e limiti. Esecuzione finale di RS-1 attraverso nginx.
-Prerequisites: P2 chiuso o 2.1 SKIPPED con motivazione approvata (vedi `phase_03.md`); P3 chiuso con G-BENCH PASS (`phase_04.md`). Artefatti: binario `bashtransfer` e script e2e.
-Phase closure: P4 e final gate (ultima fase); review by agent-1 (claude-haiku-5-5, self-review dello stesso modello).
+Intent: the service runs with `docker compose` (nginx in front, app behind on an internal network), and the documentation describes installation, use, configuration and limits. Final run of RS-1 through nginx.
+Prerequisites: P2 closed or 2.1 SKIPPED with an approved reason (see `phase_03.md`); P3 closed with G-BENCH PASS (`phase_04.md`). Artifacts: `bashtransfer` binary and the e2e script.
+Phase closure: P4 and final gate (last phase); review by agent-1 (claude-haiku-5-5, self-review by the same model).
 
 ## State and ownership contract
 Read STATE.md §0–1 first for scope, ownership, recovery, checks and commit rules.
-Open before edits; checkpoint at a recovery boundary; close with evidence. 4.2 dipende da R2 (residuo `client_body_timeout`, S1) e dalla rete autorizzata per l'immagine nginx: non assumere la configurazione nginx come verificata finché S2 non passa.
+Open before edits; checkpoint at a recovery boundary; close with evidence. 4.2 depends on R2 (remaining `client_body_timeout`, S1) and on authorized network access for the nginx image: do not assume the nginx configuration is verified until S2 passes.
 
 ## Local design context
-Plan revision: 2 (RS-2 attraverso nginx; README con due scenari).
-- D12: il server parla HTTP semplice; TLS è di nginx. Il server usa `X-Forwarded-Proto` e `Host` solo per la base URL dei comandi, quando `BASHT_PUBLIC_URL` non è impostato.
-- D14: Dockerfile multi-stage, binario statico `CGO_ENABLED=0`, runtime `distroless/static:nonroot`, tag immagine pinnati alla versione verificata; `compose.yaml` con `nginx` e `app` su rete interna; `app` non pubblica porte.
-- R2 (nginx): direttive richieste per streaming senza buffering e body illimitato: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` e `proxy_send_timeout` = 3600s (≥ `BASHT_WAIT_TIMEOUT` default; motivazione in overview R2), header `X-Forwarded-Proto` e `Host`. Direttive confermate da nginx.org (overview R2); `client_body_timeout` ancora da leggere.
-- Auth: come da esito di Q1 in `phase_03.md`.
+Plan revision: 2 (RS-2 through nginx; README with two scenarios).
+- D12: the server speaks plain HTTP; TLS is handled by nginx. The server uses `X-Forwarded-Proto` and `Host` only for the base URL of the commands, when `BASHT_PUBLIC_URL` is not set.
+- D14: multi-stage Dockerfile, static binary `CGO_ENABLED=0`, runtime `distroless/static:nonroot`, image tags pinned to the verified version; `compose.yaml` with `nginx` and `app` on an internal network; `app` publishes no ports.
+- R2 (nginx): directives required for unbuffered streaming and unlimited body: `client_max_body_size 0`, `proxy_request_buffering off`, `proxy_buffering off`, `proxy_http_version 1.1`, `proxy_read_timeout` and `proxy_send_timeout` = 3600s (≥ default `BASHT_WAIT_TIMEOUT`; rationale in R2 overview), headers `X-Forwarded-Proto` and `Host`. Directives confirmed from nginx.org (R2 overview); `client_body_timeout` still to be read.
+- Auth: as per the outcome of Q1 in `phase_03.md`.
 
 ## Sub-phases
 
-### 4.1 Dockerfile, .dockerignore e compose (solo servizio app)
+### 4.1 Dockerfile, .dockerignore and compose (app service only)
 - **Model:** agent-2 (claude-haiku-5-5)
-- **Assignment:** scrivere i file; review agent-1 su pinning e assenza di segreti nell'immagine.
+- **Assignment:** write the files; agent-1 review of pinning and absence of secrets in the image.
 - **Files:**
-  - NEW `Dockerfile`: stage `builder` (immagine Go pinnata alla versione di `go.mod` o successiva compatibile) con `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/bashtransfer ./cmd/bashtransfer`; stage finale `gcr.io/distroless/static:nonroot` (tag pinnato), `COPY --from=builder`, `USER nonroot`, `EXPOSE 8080`, `ENTRYPOINT ["/bashtransfer"]`.
+  - NEW `Dockerfile`: `builder` stage (Go image pinned to the version in `go.mod` or a later compatible one) with `CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/bashtransfer ./cmd/bashtransfer`; final stage `gcr.io/distroless/static:nonroot` (pinned tag), `COPY --from=builder`, `USER nonroot`, `EXPOSE 8080`, `ENTRYPOINT ["/bashtransfer"]`.
   - NEW `.dockerignore`: `.git`, `docs/`, `bin/`, `scripts/`, `*.test`, `Specifiche.md`.
-  - NEW `compose.yaml`: servizio `app` con `build: .`, `environment` da variabili di config (nessun segreto in chiaro: `BASHT_AUTH_PASSWORD` da `env_file` o variabile d'host), `expose: ["8080"]`, `networks: [internal]`, `restart: unless-stopped`. Il servizio `nginx` è in 4.2.
+  - NEW `compose.yaml`: `app` service with `build: .`, `environment` from config variables (no plaintext secrets: `BASHT_AUTH_PASSWORD` from `env_file` or a host variable), `expose: ["8080"]`, `networks: [internal]`, `restart: unless-stopped`. The `nginx` service is in 4.2.
 - **Change:**
-  Preconditions: P3 chiuso con G-BENCH PASS; binario compila (`go build ./cmd/bashtransfer`).
-  Contract: l'immagine non contiene file del repository tranne il binario; utente non root; nessuna porta pubblicata dall'host per `app`.
+  Preconditions: P3 closed with G-BENCH PASS; binary compiles (`go build ./cmd/bashtransfer`).
+  Contract: the image contains no repository files except the binary; non-root user; no port published by the host for `app`.
   Steps:
-  1. S1 — scrivere `Dockerfile` e `.dockerignore`; expected: `docker build` produce immagine (**richiede immagini base locali o rete autorizzata**).
-  2. S2 — scrivere `compose.yaml` (solo `app`); expected: `docker compose -f compose.yaml config` exit 0 e nessun `ports:` per `app`.
-  3. S3 — `docker run --rm` del binario con `BASHT_LISTEN=:8080` e `GET /` su rete interna del container di test; expected: testo d'uso.
-  Recovery boundary: dopo S1.
-  Failure handling: se `docker build` fallisce per rete o immagini base mancanti → G-P4 BUILD = blocked, registrato come blocker, non come pass. S2 resta eseguibile offline.
-- **Unit tests:** N/A — infrastruttura. Verifica di discovery: `docker compose config` mostra il servizio `app`; grep di `ports:` nel servizio `app` vuoto.
-- **e2e tests:** `docker build` + `docker run` + `scripts/e2e.sh` puntato alla porta del container; blocked finché la rete o le immagini locali non sono disponibili. Gate G-D1.
-- **Done:** `compose config` pass; `Dockerfile` scritto; build pass oppure blocker registrato con motivazione; review agent-1 registrata; unità chiusa.
+  1. S1 — write `Dockerfile` and `.dockerignore`; expected: `docker build` produces an image (**requires local base images or authorized network access**).
+  2. S2 — write `compose.yaml` (`app` only); expected: `docker compose -f compose.yaml config` exit 0 and no `ports:` for `app`.
+  3. S3 — `docker run --rm` of the binary with `BASHT_LISTEN=:8080` and `GET /` on the test container's internal network; expected: usage text.
+  Recovery boundary: after S1.
+  Failure handling: if `docker build` fails due to missing network or base images → G-P4 BUILD = blocked, recorded as a blocker, not as a pass. S2 remains runnable offline.
+- **Unit tests:** N/A — infrastructure. Discovery check: `docker compose config` shows the `app` service; grep for `ports:` in the `app` service returns nothing.
+- **e2e tests:** `docker build` + `docker run` + `scripts/e2e.sh` pointed at the container port; blocked until the network or local images are available. Gate G-D1.
+- **Done:** `compose config` pass; `Dockerfile` written; build pass or blocker recorded with reason; agent-1 review recorded; unit closed.
 
-### 4.2 nginx davanti ad app (R2 confermato in larga parte; rete autorizzata)
+### 4.2 nginx in front of app (R2 largely confirmed; authorized network)
 - **Model:** agent-2 (claude-haiku-5-5)
-- **Assignment:** scrivere la configurazione draft; review agent-1 solo dopo R2 confermato.
+- **Assignment:** write the draft configuration; agent-1 review only after R2 is confirmed.
 - **Files:**
-  - NEW `deploy/nginx/nginx.conf` (rev 8): blocco `stream` con `listen 443 ssl` (certificati montati da host in `/etc/nginx/certs/`) e `proxy_pass app:8080`, `proxy_timeout 3600s`; blocco `http` solo per il redirect 80→443. Il proxy HTTP non è usato per il relay (B-NGX, overview R2 rev 8).
-  - WRITE `compose.yaml`: servizio `nginx` (immagine pinnata), volume `deploy/nginx` e certificati host, porte 80 e 443 pubblicate, rete `internal`.
+  - NEW `deploy/nginx/nginx.conf` (rev 8): `stream` block with `listen 443 ssl` (certificates mounted from the host at `/etc/nginx/certs/`) and `proxy_pass app:8080`, `proxy_timeout 3600s`; `http` block only for the 80→443 redirect. The HTTP proxy is not used for the relay (B-NGX, R2 overview rev 8).
+  - WRITE `compose.yaml`: `nginx` service (pinned image), `deploy/nginx` volume and host certificates, ports 80 and 443 published, `internal` network.
 - **Change:**
-  Preconditions: 4.1 chiuso; `client_body_timeout` letto da nginx.org (S1); immagine nginx pinnata scaricabile (rete autorizzata).
-  Contract: nessuna direttiva non confermata; ogni direttiva del draft riporta la fonte in STATE §2.
+  Preconditions: 4.1 closed; `client_body_timeout` read from nginx.org (S1); pinned nginx image downloadable (authorized network).
+  Contract: no unconfirmed directive; every directive in the draft cites its source in STATE §2.
   Steps:
-  1. S1 — leggere `client_body_timeout` da https://nginx.org/en/docs/http/ngx_http_core_module.html e, dal modulo proxy, verificare che con `proxy_request_buffering off` un body `Transfer-Encoding: chunked` del client (RS-2) venga inoltrato all'upstream senza bufferizzazione; registrare entrambi in R2 con valore, contesto e versione; expected: valori e fonte in overview.
-  2. S2 — scrivere `deploy/nginx/nginx.conf` (stream, rev 8) e il servizio `nginx` in compose; expected: `nginx -t` pass se il binario nginx è locale, altrimenti `docker compose config` pass.
-  3. S3 — verifica RS-1 attraverso nginx (in 4.3 / G-FINAL).
-  Failure handling: `client_body_timeout` ostacola upload lenti → escalation a agent-1 con test e numeri; nessuna modifica del contratto di attesa D7.
-- **Unit tests:** N/A — configurazione. Verifica: `nginx -t` su configurazione in container o locale quando disponibile.
-- **e2e tests:** RS-1 attraverso nginx con upload da 256 MiB senza troncamento (sha256 identico); RS-2 (`cat file | curl -T - .../mydir.tgz`) attraverso nginx con sha256 identico; blocked con 4.2.
-- **Done:** config scritta con i parametri di R2; `nginx -t` pass (immagine o binario locale); e2e attraverso nginx pass con upload di 256 MiB senza troncamento (sha256 identico); review agent-1 registrata.
+  1. S1 — read `client_body_timeout` from https://nginx.org/en/docs/http/ngx_http_core_module.html and, from the proxy module, verify that with `proxy_request_buffering off` a client `Transfer-Encoding: chunked` body (RS-2) is forwarded to the upstream without buffering; record both in R2 with value, context and version; expected: values and source in the overview.
+  2. S2 — write `deploy/nginx/nginx.conf` (stream, rev 8) and the `nginx` service in compose; expected: `nginx -t` pass if the nginx binary is local, otherwise `docker compose config` pass.
+  3. S3 — verify RS-1 through nginx (in 4.3 / G-FINAL).
+  Failure handling: `client_body_timeout` hinders slow uploads → escalation to agent-1 with tests and numbers; no change to the D7 wait contract.
+- **Unit tests:** N/A — configuration. Check: `nginx -t` on the configuration in a container or locally when available.
+- **e2e tests:** RS-1 through nginx with a 256 MiB upload without truncation (identical sha256); RS-2 (`cat file | curl -T - .../mydir.tgz`) through nginx with identical sha256; blocked with 4.2.
+- **Done:** configuration written with the R2 parameters; `nginx -t` pass (image or local binary); e2e through nginx pass with a 256 MiB upload without truncation (identical sha256); agent-1 review recorded.
 
-### 4.3 Documentazione
+### 4.3 Documentation
 - **Model:** agent-2 (claude-haiku-5-5)
-- **Assignment:** scrivere `README.md` (documentazione sostanziale, sub-phase separata giustificata). Review agent-1 su accuratezza rispetto al comportamento verificato (`scripts/e2e.sh`, test).
+- **Assignment:** write `README.md` (substantial documentation, separate sub-phase justified). Agent-1 review for accuracy against verified behaviour (`scripts/e2e.sh`, tests).
 - **Files:**
-  - NEW `README.md` (italiano, come il progetto).
-  - READ: `Specifiche.md`, `docs/plans/001_plan-Bashtransfer/overview.md` (decisioni), `internal/config/config.go` (variabili), `scripts/e2e.sh`.
+  - NEW `README.md` (in Italian, as the project is).
+  - READ: `Specifiche.md`, `docs/plans/001_plan-Bashtransfer/overview.md` (decisions), `internal/config/config.go` (variables), `scripts/e2e.sh`.
 - **Change:**
-  Preconditions: 4.1 chiuso; 4.2 chiuso o SKIPPED con motivazione; 2.1 DONE o SKIPPED (per la sezione auth).
-  Contract del README: sezioni in ordine: cosa fa; comandi di mittente e ricevente per RS-1 (upload da file, URL senza `/` finale come in Specifiche) e RS-2 (`sudo tar -cpzf - dir | curl -T - https://<host>/dir.tgz`), curl e wget, esempi dal blocco reale; `curl -N` solo per output su pipe (R1); configurazione (tabella variabili da `config.go`, con default); autenticazione (scope da Q1); deploy con `docker compose`; nginx (solo se 4.2 chiuso); limiti e sicurezza: lo slug è il segreto, nessun nome nel path → file `download` (R4 caso C: `tar ... | curl -T - https://host` senza `/nome`), nessun TLS senza nginx, upload anonimi se auth disattivata, un solo ricevente per slug, attesa massima `BASHT_WAIT_TIMEOUT`, inattività `BASHT_IDLE_TIMEOUT`, nessuna persistenza; prestazioni: solo numeri da STATE §7 con la macchina di misura.
+  Preconditions: 4.1 closed; 4.2 closed or SKIPPED with reason; 2.1 DONE or SKIPPED (for the auth section).
+  README contract: sections in order: what it does; sender and receiver commands for RS-1 (upload from file, URL without a trailing `/` as in Specifiche) and RS-2 (`sudo tar -cpzf - dir | curl -T - https://<host>/dir.tgz`), curl and wget, examples from the real block; `curl -N` only for output on a pipe (R1); configuration (table of variables from `config.go`, with defaults); authentication (scope from Q1); deploy with `docker compose`; nginx (only if 4.2 is closed); limits and security: the slug is the secret, no name in the path → `download` file (R4 case C: `tar ... | curl -T - https://host` without `/name`), no TLS without nginx, anonymous uploads if auth is disabled, one receiver per slug, maximum wait `BASHT_WAIT_TIMEOUT`, inactivity `BASHT_IDLE_TIMEOUT`, no persistence; performance: only numbers from STATE §7 with the measurement machine.
   Steps:
-  1. S1 — scrivere README con la struttura sopra; expected: ogni variabile in tabella esiste in `config.go`.
-  2. S2 — verifica incrociata: ogni comando del README è eseguito dallo script e2e o marcato come non verificato.
-  Failure handling: una affermazione non verificata va scritta come tale, non come fatto.
-- **Unit tests:** N/A — documentazione. Controllo: `grep` delle variabili di config nel README; nessuna variabile documentata che non esista.
-- **e2e tests:** N/A — nessun comportamento nuovo.
-- **Done:** README scritto; verifica incrociata registrata in STATE §7; review agent-1 registrata; unità chiusa.
+  1. S1 — write the README with the structure above; expected: every variable in the table exists in `config.go`.
+  2. S2 — cross-check: every README command is run by the e2e script or marked as unverified.
+  Failure handling: an unverified claim must be written as such, not as fact.
+- **Unit tests:** N/A — documentation. Check: `grep` of the config variables in the README; no documented variable that does not exist.
+- **e2e tests:** N/A — no new behaviour.
+- **Done:** README written; cross-check recorded in STATE §7; agent-1 review recorded; unit closed.
 
 ## Phase gates and closure
-- Required gates: G-D1 (compose config, build se disponibile), G-E2E-FINAL (RS-1 attraverso nginx, blocked con 4.2), G-FINAL (ultima fase: `go test -race -count=1 ./...`, `scripts/e2e.sh`, `scripts/bench.sh` già PASS in P3, RS-1 attraverso compose+nginx).
-- Assertions: RS-1 e RS-2 completi (upload/comandi/download sha256 identico/410; RS-2 con nome `mydir.tgz`). Nessuna direttiva nginx non confermata.
+- Required gates: G-D1 (compose config, build if available), G-E2E-FINAL (RS-1 through nginx, blocked with 4.2), G-FINAL (last phase: `go test -race -count=1 ./...`, `scripts/e2e.sh`, `scripts/bench.sh` already PASS in P3, RS-1 through compose+nginx).
+- Assertions: RS-1 and RS-2 complete (upload/commands/download identical sha256/410; RS-2 with name `mydir.tgz`). No unconfirmed nginx directive.
 - README obligation: 4.3.
-- Every sub-phase DONE o SKIPPED con motivazione. Se 4.2 BLOCKED: P4 non chiude e `Scope result` resta RUNNING/BLOCKED; mai COMPLETE.
-- Supervisor agent-1 reviews: direttive nginx (4.2), accuratezza README (4.3), chiusura finale.
-- Chiusura P4 e final: unità `P4` in STATE §4; `Scope result: COMPLETE` solo se G-FINAL PASS, altrimenti `BLOCKED` con blocker tecnico registrato in STATE §9.
+- Every sub-phase DONE or SKIPPED with reason. If 4.2 BLOCKED: P4 does not close and `Scope result` stays RUNNING/BLOCKED; never COMPLETE.
+- Supervisor agent-1 reviews: nginx directives (4.2), README accuracy (4.3), final closure.
+- Closure of P4 and final: unit `P4` in STATE §4; `Scope result: COMPLETE` only if G-FINAL PASS, otherwise `BLOCKED` with the technical blocker recorded in STATE §9.

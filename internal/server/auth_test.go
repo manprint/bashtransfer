@@ -24,46 +24,46 @@ func authRequest(t *testing.T, user, pass string, withHeader bool) *http.Request
 func TestBasicAuthAcceptsCorrect(t *testing.T) {
 	check := BasicAuth("alice", "s3cret")
 	if !check(authRequest(t, "alice", "s3cret", true)) {
-		t.Fatal("credenziali corrette rifiutate")
+		t.Fatal("correct credentials rejected")
 	}
 }
 
 func TestBasicAuthRejectsWrongUser(t *testing.T) {
 	check := BasicAuth("alice", "s3cret")
 	if check(authRequest(t, "bob", "s3cret", true)) {
-		t.Fatal("utente sbagliato accettato")
+		t.Fatal("wrong user accepted")
 	}
 }
 
 func TestBasicAuthRejectsWrongPassword(t *testing.T) {
 	check := BasicAuth("alice", "s3cret")
 	if check(authRequest(t, "alice", "wrong", true)) {
-		t.Fatal("password sbagliata accettata")
+		t.Fatal("wrong password accepted")
 	}
 }
 
 func TestBasicAuthRejectsMissingHeader(t *testing.T) {
 	check := BasicAuth("alice", "s3cret")
 	if check(authRequest(t, "", "", false)) {
-		t.Fatal("richiesta senza header accettata")
+		t.Fatal("request without header accepted")
 	}
 }
 
-// TestBasicAuthConstantWork: ogni errore di un solo campo è rifiutato da solo,
-// in entrambe le direzioni. Il fatto che entrambi i confronti siano sempre eseguiti
-// è verificato in revisione del diff (vedi STATE §7).
+// TestBasicAuthConstantWork: every error in a single field is rejected on its own,
+// in both directions. That both comparisons are always executed
+// is verified in diff review (see STATE §7).
 func TestBasicAuthConstantWork(t *testing.T) {
 	check := BasicAuth("alice", "s3cret")
 	cases := []struct {
 		name, user, pass string
 	}{
-		{"utente giusto, password sbagliata", "alice", "s3creT"},
-		{"utente sbagliato, password giusta", "alicf", "s3cret"},
-		{"entrambi sbagliati", "x", "y"},
+		{"right user, wrong password", "alice", "s3creT"},
+		{"wrong user, right password", "alicf", "s3cret"},
+		{"both wrong", "x", "y"},
 	}
 	for _, c := range cases {
 		if check(authRequest(t, c.user, c.pass, true)) {
-			t.Errorf("%s: accettato", c.name)
+			t.Errorf("%s: accepted", c.name)
 		}
 	}
 }
@@ -77,7 +77,7 @@ func TestUploadRequiresAuth(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Senza credenziali: 401 con WWW-Authenticate, nessuna sessione creata.
+	// Without credentials: 401 with WWW-Authenticate, no session created.
 	noAuth, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/x.bin", bytes.NewReader([]byte("x")))
 	if err != nil {
 		t.Fatal(err)
@@ -88,16 +88,16 @@ func TestUploadRequiresAuth(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("senza credenziali: stato %d, atteso 401", resp.StatusCode)
+		t.Fatalf("without credentials: status %d, want 401", resp.StatusCode)
 	}
 	if got := resp.Header.Get("WWW-Authenticate"); !strings.HasPrefix(got, "Basic") {
-		t.Fatalf("WWW-Authenticate %q, atteso Basic", got)
+		t.Fatalf("WWW-Authenticate %q, want Basic", got)
 	}
 	if reg.Len() != 0 {
-		t.Fatalf("sessioni create senza autorizzazione: %d", reg.Len())
+		t.Fatalf("sessions created without authorization: %d", reg.Len())
 	}
 
-	// Con credenziali: comandi restituiti.
+	// With credentials: commands returned.
 	withAuth, err := http.NewRequestWithContext(ctx, http.MethodPut, srv.URL+"/x.bin", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +105,6 @@ func TestUploadRequiresAuth(t *testing.T) {
 	withAuth.SetBasicAuth("alice", "s3cret")
 	u := openUploadRequest(t, ctx, withAuth)
 	if !strings.HasPrefix(u.wgetLine, `wget --content-disposition "`) {
-		t.Fatalf("con credenziali: riga wget %q", u.wgetLine)
+		t.Fatalf("with credentials: wget line %q", u.wgetLine)
 	}
 }

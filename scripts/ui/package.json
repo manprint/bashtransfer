@@ -1,7 +1,7 @@
 {
   "name": "bashtransfer-ui",
   "private": true,
-  "description": "Test frontend di bashtransfer (scripts/ui/run.sh)",
+  "description": "Bashtransfer frontend tests (scripts/ui/run.sh)",
   "dependencies": {
     "playwright-core": "1.64.1"
   }

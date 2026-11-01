@@ -1,4 +1,4 @@
-// Package config legge la configurazione del server dalle variabili d'ambiente (D10).
+// Package config reads the server configuration from environment variables (D10).
 package config
 
 import (
@@ -14,12 +14,12 @@ const (
 	minBufSize  = 4096
 	maxBufSize  = 4194304
 	minIdleTime = time.Second
-	// maxSenderGraceSeconds (un giorno) evita un valore che sfora time.Duration o tiene sessioni
-	// orfane oltre ogni scopo.
+	// maxSenderGraceSeconds (one day) avoids a value that overflows time.Duration or keeps
+	// orphaned sessions beyond any purpose.
 	maxSenderGraceSeconds = 86400
 )
 
-// Config è la configurazione validata del server.
+// Config is the validated server configuration.
 type Config struct {
 	Listen       string
 	PublicURL    string
@@ -27,24 +27,24 @@ type Config struct {
 	AuthPassword string
 	WaitTimeout  time.Duration
 	IdleTimeout  time.Duration
-	// SenderGrace, se > 0, tiene viva per quel tempo la prenotazione di un mittente dal browser
-	// caduto prima del ricevente (BASHT_SENDER_GRACE, secondi). 0 la disattiva.
+	// If > 0, keeps a sender's reservation alive for that long after the browser
+	// dropped before the receiver (BASHT_SENDER_GRACE, seconds). 0 disables it.
 	SenderGrace time.Duration
 	MaxSessions int
 	BufSize     int
-	// LogFormat è "text" (logfmt, una riga chiave=valore) o "json" (un oggetto per riga).
+	// LogFormat is "text" (logfmt, one key=value line) or "json" (one object per line).
 	LogFormat string
 	LogLevel  slog.Level
 }
 
-// Formati di log accettati da BASHT_LOG_FORMAT.
+// Log formats accepted by BASHT_LOG_FORMAT.
 const (
 	LogText = "text"
 	LogJSON = "json"
 )
 
-// Load costruisce la Config usando getenv (os.Getenv in produzione).
-// Ogni errore nomina la variabile non valida.
+// Load builds the Config using getenv (os.Getenv in production).
+// Every error names the invalid variable.
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		Listen:      withDefault(getenv("BASHT_LISTEN"), ":8080"),
@@ -60,20 +60,20 @@ func Load(getenv func(string) string) (Config, error) {
 
 	if cfg.PublicURL != "" {
 		if err := validatePublicURL(cfg.PublicURL); err != nil {
-			return Config{}, fmt.Errorf("BASHT_PUBLIC_URL non valida: %q: %w", cfg.PublicURL, err)
+			return Config{}, fmt.Errorf("BASHT_PUBLIC_URL invalid: %q: %w", cfg.PublicURL, err)
 		}
 	}
 
 	cfg.AuthUser = getenv("BASHT_AUTH_USER")
 	cfg.AuthPassword = getenv("BASHT_AUTH_PASSWORD")
 	if (cfg.AuthUser == "") != (cfg.AuthPassword == "") {
-		return Config{}, fmt.Errorf("BASHT_AUTH_USER e BASHT_AUTH_PASSWORD devono essere impostate insieme")
+		return Config{}, fmt.Errorf("BASHT_AUTH_USER and BASHT_AUTH_PASSWORD must be set together")
 	}
 
 	if v := getenv("BASHT_WAIT_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d <= 0 {
-			return Config{}, fmt.Errorf("BASHT_WAIT_TIMEOUT non valida: %q", v)
+			return Config{}, fmt.Errorf("BASHT_WAIT_TIMEOUT invalid: %q", v)
 		}
 		cfg.WaitTimeout = d
 	}
@@ -81,16 +81,16 @@ func Load(getenv func(string) string) (Config, error) {
 	if v := getenv("BASHT_IDLE_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil || d < minIdleTime {
-			return Config{}, fmt.Errorf("BASHT_IDLE_TIMEOUT non valida (minimo %s): %q", minIdleTime, v)
+			return Config{}, fmt.Errorf("BASHT_IDLE_TIMEOUT invalid (minimum %s): %q", minIdleTime, v)
 		}
 		cfg.IdleTimeout = d
 	}
 
-	// Secondi interi; 0 disattiva la tolleranza.
+	// Whole seconds; 0 disables the tolerance.
 	if v := getenv("BASHT_SENDER_GRACE"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 || n > maxSenderGraceSeconds {
-			return Config{}, fmt.Errorf("BASHT_SENDER_GRACE non valida (secondi interi tra 0 e %d): %q", maxSenderGraceSeconds, v)
+			return Config{}, fmt.Errorf("BASHT_SENDER_GRACE invalid (whole seconds between 0 and %d): %q", maxSenderGraceSeconds, v)
 		}
 		cfg.SenderGrace = time.Duration(n) * time.Second
 	}
@@ -98,7 +98,7 @@ func Load(getenv func(string) string) (Config, error) {
 	if v := getenv("BASHT_MAX_SESSIONS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			return Config{}, fmt.Errorf("BASHT_MAX_SESSIONS non valida: %q", v)
+			return Config{}, fmt.Errorf("BASHT_MAX_SESSIONS invalid: %q", v)
 		}
 		cfg.MaxSessions = n
 	}
@@ -106,7 +106,7 @@ func Load(getenv func(string) string) (Config, error) {
 	if v := getenv("BASHT_BUF_SIZE"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < minBufSize || n > maxBufSize {
-			return Config{}, fmt.Errorf("BASHT_BUF_SIZE non valida (tra %d e %d): %q", minBufSize, maxBufSize, v)
+			return Config{}, fmt.Errorf("BASHT_BUF_SIZE invalid (between %d and %d): %q", minBufSize, maxBufSize, v)
 		}
 		cfg.BufSize = n
 	}
@@ -116,37 +116,37 @@ func Load(getenv func(string) string) (Config, error) {
 	case LogText, LogJSON:
 		cfg.LogFormat = v
 	default:
-		return Config{}, fmt.Errorf("BASHT_LOG_FORMAT non valida (text o json): %q", v)
+		return Config{}, fmt.Errorf("BASHT_LOG_FORMAT invalid (text or json): %q", v)
 	}
 
 	if v := getenv("BASHT_LOG_LEVEL"); v != "" {
-		// UnmarshalText accetta debug, info, warn, error (anche maiuscoli e con offset, es. info+2).
+		// UnmarshalText accepts debug, info, warn, error (also uppercase and with offsets, e.g. info+2).
 		if err := cfg.LogLevel.UnmarshalText([]byte(v)); err != nil {
-			return Config{}, fmt.Errorf("BASHT_LOG_LEVEL non valida (debug, info, warn, error): %q", v)
+			return Config{}, fmt.Errorf("BASHT_LOG_LEVEL invalid (debug, info, warn, error): %q", v)
 		}
 	}
 
 	return cfg, nil
 }
 
-// validatePublicURL richiede una base http(s) senza query né frammento. L'URL finisce tra
-// virgolette doppie nei comandi stampati: caratteri che la shell interpreta sono rifiutati.
+// validatePublicURL requires an http(s) base without query or fragment. The URL ends up in double
+// quotes in the printed commands: characters that the shell interprets are rejected.
 func validatePublicURL(v string) error {
 	u, err := url.Parse(v)
 	if err != nil {
 		return err
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("schema http o https richiesto")
+		return fmt.Errorf("scheme http or https required")
 	}
 	if u.Host == "" {
-		return fmt.Errorf("host mancante")
+		return fmt.Errorf("missing host")
 	}
 	if u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return fmt.Errorf("query, frammento e credenziali non ammessi")
+		return fmt.Errorf("query, fragment and credentials not allowed")
 	}
 	if strings.ContainsAny(v, "\"`$\\ !\t\r\n") {
-		return fmt.Errorf("caratteri non ammessi")
+		return fmt.Errorf("characters not allowed")
 	}
 	return nil
 }

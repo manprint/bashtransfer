@@ -6,25 +6,25 @@ import (
 	"time"
 )
 
-// peerCheckInterval è ogni quanto un mittente in attesa del ricevente viene controllato: net/http
-// non rileva la sua caduta finché il body non è letto, e il body si legge solo dopo il claim.
+// peerCheckInterval is how often a sender waiting for the receiver is checked: net/http
+// does not detect its drop until the body is read, and the body is read only after the claim.
 const peerCheckInterval = time.Second
 
-// heartbeatInterval è ogni quanto, su HTTP/2, un mittente in attesa riceve un byte "\r". Un proxy
-// h2c (Apache) non legge il body finché il backend non lo chiede e non si accorge del mittente
-// caduto: scrivendogli, la scrittura fallisce e il proxy chiude lo stream. "\r" non è visibile,
-// perché i comandi terminano con "\n". Variabile per i test.
+// heartbeatInterval is how often, over HTTP/2, a waiting sender receives a "\r" byte. An h2c
+// proxy (Apache) does not read the body until the backend asks for it and does not notice the
+// dropped sender: by writing to it, the write fails and the proxy closes the stream. "\r" is not
+// visible, because the commands end with "\n". Variable for tests.
 var heartbeatInterval = 2 * time.Second
 
 type connKey struct{}
 
-// ConnContext va impostato come http.Server.ConnContext: rende la connessione del mittente
-// disponibile all'handler per il controllo della caduta durante l'attesa.
+// ConnContext must be set as http.Server.ConnContext: it makes the sender's connection
+// available to the handler to check for a drop while waiting.
 func ConnContext(ctx context.Context, c net.Conn) context.Context {
 	return context.WithValue(ctx, connKey{}, c)
 }
 
-// connFrom restituisce la connessione salvata da ConnContext, o nil.
+// connFrom returns the connection stored by ConnContext, or nil.
 func connFrom(ctx context.Context) net.Conn {
 	c, _ := ctx.Value(connKey{}).(net.Conn)
 	return c

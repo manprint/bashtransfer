@@ -1,4 +1,4 @@
-// Package relay contiene il registry delle sessioni e il relay del body (D2, D3, D6–D8).
+// Package relay contains the session registry and the body relay (D2, D3, D6–D8).
 package relay
 
 import (
@@ -26,19 +26,19 @@ var (
 	ErrLengthMismatch = errors.New("length mismatch")
 	ErrIdle           = errors.New("sender idle")
 	ErrExpired        = errors.New("wait timeout expired")
-	// ErrInterrupted è l'errore di lettura del body dopo l'interruzione del relay (Stop).
+	// ErrInterrupted is the body read error after the relay is interrupted (Stop).
 	ErrInterrupted = errors.New("relay interrupted")
 )
 
-// Motivi per cui uno slug è terminale (GoneError): il ricevente vede un messaggio diverso per
-// ciascuno, e il log distingue un link usato da uno perso per colpa del mittente.
+// Reasons why a slug is terminal (GoneError): the receiver sees a different message for each,
+// and the log tells a used link apart from one lost through the sender.
 const (
-	GoneUsed       = "used"        // reclamato da un ricevente: trasferimento concluso o interrotto
-	GoneExpired    = "expired"     // nessun ricevente entro BASHT_WAIT_TIMEOUT, o arresto del server
-	GoneSenderGone = "sender_gone" // il mittente è caduto o ha annullato prima che un ricevente arrivasse
+	GoneUsed       = "used"        // claimed by a receiver: transfer completed or interrupted
+	GoneExpired    = "expired"     // no receiver within BASHT_WAIT_TIMEOUT, or server shutdown
+	GoneSenderGone = "sender_gone" // the sender dropped or cancelled before a receiver arrived
 )
 
-// GoneError è ErrGone con il motivo: errors.Is(err, ErrGone) vale per ogni GoneError.
+// GoneError is ErrGone with the reason: errors.Is(err, ErrGone) holds for every GoneError.
 type GoneError struct{ Reason string }
 
 func (e *GoneError) Error() string { return ErrGone.Error() }
@@ -48,41 +48,40 @@ func (e *GoneError) Is(target error) bool { return target == ErrGone }
 const (
 	slugAttempts          = 5
 	senderPresenceTimeout = 15 * time.Second
-	// tombstoneTTL: per quanto uno slug terminale resta 410 (D17).
+	// tombstoneTTL: how long a terminal slug keeps answering 410 (D17).
 	tombstoneTTL = 24 * time.Hour
-	// maxTombstones limita la memoria delle tombstone (circa 100 byte ciascuna): oltre il limite
-	// la più vecchia viene scartata prima della scadenza e il suo slug risponde 404 invece di 410.
-	// Senza limite, un client anonimo che cicla PUT e GET farebbe crescere la memoria con il ritmo
-	// delle richieste per 24 ore.
+	// maxTombstones bounds the tombstone memory (about 100 bytes each): beyond the limit the oldest
+	// is discarded before it expires and its slug answers 404 instead of 410. Without a limit, an
+	// anonymous client cycling PUT and GET would grow memory at the request rate for 24 hours.
 	maxTombstones = 100000
 )
 
-// Receiver è il destinatario del relay: riceve i byte e fa flush per blocco.
+// Receiver is the relay's recipient: it receives the bytes and flushes per block.
 type Receiver interface {
 	io.Writer
 	Flush()
 }
 
-// Session è una sessione di upload in attesa di un ricevente.
-// Slug, ID, Name, Length, Token e Created sono immutabili; gli altri campi sono protetti da reg.mu.
+// Session is an upload session waiting for a receiver.
+// Slug, ID, Name, Length, Token and Created are immutable; the other fields are protected by reg.mu.
 type Session struct {
 	Slug string
-	// ID identifica la sessione nei log. È casuale e indipendente dallo slug: chi legge i log
-	// non può ricavarne l'URL di download.
+	// ID identifies the session in the logs. It is random and independent of the slug: someone
+	// reading the logs cannot derive the download URL from it.
 	ID     string
 	Name   string
-	Length int64 // -1 se ignota
-	// Token autorizza l'invio del body di una sessione prenotata (Reserve); vuoto per Create.
+	Length int64 // -1 if unknown
+	// Token authorizes sending the body of a reserved session (Reserve); empty for Create.
 	Token   string
 	Created time.Time
 
 	reg     *Registry
 	claimed bool
-	bound   bool // prenotata: il mittente ha agganciato il body (Bind)
-	// unbind si chiude quando l'aggancio corrente termina: Detach del mittente caduto o aggancio
-	// sostitutivo (BindDetachable). Un aggancio nuovo ne crea uno nuovo.
+	bound   bool // reserved: the sender attached the body (Bind)
+	// unbind closes when the current attachment ends: Detach of a dropped sender or a replacing
+	// attachment (BindDetachable). A new attachment creates a new one.
 	unbind chan struct{}
-	// streams conta gli stream di avanzamento aperti dal mittente nel browser (StreamOpen).
+	// streams counts the progress streams the sender opened in the browser (StreamOpen).
 	streams            int
 	monitored          bool
 	foreground         bool
@@ -100,57 +99,57 @@ type Session struct {
 
 	finishOnce sync.Once
 
-	// Avanzamento per il mittente nel browser: inizio del relay, byte consegnati al ricevente,
-	// esito. Senza reg.mu: li scrive la goroutine del mittente e li legge lo stream della
-	// prenotazione.
+	// Progress for the sender in the browser: relay start, bytes delivered to the receiver,
+	// outcome. Not under reg.mu: the sender's goroutine writes them and the reservation's
+	// stream reads them.
 	started   chan struct{}
 	startOnce sync.Once
 	delivered atomic.Int64
 	result    atomic.Value // string
 }
 
-// Start segnala che il relay verso il ricevente è iniziato: chiude Started.
+// Start signals that the relay to the receiver has begun: it closes Started.
 func (s *Session) Start() { s.startOnce.Do(func() { close(s.started) }) }
 
-// Started si chiude quando il relay verso il ricevente inizia.
+// Started closes when the relay to the receiver begins.
 func (s *Session) Started() <-chan struct{} { return s.started }
 
-// AddDelivered somma n ai byte consegnati al ricevente.
+// AddDelivered adds n to the bytes delivered to the receiver.
 func (s *Session) AddDelivered(n int64) { s.delivered.Add(n) }
 
-// Delivered restituisce i byte consegnati al ricevente.
+// Delivered returns the bytes delivered to the receiver.
 func (s *Session) Delivered() int64 { return s.delivered.Load() }
 
-// SetResult registra l'esito per il mittente nel browser. Va chiamata prima di Finish.
+// SetResult records the outcome for the sender in the browser. Must be called before Finish.
 func (s *Session) SetResult(res string) { s.result.Store(res) }
 
-// Result restituisce l'esito registrato con SetResult, o "".
+// Result returns the outcome recorded with SetResult, or "".
 func (s *Session) Result() string {
 	res, _ := s.result.Load().(string)
 	return res
 }
 
-// Attached riceve il ricevente quando uno slug viene reclamato.
+// Attached delivers the receiver when a slug is claimed.
 func (s *Session) Attached() <-chan Receiver { return s.attached }
 
-// Expired si chiude se nessun ricevente si aggancia entro il timeout di attesa.
+// Expired closes if no receiver attaches within the wait timeout.
 func (s *Session) Expired() <-chan struct{} { return s.expired }
 
-// Finished si chiude quando il mittente ha terminato (Registry.Finish).
+// Finished closes when the sender has finished (Registry.Finish).
 func (s *Session) Finished() <-chan struct{} { return s.finished }
 
-// Aborted si chiude alla prima chiamata di Abort: il mittente può interrompere una lettura
-// bloccata invece di attendere il prossimo byte o BASHT_IDLE_TIMEOUT.
+// Aborted closes on the first call to Abort: the sender can interrupt a blocked read instead of
+// waiting for the next byte or BASHT_IDLE_TIMEOUT.
 func (s *Session) Aborted() <-chan struct{} { return s.aborted }
 
-// Err restituisce il primo errore registrato con Abort, o nil.
+// Err returns the first error recorded with Abort, or nil.
 func (s *Session) Err() error {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	return s.err
 }
 
-// Abort registra err solo alla prima chiamata e chiude Aborted.
+// Abort records err only on the first call and closes Aborted.
 func (s *Session) Abort(err error) {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
@@ -160,20 +159,20 @@ func (s *Session) Abort(err error) {
 	}
 }
 
-// Registry è l'unico punto che muta lo stato delle sessioni.
+// Registry is the only place that mutates session state.
 type Registry struct {
 	mu          sync.Mutex
 	sessions    map[string]*Session
-	gone        map[string]string // slug terminale -> motivo (Gone*)
+	gone        map[string]string // terminal slug -> reason (Gone*)
 	goneQ       []tombstone
 	maxGone     int
 	maxSessions int
 	waitTimeout time.Duration
 	gen         func() (string, error)
-	// senderGrace, se > 0, tiene viva per quel tempo una prenotazione il cui mittente è caduto
-	// prima del ricevente: può riagganciarsi con lo stesso token (Detach, BindDetachable).
+	// senderGrace, if > 0, keeps a reservation alive for that long after its sender dropped before
+	// the receiver: it can reattach with the same token (Detach, BindDetachable).
 	senderGrace time.Duration
-	// onGraceExpired, se non nil, è chiamata (senza lock) quando la tolleranza scade e chiude il link.
+	// onGraceExpired, if not nil, is called (without the lock) when the grace period expires and closes the link.
 	onGraceExpired func(*Session)
 }
 
@@ -182,7 +181,7 @@ type tombstone struct {
 	at   time.Time
 }
 
-// NewRegistry crea un registry con capacità e timeout di attesa dati.
+// NewRegistry creates a registry with a session capacity and a data wait timeout.
 func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry {
 	return &Registry{
 		sessions:    make(map[string]*Session),
@@ -194,37 +193,37 @@ func NewRegistry(maxSessions int, waitTimeout time.Duration) *Registry {
 	}
 }
 
-// SetSenderGrace imposta la tolleranza per i mittenti dal browser caduti prima del ricevente; 0 la
-// disattiva. Va chiamata prima di servire richieste.
+// SetSenderGrace sets the grace period for browser senders that dropped before the receiver; 0
+// disables it. Must be called before serving requests.
 func (r *Registry) SetSenderGrace(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.senderGrace = d
 }
 
-// SenderGrace restituisce la tolleranza impostata con SetSenderGrace.
+// SenderGrace returns the grace period set with SetSenderGrace.
 func (r *Registry) SenderGrace() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.senderGrace
 }
 
-// OnGraceExpired registra la funzione chiamata quando la tolleranza scade e il link si chiude.
+// OnGraceExpired registers the function called when the grace period expires and the link closes.
 func (r *Registry) OnGraceExpired(fn func(*Session)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onGraceExpired = fn
 }
 
-// Create apre una sessione per un upload. length è -1 se ignota.
+// Create opens a session for an upload. length is -1 if unknown.
 func (r *Registry) Create(name string, length int64) (*Session, error) {
 	return r.create(name, length, "", 0)
 }
 
-// Reserve apre una sessione il cui body arriva con una seconda richiesta: l'invio dal browser, che
-// deve mostrare il link prima di iniziare l'upload. Il mittente aggancia il body con Bind e il
-// Token della sessione entro bindTimeout; altrimenti la sessione termina come se il mittente fosse
-// caduto (ErrSenderGone), anche con un ricevente già agganciato.
+// Reserve opens a session whose body arrives with a second request: the send from the browser,
+// which must show the link before starting the upload. The sender attaches the body with Bind and
+// the session's Token within bindTimeout; otherwise the session ends as if the sender had dropped
+// (ErrSenderGone), even with a receiver already attached.
 func (r *Registry) Reserve(name string, length int64, bindTimeout time.Duration) (*Session, error) {
 	token, err := newToken()
 	if err != nil {
@@ -233,19 +232,19 @@ func (r *Registry) Reserve(name string, length int64, bindTimeout time.Duration)
 	return r.create(name, length, token, bindTimeout)
 }
 
-// Bind assegna al mittente la sessione prenotata id. Uno slug sconosciuto, un token errato o una
-// sessione già agganciata danno ErrNotFound: chi non ha il token non distingue i casi.
+// Bind assigns the reserved session id to the sender. An unknown slug, a wrong token or a
+// session already attached return ErrNotFound: whoever lacks the token cannot tell the cases apart.
 func (r *Registry) Bind(id, token string) (*Session, error) {
 	s, _, err := r.BindDetachable(id, token)
 	return s, err
 }
 
-// BindDetachable è Bind e restituisce anche il canale che si chiude quando questo aggancio termina
-// senza chiudere la sessione: il mittente caduto (Detach) o un aggancio che lo sostituisce. Con la
-// tolleranza attiva (SetSenderGrace) il mittente che torna con il token riaggancia la sessione anche
-// se il server non ha ancora visto cadere il vecchio aggancio, purché il relay non sia iniziato e la
-// sessione non sia stata interrotta: il vecchio aggancio viene chiuso e il suo gestore esce senza
-// terminare la sessione.
+// BindDetachable is Bind and also returns the channel that closes when this attachment ends
+// without closing the session: the dropped sender (Detach) or an attachment replacing it. With
+// the grace period active (SetSenderGrace), a sender that returns with the token reattaches the
+// session even if the server has not yet seen the old attachment drop, provided the relay has not
+// started and the session has not been interrupted: the old attachment is closed and its handler
+// exits without ending the session.
 func (r *Registry) BindDetachable(id, token string) (*Session, <-chan struct{}, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -266,7 +265,7 @@ func (r *Registry) BindDetachable(id, token string) (*Session, <-chan struct{}, 
 	return s, s.unbind, nil
 }
 
-// relayStarted riporta se il relay verso il ricevente è iniziato (Start).
+// relayStarted reports whether the relay to the receiver has begun (Start).
 func (s *Session) relayStarted() bool {
 	select {
 	case <-s.started:
@@ -276,7 +275,7 @@ func (s *Session) relayStarted() bool {
 	}
 }
 
-// Away riporta se il body non è agganciato o la pagina che gestisce la presenza è assente.
+// Away reports whether the body is not attached or the page handling presence is absent.
 func (s *Session) Away() bool {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
@@ -287,7 +286,7 @@ func (s *Session) awayLocked() bool {
 	return s.Token != "" && (!s.bound || (s.monitored && !s.foreground))
 }
 
-// ReceiverPresenceTimeout limita la validità della conferma della pagina ricevente.
+// ReceiverPresenceTimeout limits the validity of the receiver page's confirmation.
 const ReceiverPresenceTimeout = 5 * time.Second
 
 func (s *Session) peerReadyLocked(now time.Time) bool {
@@ -295,19 +294,19 @@ func (s *Session) peerReadyLocked(now time.Time) bool {
 		(s.relayStarted() || (!s.claimed && !s.receiverSeen.IsZero() && now.Sub(s.receiverSeen) < ReceiverPresenceTimeout))
 }
 
-// PeerReady conferma il mittente e il ricevente, senza leggere o conservare il file.
+// PeerReady confirms the sender and the receiver, without reading or storing the file.
 func (s *Session) PeerReady() bool {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
 	return s.peerReadyLocked(time.Now())
 }
 
-// PeerStatus è una fotografia atomica delle connessioni della sessione.
+// PeerStatus is an atomic snapshot of the session's connections.
 type PeerStatus struct {
 	Ready, Away, Claimed, Started bool
 }
 
-// ObserveReceiver rinnova la presenza della pagina senza reclamare il link.
+// ObserveReceiver renews the page's presence without claiming the link.
 func (r *Registry) ObserveReceiver(id string) (PeerStatus, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -327,8 +326,8 @@ func (r *Registry) ObserveReceiver(id string) (PeerStatus, error) {
 	}, nil
 }
 
-// BeginRelay rende atomici l'inizio della copia e la sostituzione del PUT: un vecchio
-// aggancio non può iniziare a leggere il file dopo che Resume lo ha staccato.
+// BeginRelay makes starting the copy and replacing the PUT atomic: an old
+// attachment cannot start reading the file after Resume has detached it.
 func (r *Registry) BeginRelay(s *Session, binding <-chan struct{}) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -339,7 +338,7 @@ func (r *Registry) BeginRelay(s *Session, binding <-chan struct{}) bool {
 	return true
 }
 
-// Foreground registra la disponibilità della pagina, senza leggere il body del file.
+// Foreground registers the page's availability, without reading the file body.
 func (r *Registry) Foreground(id, token string, visible bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -372,8 +371,8 @@ func (r *Registry) foregroundLocked(s *Session, visible bool) {
 	})
 }
 
-// Resume riapre il controllo della sessione. Rebind stacca il vecchio PUT solo prima
-// del relay; durante la copia si recupera esclusivamente lo stream di avanzamento.
+// Resume reopens control of the session. Rebind detaches the old PUT only before
+// the relay; during the copy, only the progress stream is recovered.
 func (r *Registry) Resume(id, token string, rebind bool) (*Session, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -391,20 +390,20 @@ func (r *Registry) Resume(id, token string, rebind bool) (*Session, bool, error)
 	return s, started, nil
 }
 
-// Requeue rimette in coda il ricevente letto da Attached da un gestore che cede la sessione a un
-// aggancio sostitutivo prima di iniziare il relay: lo leggerà il nuovo gestore.
+// Requeue puts back the receiver read from Attached by a handler that yields the session to a
+// replacing attachment before starting the relay: the new handler will read it.
 func (s *Session) Requeue(rcv Receiver) { s.attached <- rcv }
 
-// StreamOpen registra un nuovo stream di avanzamento del mittente nel browser (prenotazione o
-// ripresa). Ogni StreamOpen va chiuso con StreamClosed.
+// StreamOpen registers a new progress stream of the sender in the browser (reservation or
+// resume). Every StreamOpen must be closed with StreamClosed.
 func (r *Registry) StreamOpen(s *Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s.streams++
 }
 
-// StreamClosed registra la chiusura del controllo. Per i client senza presenza, la chiusura
-// dell'ultimo stream prima del relay avvia la tolleranza. Con presenza, il body è indipendente.
+// StreamClosed records the closing of the control. For clients without presence, closing the
+// last stream before the relay starts the grace period. With presence, the body is independent.
 func (r *Registry) StreamClosed(s *Session) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -417,20 +416,20 @@ func (r *Registry) StreamClosed(s *Session) bool {
 	return r.detachLocked(s, s.unbind) && !s.bound
 }
 
-// Detach gestisce la caduta del mittente dal browser, dell'aggancio binding (da BindDetachable), prima
-// dell'inizio del relay. Con la tolleranza attiva la sessione resta viva per senderGrace, senza
-// mittente: un ricevente che la reclama attende, e il mittente può riagganciarsi con lo stesso token
-// (BindDetachable). Alla scadenza il link si chiude come per un mittente caduto. Riporta true se la
-// sessione non va terminata dal chiamante: già ceduta a un altro aggancio, già in tolleranza o
-// messa in tolleranza ora. False se il chiamante deve terminarla (Abort, Finish): tolleranza
-// disattivata, mittente non prenotato, relay iniziato, sessione già finita o interrotta.
+// Detach handles the sender dropping from the browser, of the attachment binding (from
+// BindDetachable), before the relay starts. With the grace period active the session stays alive
+// for senderGrace, without a sender: a receiver that claims it waits, and the sender can reattach
+// with the same token (BindDetachable). At expiry the link closes as for a dropped sender. It
+// reports true if the session must not be ended by the caller: already yielded to another
+// attachment, already in grace or put in grace now. False if the caller must end it (Abort,
+// Finish): grace disabled, sender not reserved, relay started, session already finished or interrupted.
 func (r *Registry) Detach(s *Session, binding <-chan struct{}) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.detachLocked(s, binding)
 }
 
-// detachLocked è Detach con r.mu preso.
+// detachLocked is Detach with r.mu held.
 func (r *Registry) detachLocked(s *Session, binding <-chan struct{}) bool {
 	if r.senderGrace <= 0 || s.Token == "" || s.err != nil || r.sessions[s.Slug] != s || s.relayStarted() {
 		return false
@@ -456,8 +455,8 @@ func (r *Registry) detachLocked(s *Session, binding <-chan struct{}) bool {
 	return true
 }
 
-// Reserved restituisce la sessione prenotata id, agganciata o no, se token è il suo: serve
-// all'annullamento dal browser. Come per Bind, ogni altro caso è ErrNotFound.
+// Reserved returns the reserved session id, attached or not, if token is its token: it serves
+// cancellation from the browser. As for Bind, every other case is ErrNotFound.
 func (r *Registry) Reserved(id, token string) (*Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -468,7 +467,7 @@ func (r *Registry) Reserved(id, token string) (*Session, error) {
 	return s, nil
 }
 
-// unbound ignora i callback di un aggancio sostituito; generation 0 è l'annullamento esplicito.
+// unbound ignores the callbacks of a replaced attachment; generation 0 is the explicit cancellation.
 func (r *Registry) unbound(s *Session, generation uint64) bool {
 	r.mu.Lock()
 	if s.bound || r.sessions[s.Slug] != s || (generation != 0 && generation != s.bindGeneration) {
@@ -491,9 +490,9 @@ func (r *Registry) unbound(s *Session, generation uint64) bool {
 	return true
 }
 
-// Cancel termina la sessione prenotata s perché il mittente nel browser ha chiuso la pagina o
-// annullato: prima del Bind come allo scadere di bindTimeout, dopo con Abort(ErrSenderGone), che
-// sveglia il mittente in attesa del ricevente. Su una sessione finita non fa nulla.
+// Cancel ends the reserved session s because the sender in the browser closed the page or
+// cancelled: before Bind as at bindTimeout expiry, after with Abort(ErrSenderGone), which
+// wakes the sender waiting for the receiver. On a finished session it does nothing.
 func (r *Registry) Cancel(s *Session) {
 	select {
 	case <-s.finished:
@@ -550,7 +549,7 @@ func (r *Registry) create(name string, length int64, token string, bindTimeout t
 	return nil, ErrSlugCollision
 }
 
-// newLogID genera l'identificativo di sessione per i log: 8 byte casuali in esadecimale.
+// newLogID generates the session identifier for the logs: 8 random bytes in hex.
 func newLogID() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -559,7 +558,7 @@ func newLogID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// newToken genera il token di una sessione prenotata: 16 byte casuali in esadecimale.
+// newToken generates the token of a reserved session: 16 random bytes in hex.
 func newToken() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -568,12 +567,12 @@ func newToken() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// Claim assegna il ricevente allo slug. Esattamente un claim riesce per sessione.
+// Claim assigns the receiver to the slug. Exactly one claim succeeds per session.
 func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
 	return r.claim(id, rcv, false)
 }
 
-// ClaimReady lascia il link intatto quando il browser deve attendere il mittente.
+// ClaimReady leaves the link intact when the browser must wait for the sender.
 func (r *Registry) ClaimReady(id string, rcv Receiver) (*Session, error) {
 	return r.claim(id, rcv, true)
 }
@@ -601,9 +600,9 @@ func (r *Registry) claim(id string, rcv Receiver, requireReady bool) (*Session, 
 	return s, nil
 }
 
-// Peek riporta lo stato di uno slug senza reclamarlo: la sessione se attende un ricevente,
-// altrimenti ErrClaimed, un GoneError (ErrGone) o ErrNotFound come Claim. Della sessione il chiamante legge solo
-// i campi immutabili (nome e lunghezza per la pagina di download).
+// Peek reports the state of a slug without claiming it: the session if it waits for a receiver,
+// otherwise ErrClaimed, a GoneError (ErrGone) or ErrNotFound as Claim does. The caller reads only
+// the immutable fields of the session (name and length for the download page).
 func (r *Registry) Peek(id string) (*Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -621,8 +620,8 @@ func (r *Registry) Peek(id string) (*Session, error) {
 	return s, nil
 }
 
-// Finish termina la sessione: rimuove dal registry una sola volta e chiude Finished.
-// Deve essere chiamata solo dalla goroutine del mittente, dopo l'ultima scrittura al ricevente.
+// Finish ends the session: removes it from the registry once and closes Finished.
+// Must be called only from the sender's goroutine, after the last write to the receiver.
 func (r *Registry) Finish(s *Session) {
 	r.mu.Lock()
 	if r.sessions[s.Slug] == s {
@@ -637,16 +636,16 @@ func (r *Registry) Finish(s *Session) {
 	s.finishOnce.Do(func() { close(s.finished) })
 }
 
-// Len restituisce il numero di sessioni vive.
+// Len returns the number of live sessions.
 func (r *Registry) Len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.sessions)
 }
 
-// ExpireWaiting fa scadere subito tutte le sessioni non ancora reclamate. Serve all'arresto:
-// senza nuovi riceventi possibili, i mittenti in attesa vengono chiusi invece di occupare il
-// periodo di grazia. I trasferimenti in corso non sono toccati.
+// ExpireWaiting immediately expires all sessions not yet claimed. It serves shutdown:
+// with no new receivers possible, waiting senders are closed instead of occupying the
+// grace period. Transfers in progress are untouched.
 func (r *Registry) ExpireWaiting() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -655,7 +654,7 @@ func (r *Registry) ExpireWaiting() {
 	}
 }
 
-// expire rimuove una sessione non reclamata allo scadere del timeout. Idempotente.
+// expire removes a session not claimed at timeout expiry. Idempotent.
 func (r *Registry) expire(s *Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -673,16 +672,16 @@ func (r *Registry) expireLocked(s *Session) {
 	delete(r.sessions, s.Slug)
 	r.bury(s.Slug, GoneExpired)
 	close(s.expired)
-	// Una prenotazione senza body non ha un mittente che chiami Finish.
+	// A reservation without a body has no sender that will call Finish.
 	if s.Token != "" && !s.bound {
 		s.bindTimer.Stop()
 		s.finishOnce.Do(func() { close(s.finished) })
 	}
 }
 
-// finishReason è il motivo della tombstone di una sessione che termina (r.mu preso). Uno slug
-// reclamato vale sempre GoneUsed, anche se poi il mittente è caduto: il ricevente ha già avuto il
-// link. Senza ricevente, la scadenza è GoneExpired e ogni altra fine è un mittente caduto.
+// finishReason is the reason for the tombstone of a session that ends (r.mu held). A claimed
+// slug is always GoneUsed, even if the sender then dropped: the receiver already had the
+// link. Without a receiver, expiry is GoneExpired and any other end is a dropped sender.
 func finishReason(s *Session) string {
 	switch {
 	case s.claimed:
@@ -693,7 +692,7 @@ func finishReason(s *Session) string {
 	return GoneSenderGone
 }
 
-// bury registra lo slug come terminale per tombstoneTTL (D17), entro maxGone tombstone.
+// bury records the slug as terminal for tombstoneTTL (D17), within maxGone tombstones.
 func (r *Registry) bury(id, reason string) {
 	r.gone[id] = reason
 	r.goneQ = append(r.goneQ, tombstone{slug: id, at: time.Now()})
@@ -702,20 +701,20 @@ func (r *Registry) bury(id, reason string) {
 	}
 }
 
-// dropOldest rimuove la tombstone più vecchia e libera il riferimento alla stringa nell'array.
+// dropOldest removes the oldest tombstone and frees the string reference in the array.
 func (r *Registry) dropOldest() {
 	delete(r.gone, r.goneQ[0].slug)
 	r.goneQ[0] = tombstone{}
 	r.goneQ = r.goneQ[1:]
 }
 
-// goneReason riporta il motivo della tombstone di id, se c'è.
+// goneReason returns the reason of the tombstone for id, if any.
 func (r *Registry) goneReason(id string) (string, bool) {
 	reason, ok := r.gone[id]
 	return reason, ok
 }
 
-// prune rimuove le tombstone scadute dalla testa della coda (FIFO per data).
+// prune removes the expired tombstones from the head of the queue (FIFO by date).
 func (r *Registry) prune(now time.Time) {
 	for len(r.goneQ) > 0 && now.Sub(r.goneQ[0].at) >= tombstoneTTL {
 		r.dropOldest()

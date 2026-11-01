@@ -13,8 +13,8 @@ import (
 	"bashtransfer/internal/relay"
 )
 
-// browserDo esegue una richiesta come un browser (Accept con text/html) e restituisce la risposta
-// con il body letto.
+// browserDo performs a request as a browser (Accept with text/html) and returns the response with
+// the body read.
 func browserDo(t *testing.T, method, url string) (*http.Response, string) {
 	t.Helper()
 	req, err := http.NewRequest(method, url, nil)
@@ -43,14 +43,14 @@ func wantContains(t *testing.T, what, body string, wants ...string) {
 	t.Helper()
 	for _, w := range wants {
 		if !strings.Contains(body, w) {
-			t.Errorf("%s: manca %q", what, w)
+			t.Errorf("%s: missing %q", what, w)
 		}
 	}
 }
 
-// TestLandingDoesNotConsume: il browser e le anteprime vedono la pagina di download, quante volte
-// vogliono, senza consumare il link; il pulsante (POST) scarica il file intero; dopo, la pagina
-// dice che il link è usato.
+// TestLandingDoesNotConsume: the browser and the previews see the download page as many times as
+// they like, without consuming the link; the button (POST) downloads the whole file; afterwards the
+// page says the link is used.
 func TestLandingDoesNotConsume(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx := context.Background()
@@ -61,7 +61,7 @@ func TestLandingDoesNotConsume(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		resp, body := browserDo(t, http.MethodGet, link)
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("pagina di download: stato %d", resp.StatusCode)
+			t.Fatalf("download page: status %d", resp.StatusCode)
 		}
 		h := resp.Header
 		if ct := h.Get("Content-Type"); ct != "text/html; charset=utf-8" {
@@ -76,16 +76,16 @@ func TestLandingDoesNotConsume(t *testing.T) {
 		if cd := h.Get("Content-Disposition"); cd != defaultDisposition {
 			t.Errorf("Content-Disposition %q", cd)
 		}
-		wantContains(t, "pagina di download", body,
+		wantContains(t, "download page", body,
 			"report.bin", "1.0 MiB (1,048,576 bytes)", `<form id="dl" method="post">`,
 			`<meta name="robots" content="noindex, nofollow">`,
 			`curl -f -OJ &#34;`+link+`&#34;`, `wget --content-disposition &#34;`+link+`&#34;`)
 		if strings.Contains(body, "<title>report.bin") {
-			t.Error("il nome del file è nel titolo: finirebbe nelle anteprime")
+			t.Error("the file name is in the title: it would end up in the previews")
 		}
 	}
 
-	// Un'anteprima di chat con Accept */* vede la pagina; HEAD non è servito.
+	// A chat preview with Accept */* sees the page; HEAD is not served.
 	req, _ := http.NewRequest(http.MethodGet, link, nil)
 	req.Header.Set("User-Agent", "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)")
 	req.Header.Set("Accept", "*/*")
@@ -95,13 +95,13 @@ func TestLandingDoesNotConsume(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
-		t.Fatalf("anteprima: stato %d, Content-Type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+		t.Fatalf("preview: status %d, Content-Type %q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 	if resp, err := http.Head(link); err != nil || resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("HEAD: %v, %v", resp, err)
 	}
 
-	// Il pulsante: POST dal browser, risposta attachment con il file intero.
+	// The button: POST from the browser, attachment response with the whole file.
 	req, _ = http.NewRequest(http.MethodPost, link, strings.NewReader(""))
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -112,24 +112,24 @@ func TestLandingDoesNotConsume(t *testing.T) {
 	got, _ := io.ReadAll(dl.Body)
 	dl.Body.Close()
 	if dl.StatusCode != http.StatusOK || !bytes.Equal(got, data) {
-		t.Fatalf("download dal pulsante: stato %d, %d byte, attesi %d", dl.StatusCode, len(got), len(data))
+		t.Fatalf("download from the button: status %d, %d bytes, expected %d", dl.StatusCode, len(got), len(data))
 	}
 	if cd := dl.Header.Get("Content-Disposition"); cd != `attachment; filename=report.bin` {
-		t.Errorf("Content-Disposition del download %q", cd)
+		t.Errorf("Content-Disposition of the download %q", cd)
 	}
 	u.finish(t)
 
 	for _, m := range []string{http.MethodGet, http.MethodPost} {
 		resp, body := browserDo(t, m, link)
 		if resp.StatusCode != http.StatusGone {
-			t.Errorf("%s dopo il download: stato %d, atteso 410", m, resp.StatusCode)
+			t.Errorf("%s after the download: status %d, expected 410", m, resp.StatusCode)
 		}
-		wantContains(t, m+" dopo il download", body, "Link already used or expired", "Ask the sender to send the file again.")
+		wantContains(t, m+" after the download", body, "Link already used or expired", "Ask the sender to send the file again.")
 	}
 }
 
-// TestLandingClaimed: con il download in corso la pagina dice che è già partito (410), senza
-// interromperlo.
+// TestLandingClaimed: with the download in progress the page says it has already started (410),
+// without interrupting it.
 func TestLandingClaimed(t *testing.T) {
 	srv, _ := newTestServer(t)
 	ctx := context.Background()
@@ -140,14 +140,14 @@ func TestLandingClaimed(t *testing.T) {
 	dl := get(t, ctx, link)
 	resp, body := browserDo(t, http.MethodGet, link)
 	if resp.StatusCode != http.StatusGone {
-		t.Errorf("pagina con download in corso: stato %d, atteso 410", resp.StatusCode)
+		t.Errorf("landing with download in progress: status %d, expected 410", resp.StatusCode)
 	}
-	wantContains(t, "pagina con download in corso", body, "Download already started")
+	wantContains(t, "landing with download in progress", body, "Download already started")
 	resp, body = browserDo(t, http.MethodPost, link)
 	if resp.StatusCode != http.StatusGone {
-		t.Errorf("secondo POST: stato %d, atteso 410", resp.StatusCode)
+		t.Errorf("second POST: status %d, expected 410", resp.StatusCode)
 	}
-	wantContains(t, "secondo POST", body, "Download already started")
+	wantContains(t, "second POST", body, "Download already started")
 
 	go func() {
 		pw.Write([]byte("abc"))
@@ -156,32 +156,32 @@ func TestLandingClaimed(t *testing.T) {
 	got, _ := io.ReadAll(dl.Body)
 	dl.Body.Close()
 	if string(got) != "abc" {
-		t.Fatalf("download in corso: %q", got)
+		t.Fatalf("download in progress: %q", got)
 	}
 	u.finish(t)
 }
 
-// TestLandingGoneReasons: un link chiuso senza ricevente dice perché. Il mittente che annulla o
-// cade non deve sembrare un link "già usato" (il ricevente non ha scaricato nulla), e la scadenza
-// ha il suo messaggio; per curl il corpo resta "gone".
+// TestLandingGoneReasons: a link closed without a receiver says why. A sender that cancels or drops
+// must not look like a "link already used" (the receiver downloaded nothing), and expiry has its
+// own message; for curl the body stays "gone".
 func TestLandingGoneReasons(t *testing.T) {
 	check := func(t *testing.T, link, heading string) {
 		t.Helper()
 		for _, m := range []string{http.MethodGet, http.MethodPost} {
 			resp, body := browserDo(t, m, link)
 			if resp.StatusCode != http.StatusGone {
-				t.Errorf("%s: stato %d, atteso 410", m, resp.StatusCode)
+				t.Errorf("%s: status %d, expected 410", m, resp.StatusCode)
 			}
 			wantContains(t, m, body, heading)
 			if strings.Contains(body, "Link already used") {
-				t.Errorf("%s: la pagina dice link usato: %q", m, body)
+				t.Errorf("%s: the page says the link was used: %q", m, body)
 			}
 		}
 		resp := get(t, context.Background(), link)
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusGone || strings.TrimSpace(string(b)) != "gone" {
-			t.Errorf("curl: stato %d, corpo %q", resp.StatusCode, b)
+			t.Errorf("curl: status %d, body %q", resp.StatusCode, b)
 		}
 	}
 	t.Run("sender cancelled", func(t *testing.T) {
@@ -189,13 +189,13 @@ func TestLandingGoneReasons(t *testing.T) {
 		client := &http.Client{}
 		res := reserveUpload(t, client, srv.URL, "a.bin", 10)
 		if st := cancelUpload(t, client, srv.URL, res.Slug, res.Token); st != http.StatusNoContent {
-			t.Fatalf("DELETE: stato %d", st)
+			t.Fatalf("DELETE: status %d", st)
 		}
 		waitLen(t, reg, 0)
 		check(t, srv.URL+"/"+res.Slug, "Sender stopped")
 	})
 	t.Run("sender gone while waiting", func(t *testing.T) {
-		// newWebServer: il server vede la connessione del mittente caduto solo con ConnContext.
+		// newWebServer: the server sees the sender's dropped connection only with ConnContext.
 		srv, reg := newWebServer(t, time.Hour)
 		ctx, cancel := context.WithCancel(context.Background())
 		pr, pw := io.Pipe()
@@ -219,9 +219,9 @@ func TestLandingGoneReasons(t *testing.T) {
 	})
 }
 
-// TestLandingDetails: nome con markup (escape), lunghezza ignota (pipe), base pubblica nei comandi.
+// TestLandingDetails: name with markup (escaped), unknown length (pipe), public base in the commands.
 func TestLandingDetails(t *testing.T) {
-	// Attesa breve: il mittente non invia mai il body e Close attende la scadenza della sessione.
+	// Short wait: the sender never sends the body and Close waits for the session to expire.
 	reg := relay.NewRegistry(10, time.Second)
 	srv := httptest.NewServer(New(reg, relay.NewCopier(64<<10), Options{PublicURL: "https://pub.example"}))
 	t.Cleanup(srv.Close)
@@ -233,22 +233,22 @@ func TestLandingDetails(t *testing.T) {
 
 	resp, body := browserDo(t, http.MethodGet, srv.URL+"/"+u.slug)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("stato %d", resp.StatusCode)
+		t.Fatalf("status %d", resp.StatusCode)
 	}
 	if strings.Contains(body, "<img src=x") {
-		t.Error("nome del file non escapato nella pagina")
+		t.Error("file name not escaped in the page")
 	}
-	wantContains(t, "pagina", body, "&lt;img src=x onerror=alert(1)&gt;.txt", "unknown (streamed by the sender)",
+	wantContains(t, "page", body, "&lt;img src=x onerror=alert(1)&gt;.txt", "unknown (streamed by the sender)",
 		`curl -f -OJ &#34;https://pub.example/`+u.slug+`&#34;`)
 }
 
-// TestBrowserErrorPages: i rifiuti sono pagine HTML per i browser e testo per gli altri client.
+// TestBrowserErrorPages: rejections are HTML pages for browsers and text for other clients.
 func TestBrowserErrorPages(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for _, p := range []string{"/AbC123xY9z", "/x.bin"} {
 		resp, body := browserDo(t, http.MethodGet, srv.URL+p)
 		if resp.StatusCode != http.StatusNotFound || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
-			t.Errorf("GET %s: stato %d, Content-Type %q", p, resp.StatusCode, resp.Header.Get("Content-Type"))
+			t.Errorf("GET %s: status %d, Content-Type %q", p, resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
 		wantContains(t, "GET "+p, body, "Link not found", `<a href="/">`)
 	}
@@ -256,12 +256,12 @@ func TestBrowserErrorPages(t *testing.T) {
 	b, _ := io.ReadAll(plain.Body)
 	plain.Body.Close()
 	if plain.StatusCode != http.StatusNotFound || string(b) != "404 page not found\n" {
-		t.Errorf("GET testo: stato %d, %q", plain.StatusCode, b)
+		t.Errorf("GET text: status %d, %q", plain.StatusCode, b)
 	}
 }
 
-// TestMethodsAllow: il 405 elenca i metodi ammessi (POST / prenota un upload dal browser,
-// POST /<slug> scarica).
+// TestMethodsAllow: the 405 lists the allowed methods (POST / reserves an upload from the browser,
+// POST /<slug> downloads).
 func TestMethodsAllow(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for _, c := range []struct{ method, path, allow string }{
@@ -277,12 +277,12 @@ func TestMethodsAllow(t *testing.T) {
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != c.allow {
-			t.Errorf("%s %s: stato %d, Allow %q; attesi 405, %q", c.method, c.path, resp.StatusCode, resp.Header.Get("Allow"), c.allow)
+			t.Errorf("%s %s: status %d, Allow %q; expected 405, %q", c.method, c.path, resp.StatusCode, resp.Header.Get("Allow"), c.allow)
 		}
 	}
 }
 
-// TestHomeHTTPS: con una base https la home dichiara la cifratura in transito, mai end-to-end.
+// TestHomeHTTPS: with an https base the home declares transit encryption, never end-to-end.
 func TestHomeHTTPS(t *testing.T) {
 	reg := relay.NewRegistry(10, time.Hour)
 	h := New(reg, relay.NewCopier(64<<10), Options{PublicURL: "https://pub.example/"})
@@ -293,17 +293,17 @@ func TestHomeHTTPS(t *testing.T) {
 	body := rec.Body.String()
 	wantContains(t, "home https", body, "Encrypted in transit", "Not end-to-end encrypted", "curl https://pub.example -T FILE")
 	if strings.Contains(body, "Not encrypted.") {
-		t.Error("base https: la pagina dice che il server non è cifrato")
+		t.Error("https base: the page says the server is not encrypted")
 	}
 }
 
-// TestUsageText: curl su "/" riceve il comando di invio con l'URL prima di -T.
+// TestUsageText: curl on "/" receives the send command with the URL before -T.
 func TestUsageText(t *testing.T) {
 	srv, _ := newTestServer(t)
 	resp := get(t, context.Background(), srv.URL+"/")
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	wantContains(t, "istruzioni", string(b), "Send:    curl "+srv.URL+" -T FILE\n", "open the sender's link in a browser")
+	wantContains(t, "instructions", string(b), "Send:    curl "+srv.URL+" -T FILE\n", "open the sender's link in a browser")
 }
 
 func TestPreviewAgents(t *testing.T) {
@@ -330,7 +330,7 @@ func TestPreviewAgents(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/AbC123xY9z", nil)
 		r.Header.Set("User-Agent", ua)
 		if got := isPreviewAgent(r); got != want {
-			t.Errorf("isPreviewAgent(%q) = %v, atteso %v", ua, got, want)
+			t.Errorf("isPreviewAgent(%q) = %v, expected %v", ua, got, want)
 		}
 	}
 }
@@ -345,7 +345,7 @@ func TestHumanSize(t *testing.T) {
 		1152499340: "1.1 GiB (1,152,499,340 bytes)",
 	} {
 		if got := humanSize(n); got != want {
-			t.Errorf("humanSize(%d) = %q, atteso %q", n, got, want)
+			t.Errorf("humanSize(%d) = %q, expected %q", n, got, want)
 		}
 	}
 }

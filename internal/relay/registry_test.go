@@ -37,11 +37,11 @@ func TestRegistryClaimOnce(t *testing.T) {
 		case errors.Is(e, ErrClaimed):
 			claimed++
 		default:
-			t.Fatalf("errore inatteso: %v", e)
+			t.Fatalf("unexpected error: %v", e)
 		}
 	}
 	if nils != 1 || claimed != 1 {
-		t.Fatalf("attesi 1 claim riuscito e 1 ErrClaimed, ottenuti %d e %d", nils, claimed)
+		t.Fatalf("expected 1 successful claim and 1 ErrClaimed, got %d and %d", nils, claimed)
 	}
 }
 
@@ -54,15 +54,15 @@ func TestRegistryFinishOnce(t *testing.T) {
 	r.Finish(s)
 	r.Finish(s)
 	if r.Len() != 0 {
-		t.Fatalf("Len=%d, atteso 0", r.Len())
+		t.Fatalf("Len=%d, expected 0", r.Len())
 	}
 	select {
 	case <-s.Finished():
 	default:
-		t.Fatal("Finished non chiuso")
+		t.Fatal("Finished not closed")
 	}
 	if _, err := r.Claim(s.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
-		t.Fatalf("Claim dopo Finish: %v, atteso ErrGone", err)
+		t.Fatalf("Claim after Finish: %v, expected ErrGone", err)
 	}
 }
 
@@ -75,13 +75,13 @@ func TestRegistryWaitTimeout(t *testing.T) {
 	select {
 	case <-s.Expired():
 	case <-time.After(2 * time.Second):
-		t.Fatal("Expired non chiuso entro 2 s")
+		t.Fatal("Expired not closed within 2 s")
 	}
 	if r.Len() != 0 {
-		t.Fatalf("Len=%d dopo scadenza, atteso 0", r.Len())
+		t.Fatalf("Len=%d after expiry, expected 0", r.Len())
 	}
 	if _, err := r.Claim(s.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
-		t.Fatalf("Claim dopo scadenza: %v, atteso ErrGone", err)
+		t.Fatalf("Claim after expiry: %v, expected ErrGone", err)
 	}
 }
 
@@ -95,11 +95,11 @@ func TestRegistryCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := r.Create("c", -1); !errors.Is(err, ErrCapacity) {
-		t.Fatalf("terza sessione: %v, atteso ErrCapacity", err)
+		t.Fatalf("third session: %v, expected ErrCapacity", err)
 	}
 	r.Finish(a)
 	if _, err := r.Create("c", -1); err != nil {
-		t.Fatalf("dopo Finish: %v", err)
+		t.Fatalf("after Finish: %v", err)
 	}
 }
 
@@ -115,10 +115,10 @@ func TestRegistrySlugCollision(t *testing.T) {
 	}
 	calls = 0
 	if _, err := r.Create("b", -1); !errors.Is(err, ErrSlugCollision) {
-		t.Fatalf("secondo Create: %v, atteso ErrSlugCollision", err)
+		t.Fatalf("second Create: %v, expected ErrSlugCollision", err)
 	}
 	if calls != slugAttempts {
-		t.Fatalf("tentativi generazione %d, attesi %d", calls, slugAttempts)
+		t.Fatalf("generation attempts %d, expected %d", calls, slugAttempts)
 	}
 }
 
@@ -132,12 +132,12 @@ func TestRegistryAbortKeepsFirst(t *testing.T) {
 	s.Abort(first)
 	s.Abort(errors.New("second"))
 	if got := s.Err(); got != first {
-		t.Fatalf("Err=%v, atteso il primo errore", got)
+		t.Fatalf("Err=%v, expected the first error", got)
 	}
 }
 
-// TestRegistryTombstoneCap: oltre maxGone la tombstone più vecchia viene scartata (404 invece di 410)
-// e la memoria resta limitata.
+// TestRegistryTombstoneCap: beyond maxGone the oldest tombstone is discarded (404 instead of 410)
+// and memory stays bounded.
 func TestRegistryTombstoneCap(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	r.maxGone = 3
@@ -151,7 +151,7 @@ func TestRegistryTombstoneCap(t *testing.T) {
 		r.Finish(s)
 	}
 	if len(r.gone) != 3 || len(r.goneQ) != 3 {
-		t.Fatalf("tombstone %d/%d, attese 3", len(r.gone), len(r.goneQ))
+		t.Fatalf("tombstones %d/%d, expected 3", len(r.gone), len(r.goneQ))
 	}
 	for i, id := range slugs {
 		_, err := r.Claim(id, fakeRcv{})
@@ -160,12 +160,12 @@ func TestRegistryTombstoneCap(t *testing.T) {
 			want = ErrNotFound
 		}
 		if !errors.Is(err, want) {
-			t.Errorf("slug %d: %v, atteso %v", i, err, want)
+			t.Errorf("slug %d: %v, expected %v", i, err, want)
 		}
 	}
 }
 
-// TestRegistryTombstoneExpiry: dopo tombstoneTTL lo slug torna 404 e le strutture si svuotano.
+// TestRegistryTombstoneExpiry: after tombstoneTTL the slug returns to 404 and the structures empty.
 func TestRegistryTombstoneExpiry(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, err := r.Create("a", -1)
@@ -174,21 +174,21 @@ func TestRegistryTombstoneExpiry(t *testing.T) {
 	}
 	r.Finish(s)
 	if _, err := r.Claim(s.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
-		t.Fatalf("prima della scadenza: %v, atteso ErrGone", err)
+		t.Fatalf("before expiry: %v, expected ErrGone", err)
 	}
 	r.mu.Lock()
 	r.goneQ[0].at = time.Now().Add(-tombstoneTTL - time.Second)
 	r.mu.Unlock()
 	if _, err := r.Claim(s.Slug, fakeRcv{}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("dopo la scadenza: %v, atteso ErrNotFound", err)
+		t.Fatalf("after expiry: %v, expected ErrNotFound", err)
 	}
 	if len(r.gone) != 0 || len(r.goneQ) != 0 {
-		t.Fatalf("tombstone residue: %d/%d", len(r.gone), len(r.goneQ))
+		t.Fatalf("residual tombstones: %d/%d", len(r.gone), len(r.goneQ))
 	}
 }
 
-// TestRegistryConcurrentLifecycle: molte sessioni con Claim, Finish, scadenza e Abort concorrenti.
-// Sotto -race non devono esserci data race e a fine corsa nessuna sessione viva.
+// TestRegistryConcurrentLifecycle: many sessions with concurrent Claim, Finish, expiry and Abort.
+// Under -race there must be no data race, and at the end no session must be alive.
 func TestRegistryConcurrentLifecycle(t *testing.T) {
 	r := NewRegistry(1000, 5*time.Millisecond)
 	var wg sync.WaitGroup
@@ -222,18 +222,18 @@ func TestRegistryConcurrentLifecycle(t *testing.T) {
 			select {
 			case <-s.Finished():
 			default:
-				t.Error("Finished non chiuso")
+				t.Error("Finished not closed")
 			}
 		}(i)
 	}
 	wg.Wait()
 	if r.Len() != 0 {
-		t.Fatalf("sessioni vive %d, attese 0", r.Len())
+		t.Fatalf("live sessions %d, expected 0", r.Len())
 	}
 }
 
-// TestRegistryAbortClosesAborted: Aborted si chiude alla prima Abort; le successive non chiudono
-// di nuovo il canale e non cambiano l'errore.
+// TestRegistryAbortClosesAborted: Aborted closes on the first Abort; subsequent ones do not close
+// the channel again and do not change the error.
 func TestRegistryAbortClosesAborted(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, err := r.Create("a.bin", -1)
@@ -242,7 +242,7 @@ func TestRegistryAbortClosesAborted(t *testing.T) {
 	}
 	select {
 	case <-s.Aborted():
-		t.Fatal("Aborted chiuso prima di Abort")
+		t.Fatal("Aborted closed before Abort")
 	default:
 	}
 	s.Abort(ErrReceiverGone)
@@ -250,14 +250,14 @@ func TestRegistryAbortClosesAborted(t *testing.T) {
 	select {
 	case <-s.Aborted():
 	default:
-		t.Fatal("Aborted non chiuso dopo Abort")
+		t.Fatal("Aborted not closed after Abort")
 	}
 	if !errors.Is(s.Err(), ErrReceiverGone) {
-		t.Fatalf("Err %v, atteso il primo errore", s.Err())
+		t.Fatalf("Err %v, expected the first error", s.Err())
 	}
 }
 
-// TestRegistryPeek: Peek riporta lo stato senza reclamare lo slug.
+// TestRegistryPeek: Peek reports the state without claiming the slug.
 func TestRegistryPeek(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, err := r.Create("a.bin", -1)
@@ -265,27 +265,27 @@ func TestRegistryPeek(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p, err := r.Peek(s.Slug); err != nil || p != s {
-		t.Fatalf("Peek slug in attesa: %v, %v", p, err)
+		t.Fatalf("Peek slug waiting: %v, %v", p, err)
 	}
 	if _, err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("Peek ripetuto: %v, lo slug non deve risultare reclamato", err)
+		t.Fatalf("repeated Peek: %v, the slug must not appear claimed", err)
 	}
 	if _, err := r.Peek("ZZZZZZZZZZ"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Peek sconosciuto: %v", err)
+		t.Fatalf("Peek unknown: %v", err)
 	}
 	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrClaimed) {
-		t.Fatalf("Peek reclamato: %v", err)
+		t.Fatalf("Peek claimed: %v", err)
 	}
 	r.Finish(s)
 	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrGone) {
-		t.Fatalf("Peek concluso: %v", err)
+		t.Fatalf("Peek ended: %v", err)
 	}
 }
 
-// TestRegistryReserve: una sessione prenotata si aggancia una sola volta e solo con il suo token.
+// TestRegistryReserve: a reserved session attaches only once and only with its token.
 func TestRegistryReserve(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, err := r.Reserve("a.bin", 3, time.Hour)
@@ -296,7 +296,7 @@ func TestRegistryReserve(t *testing.T) {
 		t.Fatalf("token %q", s.Token)
 	}
 	if p, err := r.Peek(s.Slug); err != nil || p != s {
-		t.Fatalf("Peek prenotata: %v, %v", p, err)
+		t.Fatalf("Peek reserved: %v, %v", p, err)
 	}
 	for _, tok := range []string{"", "x", strings.Repeat("0", 32)} {
 		if _, err := r.Bind(s.Slug, tok); !errors.Is(err, ErrNotFound) {
@@ -304,25 +304,25 @@ func TestRegistryReserve(t *testing.T) {
 		}
 	}
 	if _, err := r.Bind("ZZZZZZZZZZ", s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Bind slug sconosciuto: %v", err)
+		t.Fatalf("Bind unknown slug: %v", err)
 	}
 	if b, err := r.Bind(s.Slug, s.Token); err != nil || b != s {
 		t.Fatalf("Bind: %v, %v", b, err)
 	}
 	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("secondo Bind: %v", err)
+		t.Fatalf("second Bind: %v", err)
 	}
 	c, err := r.Create("b.bin", -1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.Bind(c.Slug, ""); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Bind di una sessione di Create: %v", err)
+		t.Fatalf("Bind of a Create session: %v", err)
 	}
 }
 
-// TestRegistryReserveUnbound: senza Bind entro il timeout la sessione termina con ErrSenderGone,
-// anche se un ricevente si è già agganciato; lo slug diventa 410.
+// TestRegistryReserveUnbound: without Bind within the timeout the session ends with ErrSenderGone,
+// even if a receiver has already attached; the slug becomes 410.
 func TestRegistryReserveUnbound(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, err := r.Reserve("a.bin", 3, 50*time.Millisecond)
@@ -335,32 +335,32 @@ func TestRegistryReserveUnbound(t *testing.T) {
 	select {
 	case <-s.Finished():
 	case <-time.After(5 * time.Second):
-		t.Fatal("sessione senza mittente non terminata")
+		t.Fatal("session without sender not ended")
 	}
 	if !errors.Is(s.Err(), ErrSenderGone) {
-		t.Fatalf("Err %v, atteso ErrSenderGone", s.Err())
+		t.Fatalf("Err %v, expected ErrSenderGone", s.Err())
 	}
 	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrGone) || r.Len() != 0 {
-		t.Fatalf("Peek %v, sessioni %d", err, r.Len())
+		t.Fatalf("Peek %v, sessions %d", err, r.Len())
 	}
 	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Bind tardivo: %v", err)
+		t.Fatalf("late Bind: %v", err)
 	}
 
-	// Agganciata in tempo: il timeout non la tocca.
+	// Attached in time: the timeout does not touch it.
 	s2, _ := r.Reserve("b.bin", 3, 50*time.Millisecond)
 	if _, err := r.Bind(s2.Slug, s2.Token); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(150 * time.Millisecond)
 	if _, err := r.Peek(s2.Slug); err != nil {
-		t.Fatalf("sessione agganciata: %v", err)
+		t.Fatalf("attached session: %v", err)
 	}
 }
 
-// TestRegistryCancel: prima del Bind Cancel termina la prenotazione come bindTimeout; dopo la
-// interrompe con ErrSenderGone e la lascia al mittente, che chiama Finish. Su una sessione finita
-// non fa nulla.
+// TestRegistryCancel: before Bind, Cancel ends the reservation like bindTimeout; after, it
+// interrupts with ErrSenderGone and leaves it to the sender, which calls Finish. On a finished session
+// it does nothing.
 func TestRegistryCancel(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, _ := r.Reserve("a.bin", 3, time.Hour)
@@ -368,16 +368,16 @@ func TestRegistryCancel(t *testing.T) {
 	select {
 	case <-s.Finished():
 	default:
-		t.Fatal("prenotazione annullata non terminata")
+		t.Fatal("cancelled reservation not ended")
 	}
 	if !errors.Is(s.Err(), ErrSenderGone) || r.Len() != 0 {
-		t.Fatalf("Err %v, sessioni %d", s.Err(), r.Len())
+		t.Fatalf("Err %v, sessions %d", s.Err(), r.Len())
 	}
 	if _, err := r.Claim(s.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
-		t.Fatalf("Claim dopo Cancel: %v", err)
+		t.Fatalf("Claim after Cancel: %v", err)
 	}
 	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Bind dopo Cancel: %v", err)
+		t.Fatalf("Bind after Cancel: %v", err)
 	}
 
 	s2, _ := r.Reserve("b.bin", 3, time.Hour)
@@ -388,11 +388,11 @@ func TestRegistryCancel(t *testing.T) {
 	select {
 	case <-s2.Aborted():
 	default:
-		t.Fatal("sessione agganciata non interrotta")
+		t.Fatal("attached session not interrupted")
 	}
 	select {
 	case <-s2.Finished():
-		t.Fatal("sessione agganciata terminata senza Finish")
+		t.Fatal("attached session ended without Finish")
 	default:
 	}
 	if !errors.Is(s2.Err(), ErrSenderGone) {
@@ -401,12 +401,12 @@ func TestRegistryCancel(t *testing.T) {
 	r.Finish(s2)
 	r.Cancel(s2)
 	if r.Len() != 0 {
-		t.Fatalf("sessioni %d", r.Len())
+		t.Fatalf("sessions %d", r.Len())
 	}
 }
 
-// TestRegistryReserved: la prenotazione si trova solo con il suo token, agganciata o no; un upload
-// da curl (senza token) mai.
+// TestRegistryReserved: the reservation is found only with its token, attached or not; an upload
+// from curl (without a token) never.
 func TestRegistryReserved(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, _ := r.Reserve("a.bin", 3, time.Hour)
@@ -422,32 +422,32 @@ func TestRegistryReserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got, err := r.Reserved(s.Slug, s.Token); err != nil || got != s {
-		t.Fatalf("Reserved agganciata: %v, %v", got, err)
+		t.Fatalf("Reserved attached: %v, %v", got, err)
 	}
 	c, _ := r.Create("b.bin", 3)
 	if _, err := r.Reserved(c.Slug, ""); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Reserved su upload da curl: %v", err)
+		t.Fatalf("Reserved on curl upload: %v", err)
 	}
 	r.Finish(s)
 	if _, err := r.Reserved(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Reserved dopo Finish: %v", err)
+		t.Fatalf("Reserved after Finish: %v", err)
 	}
 }
 
-// TestRegistryExpireReservation: una prenotazione senza body scade come un upload e, senza un
-// mittente che chiami Finish, termina; agganciata la termina il mittente.
+// TestRegistryExpireReservation: a reservation without a body expires like an upload and, without a
+// sender calling Finish, ends; if attached, the sender ends it.
 func TestRegistryExpireReservation(t *testing.T) {
 	r := NewRegistry(10, 50*time.Millisecond)
 	s, _ := r.Reserve("a.bin", 3, time.Hour)
 	select {
 	case <-s.Finished():
 	case <-time.After(5 * time.Second):
-		t.Fatal("prenotazione scaduta non terminata")
+		t.Fatal("expired reservation not ended")
 	}
 	select {
 	case <-s.Expired():
 	default:
-		t.Fatal("Expired non chiuso")
+		t.Fatal("Expired not closed")
 	}
 	s2, _ := r.Reserve("b.bin", 3, time.Hour)
 	if _, err := r.Bind(s2.Slug, s2.Token); err != nil {
@@ -456,18 +456,18 @@ func TestRegistryExpireReservation(t *testing.T) {
 	<-s2.Expired()
 	select {
 	case <-s2.Finished():
-		t.Fatal("sessione agganciata terminata alla scadenza senza Finish")
+		t.Fatal("attached session ended at expiry without Finish")
 	default:
 	}
 }
 
-// TestSessionProgress: avanzamento ed esito per lo stream della prenotazione.
+// TestSessionProgress: progress and outcome for the reservation's stream.
 func TestSessionProgress(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, _ := r.Reserve("a.bin", 3, time.Hour)
 	select {
 	case <-s.Started():
-		t.Fatal("Started chiuso prima di Start")
+		t.Fatal("Started closed before Start")
 	default:
 	}
 	s.Start()
@@ -484,8 +484,8 @@ func TestSessionProgress(t *testing.T) {
 	}
 }
 
-// TestRegistryExpireWaiting: le sessioni in attesa scadono subito (Expired chiuso, slug 410);
-// quelle reclamate restano.
+// TestRegistryExpireWaiting: waiting sessions expire at once (Expired closed, slug 410);
+// claimed ones remain.
 func TestRegistryExpireWaiting(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	waiting, err := r.Create("a.bin", -1)
@@ -504,22 +504,22 @@ func TestRegistryExpireWaiting(t *testing.T) {
 	select {
 	case <-waiting.Expired():
 	default:
-		t.Fatal("sessione in attesa non scaduta")
+		t.Fatal("waiting session not expired")
 	}
 	select {
 	case <-active.Expired():
-		t.Fatal("sessione reclamata scaduta")
+		t.Fatal("claimed session expired")
 	default:
 	}
 	if r.Len() != 1 {
-		t.Fatalf("sessioni vive %d, attesa 1", r.Len())
+		t.Fatalf("live sessions %d, expected 1", r.Len())
 	}
 	if _, err := r.Claim(waiting.Slug, fakeRcv{}); !errors.Is(err, ErrGone) {
-		t.Fatalf("Claim dopo ExpireWaiting: %v, atteso ErrGone", err)
+		t.Fatalf("Claim after ExpireWaiting: %v, expected ErrGone", err)
 	}
 }
 
-// TestRegistryGoneReason: la tombstone ricorda perché lo slug è terminale; ogni GoneError è anche
+// TestRegistryGoneReason: the tombstone remembers why the slug is terminal; every GoneError is also
 // ErrGone.
 func TestRegistryGoneReason(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
@@ -528,10 +528,10 @@ func TestRegistryGoneReason(t *testing.T) {
 		_, err := r.Peek(id)
 		var g *GoneError
 		if !errors.Is(err, ErrGone) || !errors.As(err, &g) {
-			t.Fatalf("Peek: %v, atteso GoneError", err)
+			t.Fatalf("Peek: %v, expected GoneError", err)
 		}
 		if _, err := r.Claim(id, fakeRcv{}); !errors.Is(err, ErrGone) {
-			t.Fatalf("Claim: %v, atteso ErrGone", err)
+			t.Fatalf("Claim: %v, expected ErrGone", err)
 		}
 		return g.Reason
 	}
@@ -540,7 +540,7 @@ func TestRegistryGoneReason(t *testing.T) {
 	sent.Abort(ErrSenderGone)
 	r.Finish(sent)
 	if got := reason(sent.Slug); got != GoneSenderGone {
-		t.Errorf("mittente caduto senza ricevente: %q", got)
+		t.Errorf("sender dropped without receiver: %q", got)
 	}
 
 	used, _ := r.Create("b", -1)
@@ -549,7 +549,7 @@ func TestRegistryGoneReason(t *testing.T) {
 	}
 	r.Finish(used)
 	if got := reason(used.Slug); got != GoneUsed {
-		t.Errorf("reclamato e concluso: %q", got)
+		t.Errorf("claimed and concluded: %q", got)
 	}
 
 	cut, _ := r.Create("c", -1)
@@ -559,23 +559,23 @@ func TestRegistryGoneReason(t *testing.T) {
 	cut.Abort(ErrSenderGone)
 	r.Finish(cut)
 	if got := reason(cut.Slug); got != GoneUsed {
-		t.Errorf("reclamato, poi mittente caduto: %q", got)
+		t.Errorf("claimed, then sender dropped: %q", got)
 	}
 
 	late, _ := r.Create("d", -1)
 	r.ExpireWaiting()
 	if got := reason(late.Slug); got != GoneExpired {
-		t.Errorf("scaduto: %q", got)
+		t.Errorf("expired: %q", got)
 	}
 
 	res, _ := r.Reserve("e", 1, time.Hour)
 	r.Cancel(res)
 	if got := reason(res.Slug); got != GoneSenderGone {
-		t.Errorf("prenotazione annullata prima del body: %q", got)
+		t.Errorf("reservation cancelled before body: %q", got)
 	}
 }
 
-// reservedBound prenota una sessione e ne aggancia il body.
+// reservedBound reserves a session and attaches its body.
 func reservedBound(t *testing.T, r *Registry) (*Session, <-chan struct{}) {
 	t.Helper()
 	s, err := r.Reserve("a.bin", 10, time.Hour)
@@ -589,101 +589,101 @@ func reservedBound(t *testing.T, r *Registry) (*Session, <-chan struct{}) {
 	return s, binding
 }
 
-// TestRegistryDetachDisabled: senza tolleranza Detach non fa nulla e il chiamante termina la
-// sessione; un secondo aggancio con il vecchio ancora presente è rifiutato, come sempre.
+// TestRegistryDetachDisabled: without grace Detach does nothing and the caller ends the
+// session; a second attachment with the old one still present is rejected, as always.
 func TestRegistryDetachDisabled(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	s, binding := reservedBound(t, r)
 	if r.Detach(s, binding) {
-		t.Fatal("Detach senza tolleranza deve riportare false")
+		t.Fatal("Detach without grace must report false")
 	}
 	if _, err := r.Bind(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("secondo Bind: %v, atteso ErrNotFound", err)
+		t.Fatalf("second Bind: %v, expected ErrNotFound", err)
 	}
 }
 
-// TestRegistryDetachRebind: il mittente caduto resta in tolleranza, un ricevente può reclamare
-// il link e il mittente che torna con il token riaggancia la sessione.
+// TestRegistryDetachRebind: the dropped sender stays in grace, a receiver can claim the
+// link and the sender that returns with the token reattaches the session.
 func TestRegistryDetachRebind(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	r.SetSenderGrace(time.Hour)
 	s, binding := reservedBound(t, r)
 	if !r.Detach(s, binding) {
-		t.Fatal("Detach con tolleranza deve riportare true")
+		t.Fatal("Detach with grace must report true")
 	}
 	select {
 	case <-binding:
 	default:
-		t.Fatal("il canale dell'aggancio non è chiuso dopo Detach")
+		t.Fatal("attachment channel not closed after Detach")
 	}
 	if !s.Away() || r.Len() != 1 {
-		t.Fatalf("Away=%v, sessioni %d: attesa sessione viva senza mittente", s.Away(), r.Len())
+		t.Fatalf("Away=%v, sessions %d: expected a live session without a sender", s.Away(), r.Len())
 	}
 	if !r.Detach(s, binding) {
-		t.Fatal("secondo Detach: atteso true (già in tolleranza)")
+		t.Fatal("second Detach: expected true (already in grace)")
 	}
 	if _, err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("Peek in tolleranza: %v", err)
+		t.Fatalf("Peek in grace: %v", err)
 	}
-	// Il ricevente reclama mentre il mittente è assente: attende nel canale.
+	// The receiver claims while the sender is absent: it waits in the channel.
 	if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
-		t.Fatalf("Claim in tolleranza: %v", err)
+		t.Fatalf("Claim in grace: %v", err)
 	}
 	if _, _, err := r.BindDetachable(s.Slug, strings.Repeat("0", 32)); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Bind con token errato: %v", err)
+		t.Fatalf("Bind with wrong token: %v", err)
 	}
 	s2, binding2, err := r.BindDetachable(s.Slug, s.Token)
 	if err != nil || s2 != s {
-		t.Fatalf("riaggancio: %v", err)
+		t.Fatalf("reattach: %v", err)
 	}
 	if s.Away() {
-		t.Fatal("Away dopo il riaggancio")
+		t.Fatal("Away after reattach")
 	}
 	select {
 	case rcv := <-s.Attached():
 		if rcv == nil {
-			t.Fatal("ricevente nullo")
+			t.Fatal("null receiver")
 		}
 	default:
-		t.Fatal("il ricevente reclamato in tolleranza non è in coda per il nuovo aggancio")
+		t.Fatal("the receiver claimed in grace is not queued for the new attachment")
 	}
-	// Un Detach del vecchio aggancio non tocca il nuovo.
+	// A Detach of the old attachment does not touch the new one.
 	if !r.Detach(s, binding) || s.Away() {
-		t.Fatal("Detach di un aggancio sostituito ha tolto il mittente nuovo")
+		t.Fatal("Detach of a replaced attachment removed the new sender")
 	}
 	select {
 	case <-binding2:
-		t.Fatal("il nuovo aggancio è stato chiuso dal Detach del vecchio")
+		t.Fatal("the new attachment was closed by the old one's Detach")
 	default:
 	}
 }
 
-// TestRegistryBindTakeover: il mittente che torna prima che il server veda cadere il vecchio
-// aggancio lo sostituisce; a relay iniziato no.
+// TestRegistryBindTakeover: the sender that returns before the server sees the old
+// attachment drop replaces it; not once the relay has started.
 func TestRegistryBindTakeover(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	r.SetSenderGrace(time.Hour)
 	s, old := reservedBound(t, r)
 	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
 	if err != nil {
-		t.Fatalf("Bind sostitutivo: %v", err)
+		t.Fatalf("replacing Bind: %v", err)
 	}
 	select {
 	case <-old:
 	default:
-		t.Fatal("il vecchio aggancio non è stato chiuso")
+		t.Fatal("the old attachment was not closed")
 	}
 	s.Start()
 	if _, _, err := r.BindDetachable(s.Slug, s.Token); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Bind a relay iniziato: %v, atteso ErrNotFound", err)
+		t.Fatalf("Bind after relay started: %v, expected ErrNotFound", err)
 	}
 	if r.Detach(s, fresh) {
-		t.Fatal("Detach a relay iniziato deve riportare false")
+		t.Fatal("Detach after relay started must report false")
 	}
 }
 
-// TestRegistryGraceExpires: scaduta la tolleranza il link si chiude come mittente caduto e la
-// funzione registrata viene chiamata; un ricevente in attesa vede la sessione finita.
+// TestRegistryGraceExpires: once grace expires the link closes as for a dropped sender and the
+// registered function is called; a waiting receiver sees the session ended.
 func TestRegistryGraceExpires(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	r.SetSenderGrace(100 * time.Millisecond)
@@ -694,27 +694,27 @@ func TestRegistryGraceExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !r.Detach(s, binding) {
-		t.Fatal("Detach: atteso true")
+		t.Fatal("Detach: expected true")
 	}
 	select {
 	case <-expired:
 	case <-time.After(3 * time.Second):
-		t.Fatal("tolleranza non scaduta entro 3 s")
+		t.Fatal("grace did not expire within 3 s")
 	}
 	select {
 	case <-s.Finished():
 	default:
-		t.Fatal("Finished non chiuso alla scadenza della tolleranza")
+		t.Fatal("Finished not closed at grace expiry")
 	}
 	if !errors.Is(s.Err(), ErrSenderGone) || r.Len() != 0 {
-		t.Fatalf("Err %v, sessioni %d", s.Err(), r.Len())
+		t.Fatalf("Err %v, sessions %d", s.Err(), r.Len())
 	}
 	if _, err := r.Peek(s.Slug); !errors.Is(err, ErrGone) {
-		t.Fatalf("Peek dopo la scadenza: %v", err)
+		t.Fatalf("Peek after expiry: %v", err)
 	}
 }
 
-// TestRegistryGraceRebindStopsTimer: il riaggancio ferma la scadenza della tolleranza.
+// TestRegistryGraceRebindStopsTimer: rebinding stops the grace expiry timer.
 func TestRegistryGraceRebindStopsTimer(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	r.SetSenderGrace(150 * time.Millisecond)
@@ -725,7 +725,7 @@ func TestRegistryGraceRebindStopsTimer(t *testing.T) {
 	}
 	time.Sleep(400 * time.Millisecond)
 	if r.Len() != 1 || s.Err() != nil {
-		t.Fatalf("sessioni %d, Err %v: il riaggancio non ha fermato la scadenza", r.Len(), s.Err())
+		t.Fatalf("sessions %d, Err %v: rebinding did not stop the expiry", r.Len(), s.Err())
 	}
 }
 
@@ -742,17 +742,17 @@ func TestRegistryStaleGraceTimerDoesNotExpireNewDetach(t *testing.T) {
 	r.mu.Unlock()
 	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
 	if err != nil || !r.Detach(s, fresh) {
-		t.Fatalf("seconda disconnessione: %v", err)
+		t.Fatalf("second disconnect: %v", err)
 	}
-	// Il callback del vecchio timer era già in coda quando il mittente si è riagganciato.
+	// The old timer's callback was already queued when the sender rebound.
 	stale.Reset(0)
 	select {
 	case <-expired:
-		t.Fatal("il vecchio timer ha fatto scadere la nuova tolleranza")
+		t.Fatal("the old timer expired the new grace period")
 	case <-time.After(100 * time.Millisecond):
 	}
 	if _, err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("nuova tolleranza interrotta dal timer precedente: %v", err)
+		t.Fatalf("new grace period interrupted by the previous timer: %v", err)
 	}
 }
 
@@ -766,39 +766,39 @@ func TestRegistryForegroundLifecycle(t *testing.T) {
 	}
 	r.StreamOpen(s)
 	if r.StreamClosed(s) || s.Away() {
-		t.Fatal("la sola chiusura del controllo ha staccato il body")
+		t.Fatal("closing the control alone detached the body")
 	}
 	if err := r.Foreground(s.Slug, "wrong", false); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("presenza con token errato: %v", err)
+		t.Fatalf("presence with wrong token: %v", err)
 	}
 	if err := r.Foreground(s.Slug, s.Token, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); !errors.Is(err, ErrSenderAway) {
-		t.Fatalf("download dal browser con mittente assente: %v", err)
+		t.Fatalf("browser download with sender absent: %v", err)
 	}
 	if _, err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("il download in attesa ha consumato il link: %v", err)
+		t.Fatalf("pending download consumed the link: %v", err)
 	}
 	if _, started, err := r.Resume(s.Slug, s.Token, true); err != nil || started {
-		t.Fatalf("ripresa prima del relay: started=%v err=%v", started, err)
+		t.Fatalf("resume before relay: started=%v err=%v", started, err)
 	}
 	if r.BeginRelay(s, old) {
-		t.Fatal("il vecchio PUT ha iniziato il relay dopo la ripresa")
+		t.Fatal("the old PUT started the relay after resume")
 	}
 	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); err != nil || !r.BeginRelay(s, fresh) {
-		t.Fatalf("inizio dal nuovo PUT: %v", err)
+		t.Fatalf("start from the new PUT: %v", err)
 	}
 	if _, started, err := r.Resume(s.Slug, s.Token, true); err != nil || !started {
-		t.Fatalf("ripresa durante il relay: started=%v err=%v", started, err)
+		t.Fatalf("resume during relay: started=%v err=%v", started, err)
 	}
 	select {
 	case <-fresh:
-		t.Fatal("il recupero del controllo ha chiuso il body in trasferimento")
+		t.Fatal("control recovery closed the body being transferred")
 	default:
 	}
 }
@@ -811,17 +811,17 @@ func TestRegistryForegroundHeartbeatExpires(t *testing.T) {
 	if err := r.Foreground(s.Slug, s.Token, true); err != nil {
 		t.Fatal(err)
 	}
-	// Simula la scadenza della presenza senza attendere il timeout di produzione.
+	// Simulates presence expiry without waiting for the production timeout.
 	r.mu.Lock()
 	s.presenceTimer.Reset(20 * time.Millisecond)
 	r.mu.Unlock()
 	for deadline := time.Now().Add(time.Second); !s.Away(); time.Sleep(time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("presenza scaduta senza mettere il mittente in tolleranza")
+			t.Fatal("presence expired without putting the sender in grace")
 		}
 	}
 	if _, err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("scadenza della presenza ha chiuso il link invece della tolleranza: %v", err)
+		t.Fatalf("presence expiry closed the link instead of entering grace: %v", err)
 	}
 }
 
@@ -831,24 +831,24 @@ func TestRegistryPeerReadinessLifecycle(t *testing.T) {
 	s, binding := reservedBound(t, r)
 	t.Cleanup(func() { r.Cancel(s); r.Finish(s) })
 	if _, err := r.Peek(s.Slug); err != nil || s.PeerReady() {
-		t.Fatalf("la sola anteprima non deve confermare un ricevente: %v", err)
+		t.Fatalf("preview alone must not confirm a receiver: %v", err)
 	}
 	observe := func(want bool) {
 		t.Helper()
 		peer, err := r.ObserveReceiver(s.Slug)
 		if err != nil || peer.Ready != want || s.PeerReady() != want {
-			t.Fatalf("conferma ricevente: %+v, err=%v, atteso ready=%v", peer, err, want)
+			t.Fatalf("receiver confirmation: %+v, err=%v, expected ready=%v", peer, err, want)
 		}
 	}
 	observe(true)
 	if _, err := r.Peek(s.Slug); err != nil {
-		t.Fatalf("la conferma ha consumato il link: %v", err)
+		t.Fatalf("confirmation consumed the link: %v", err)
 	}
 	r.mu.Lock()
 	s.receiverSeen = time.Now().Add(-ReceiverPresenceTimeout)
 	r.mu.Unlock()
 	if s.PeerReady() {
-		t.Fatal("ricevente non più confermato ancora READY")
+		t.Fatal("receiver no longer confirmed but still READY")
 	}
 	if err := r.Foreground(s.Slug, s.Token, false); err != nil {
 		t.Fatal(err)
@@ -869,26 +869,26 @@ func TestRegistryPeerReadinessLifecycle(t *testing.T) {
 	}
 	observe(false)
 	if !r.BeginRelay(s, binding) {
-		t.Fatal("relay non iniziato")
+		t.Fatal("relay not started")
 	}
 	r.mu.Lock()
 	s.receiverSeen = time.Now().Add(-2 * ReceiverPresenceTimeout)
 	r.mu.Unlock()
 	if !s.PeerReady() {
-		t.Fatal("il collegamento dati attivo non conferma il ricevente")
+		t.Fatal("the active data connection does not confirm the receiver")
 	}
 	if err := r.Foreground(s.Slug, s.Token, false); err != nil || s.PeerReady() {
-		t.Fatalf("mittente in background durante il relay ancora READY: %v", err)
+		t.Fatalf("sender in background during relay still READY: %v", err)
 	}
 	if err := r.Foreground(s.Slug, s.Token, true); err != nil || !s.PeerReady() {
-		t.Fatalf("ritorno durante il relay non confermato: %v", err)
+		t.Fatalf("return during relay not confirmed: %v", err)
 	}
 	r.Cancel(s)
 	if s.PeerReady() {
-		t.Fatal("sessione annullata ancora READY")
+		t.Fatal("cancelled session still READY")
 	}
 	r.Finish(s)
 	if _, err := r.ObserveReceiver(s.Slug); !errors.Is(err, ErrGone) || s.PeerReady() {
-		t.Fatalf("sessione finita ancora disponibile: %v", err)
+		t.Fatalf("finished session still available: %v", err)
 	}
 }

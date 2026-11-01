@@ -15,7 +15,7 @@ import (
 	"bashtransfer/internal/relay"
 )
 
-// newGraceServer è newWebServer con la tolleranza BASHT_SENDER_GRACE di grace.
+// newGraceServer is newWebServer with the BASHT_SENDER_GRACE tolerance set to grace.
 func newGraceServer(t *testing.T, grace time.Duration) (srvURL string, reg *relay.Registry) {
 	t.Helper()
 	srv, reg := newWebServer(t, time.Hour)
@@ -23,7 +23,7 @@ func newGraceServer(t *testing.T, grace time.Duration) (srvURL string, reg *rela
 	return srv.URL, reg
 }
 
-// resumeStream riapre lo stream di una prenotazione come la pagina dopo una caduta.
+// resumeStream reopens the stream of a reservation, as the page does after a drop.
 func resumeStream(t *testing.T, client *http.Client, base string, res *webStream) *webStream {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, base+"/", strings.NewReader(`{"resume":"`+res.Slug+`"}`))
@@ -32,8 +32,8 @@ func resumeStream(t *testing.T, client *http.Client, base string, res *webStream
 	return openStream(t, client, req)
 }
 
-// putUntilCancelled invia un PUT che resta in attesa del ricevente e restituisce la funzione che ne
-// chiude la connessione, come un telefono che perde la rete.
+// putUntilCancelled sends a PUT that keeps waiting for the receiver and returns the function that
+// closes its connection, like a phone losing the network.
 func putUntilCancelled(t *testing.T, base string, res *webStream, size int64) (drop func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -52,11 +52,11 @@ func putUntilCancelled(t *testing.T, base string, res *webStream, size int64) (d
 	return func() {
 		cancel()
 		pw.Close()
-		within(t, 5*time.Second, "fine del PUT caduto", func() bool { <-done; return true })
+		within(t, 5*time.Second, "end of dropped PUT", func() bool { <-done; return true })
 	}
 }
 
-// waitAway attende che la sessione sia viva e senza mittente agganciato (in tolleranza).
+// waitAway waits until the session is alive and has no sender attached (within the tolerance).
 func waitAway(t *testing.T, reg *relay.Registry, res *webStream) *relay.Session {
 	t.Helper()
 	var s *relay.Session
@@ -66,25 +66,25 @@ func waitAway(t *testing.T, reg *relay.Registry, res *webStream) *relay.Session 
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("la sessione non è andata in tolleranza entro 5 s")
+			t.Fatal("the session did not enter the tolerance within 5 s")
 		}
 	}
 	return s
 }
 
-// TestSenderGraceReservation: la prenotazione dichiara la tolleranza in secondi; senza, il campo
-// manca; la ripresa dello stream è rifiutata se la tolleranza è disattivata.
+// TestSenderGraceReservation: the reservation declares the tolerance in seconds; without it the field
+// is missing; resuming the stream is rejected if the tolerance is disabled.
 func TestSenderGraceReservation(t *testing.T) {
 	url, _ := newGraceServer(t, 90*time.Second)
 	res := reserveUpload(t, &http.Client{}, url, "a.bin", 10)
 	if res.Grace != 90 {
-		t.Errorf("grace %d, attesi 90", res.Grace)
+		t.Errorf("grace %d, want 90", res.Grace)
 	}
 
 	srv, _ := newWebServer(t, time.Hour)
 	off := reserveUpload(t, &http.Client{}, srv.URL, "a.bin", 10)
 	if off.Grace != 0 {
-		t.Errorf("senza tolleranza grace %d, atteso 0", off.Grace)
+		t.Errorf("without tolerance grace %d, want 0", off.Grace)
 	}
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/", strings.NewReader(`{"resume":"`+off.Slug+`"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -95,12 +95,12 @@ func TestSenderGraceReservation(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("resume senza tolleranza: stato %d, atteso 404", resp.StatusCode)
+		t.Errorf("resume without tolerance: status %d, want 404", resp.StatusCode)
 	}
 }
 
-// TestSenderGraceRebind: il browser attende senza consumare il link; il mittente torna
-// con un nuovo PUT e il download successivo arriva intero.
+// TestSenderGraceRebind: the browser waits without consuming the link; the sender returns with a new
+// PUT and the following download arrives whole.
 func TestSenderGraceRebind(t *testing.T) {
 	base, reg := newGraceServer(t, time.Minute)
 	client := &http.Client{}
@@ -112,15 +112,15 @@ func TestSenderGraceRebind(t *testing.T) {
 	res.close()
 	waitAway(t, reg, res)
 
-	// La pagina di download avvisa che il mittente è assente.
+	// The download page warns that the sender is absent.
 	_, body := browserDo(t, http.MethodGet, base+"/"+res.Slug)
-	wantContains(t, "pagina con mittente assente", body, "The sender is not connected right now")
+	wantContains(t, "page with absent sender", body, "The sender is not connected right now")
 
-	// Il pulsante non deve avviare un download né consumare il link mentre il mittente è assente.
+	// The button must neither start a download nor consume the link while the sender is absent.
 	req, _ := http.NewRequest(http.MethodPost, base+"/"+res.Slug, strings.NewReader(""))
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	waiting := within(t, 5*time.Second, "pagina in attesa del mittente", func() *http.Response {
+	waiting := within(t, 5*time.Second, "page waiting for the sender", func() *http.Response {
 		r, err := client.Do(req)
 		if err != nil {
 			t.Error(err)
@@ -133,16 +133,16 @@ func TestSenderGraceRebind(t *testing.T) {
 	}
 	waiting.Body.Close()
 	if waiting.StatusCode != http.StatusOK || !strings.HasPrefix(waiting.Header.Get("Content-Type"), "text/html") {
-		t.Fatalf("attesa: stato %d, Content-Type %q", waiting.StatusCode, waiting.Header.Get("Content-Type"))
+		t.Fatalf("wait: status %d, Content-Type %q", waiting.StatusCode, waiting.Header.Get("Content-Type"))
 	}
 	if _, err := reg.Peek(res.Slug); err != nil {
-		t.Fatalf("il pulsante in attesa ha consumato il link: %v", err)
+		t.Fatalf("the waiting button consumed the link: %v", err)
 	}
 
-	// Il mittente torna: nuovo stream e nuovo PUT con lo stesso token.
+	// The sender returns: new stream and new PUT with the same token.
 	again := resumeStream(t, client, base, res)
 	if again.Slug != res.Slug || again.Grace != 60 {
-		t.Fatalf("stream ripreso: slug %q grace %d", again.Slug, again.Grace)
+		t.Fatalf("resumed stream: slug %q grace %d", again.Slug, again.Grace)
 	}
 	put := make(chan webResult, 1)
 	go func() {
@@ -153,7 +153,7 @@ func TestSenderGraceRebind(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("mittente non riagganciato")
+			t.Fatal("sender not reattached")
 		}
 	}
 	dl, err := client.Do(req)
@@ -161,29 +161,29 @@ func TestSenderGraceRebind(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dl.Body.Close()
-	got := within(t, 10*time.Second, "download dopo il ritorno del mittente", func() []byte {
+	got := within(t, 10*time.Second, "download after the sender returned", func() []byte {
 		b, _ := io.ReadAll(dl.Body)
 		return b
 	})
 	if string(got) != string(data) {
-		t.Fatalf("download: %d byte, attesi %d", len(got), len(data))
+		t.Fatalf("download: %d bytes, want %d", len(got), len(data))
 	}
 	if last, _ := again.outcome(t, 5*time.Second); last.Outcome != outcomeOK {
-		t.Fatalf("esito stream %+v", last)
+		t.Fatalf("stream outcome %+v", last)
 	}
-	if r := within(t, 5*time.Second, "fine del PUT", func() webResult { return <-put }); r.err != nil {
+	if r := within(t, 5*time.Second, "end of PUT", func() webResult { return <-put }); r.err != nil {
 		t.Fatalf("PUT: %v", r.err)
 	}
 }
 
-// TestSenderGraceTakeover: il mittente torna prima che il server veda cadere il vecchio PUT: il nuovo
-// lo sostituisce e il trasferimento riesce.
+// TestSenderGraceTakeover: the sender returns before the server sees the old PUT drop: the new one
+// replaces it and the transfer succeeds.
 func TestSenderGraceTakeover(t *testing.T) {
 	base, reg := newGraceServer(t, time.Minute)
 	client := &http.Client{}
 	data := randomBytes(t, 32<<10)
 	res := reserveUpload(t, client, base, "a.bin", int64(len(data)))
-	// Il vecchio PUT resta aperto: il server lo crede ancora agganciato.
+	// The old PUT stays open: the server still considers it attached.
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	old := make(chan webResult, 1)
@@ -194,7 +194,7 @@ func TestSenderGraceTakeover(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("PUT non agganciato")
+			t.Fatal("PUT not reattached")
 		}
 	}
 
@@ -205,23 +205,23 @@ func TestSenderGraceTakeover(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	dl := get(t, context.Background(), base+"/"+res.Slug)
 	defer dl.Body.Close()
-	got := within(t, 10*time.Second, "download dopo il subentro", func() []byte {
+	got := within(t, 10*time.Second, "download after takeover", func() []byte {
 		b, _ := io.ReadAll(dl.Body)
 		return b
 	})
 	if string(got) != string(data) {
-		t.Fatalf("download: %d byte, attesi %d", len(got), len(data))
+		t.Fatalf("download: %d bytes, want %d", len(got), len(data))
 	}
-	if r := within(t, 5*time.Second, "fine del nuovo PUT", func() webResult { return <-put }); r.err != nil {
-		t.Fatalf("nuovo PUT: %v", r.err)
+	if r := within(t, 5*time.Second, "end of new PUT", func() webResult { return <-put }); r.err != nil {
+		t.Fatalf("new PUT: %v", r.err)
 	}
 	pw.Close()
-	within(t, 5*time.Second, "fine del vecchio PUT", func() webResult { return <-old })
+	within(t, 5*time.Second, "end of old PUT", func() webResult { return <-old })
 	waitLen(t, reg, 0)
 }
 
-// TestSenderGraceExpires: se il mittente non torna entro la tolleranza il link si chiude: un
-// ricevente in attesa (curl) riceve l'errore, e dopo il link dice che il mittente si è fermato.
+// TestSenderGraceExpires: if the sender does not return within the tolerance, the link closes: a
+// receiver waiting (curl) gets the error, and afterwards the link says the sender has stopped.
 func TestSenderGraceExpires(t *testing.T) {
 	base, reg := newGraceServer(t, 400*time.Millisecond)
 	client := &http.Client{}
@@ -235,15 +235,15 @@ func TestSenderGraceExpires(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("ricevente in attesa alla scadenza: stato %d (%q), atteso 503", resp.StatusCode, b)
+		t.Errorf("receiver waiting at expiry: status %d (%q), want 503", resp.StatusCode, b)
 	}
 	waitLen(t, reg, 0)
 	check, body := browserDo(t, http.MethodGet, base+"/"+res.Slug)
 	if check.StatusCode != http.StatusGone {
-		t.Errorf("dopo la scadenza: stato %d, atteso 410", check.StatusCode)
+		t.Errorf("after expiry: status %d, want 410", check.StatusCode)
 	}
-	wantContains(t, "dopo la scadenza", body, "Sender stopped")
-	// La ripresa dello stream non riapre una sessione chiusa.
+	wantContains(t, "after expiry", body, "Sender stopped")
+	// Resuming the stream does not reopen a closed session.
 	req, _ := http.NewRequest(http.MethodPost, base+"/", strings.NewReader(`{"resume":"`+res.Slug+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(tokenHeader, res.Token)
@@ -253,12 +253,12 @@ func TestSenderGraceExpires(t *testing.T) {
 	}
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusNotFound {
-		t.Errorf("resume dopo la scadenza: stato %d, atteso 404", r2.StatusCode)
+		t.Errorf("resume after expiry: status %d, want 404", r2.StatusCode)
 	}
 }
 
-// TestSenderGraceCancelStillCloses: Cancel (DELETE) chiude subito il link anche con la tolleranza,
-// da mittente agganciato e da mittente caduto.
+// TestSenderGraceCancelStillCloses: Cancel (DELETE) closes the link immediately even within the
+// grace period, both from an attached sender and from a dropped one.
 func TestSenderGraceCancelStillCloses(t *testing.T) {
 	base, reg := newGraceServer(t, time.Hour)
 	client := &http.Client{}
@@ -267,7 +267,7 @@ func TestSenderGraceCancelStillCloses(t *testing.T) {
 	drop := putUntilCancelled(t, base, res, 100)
 	time.Sleep(100 * time.Millisecond)
 	if st := cancelUpload(t, client, base, res.Slug, res.Token); st != http.StatusNoContent {
-		t.Fatalf("DELETE da agganciato: stato %d", st)
+		t.Fatalf("DELETE from attached sender: status %d", st)
 	}
 	waitLen(t, reg, 0)
 	drop()
@@ -278,14 +278,14 @@ func TestSenderGraceCancelStillCloses(t *testing.T) {
 	drop()
 	waitAway(t, reg, res)
 	if st := cancelUpload(t, client, base, res.Slug, res.Token); st != http.StatusNoContent {
-		t.Fatalf("DELETE da caduto: stato %d", st)
+		t.Fatalf("DELETE from dropped sender: status %d", st)
 	}
 	waitLen(t, reg, 0)
 }
 
-// TestSenderGraceStreamLoss: la caduta dello stream, con il PUT ancora aperto ma con il body non
-// letto (la sua chiusura non si vedrebbe), mette il mittente in tolleranza: il link resta vivo
-// senza mittente. Un secondo stream aperto tiene il mittente agganciato.
+// TestSenderGraceStreamLoss: the stream drops while the PUT is still open but its body is unread
+// (its closure would not be visible), so the sender enters the grace period: the link stays alive
+// without a sender. A second open stream keeps the sender attached.
 func TestSenderGraceStreamLoss(t *testing.T) {
 	base, reg := newGraceServer(t, time.Hour)
 	client := &http.Client{}
@@ -294,17 +294,17 @@ func TestSenderGraceStreamLoss(t *testing.T) {
 	defer drop()
 	time.Sleep(100 * time.Millisecond)
 
-	// Con uno stream ripreso aperto, la chiusura del primo non toglie il mittente.
+	// With a resumed stream still open, closing the first one does not remove the sender.
 	again := resumeStream(t, client, base, res)
 	res.close()
 	time.Sleep(500 * time.Millisecond)
 	if s, err := reg.Reserved(res.Slug, res.Token); err != nil || s.Away() {
-		t.Fatalf("mittente tolto con uno stream ancora aperto: %v", err)
+		t.Fatalf("sender removed while a stream is still open: %v", err)
 	}
 	again.close()
 	s := waitAway(t, reg, res)
 	if reg.Len() != 1 || s.Err() != nil {
-		t.Fatalf("sessioni %d, Err %v dopo la caduta dello stream, attesa sessione viva", reg.Len(), s.Err())
+		t.Fatalf("sessions %d, Err %v after stream loss, expected a live session", reg.Len(), s.Err())
 	}
 }
 
@@ -318,7 +318,7 @@ func TestSenderGraceLiveStatus(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("PUT non agganciato")
+			t.Fatal("PUT not attached")
 		}
 	}
 	check := func(want string, code int) {
@@ -331,10 +331,10 @@ func TestSenderGraceLiveStatus(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		var m struct{ State string }
 		if json.Unmarshal(body, &m) != nil || m.State != want || r.StatusCode != code {
-			t.Fatalf("stato: %d %q, atteso %d %q", r.StatusCode, body, code, want)
+			t.Fatalf("status: %d %q, expected %d %q", r.StatusCode, body, code, want)
 		}
 		if r.Header.Get("Cache-Control") != "no-store" || strings.Contains(string(body), res.Token) || strings.Contains(string(body), "private.bin") {
-			t.Fatalf("header o dati sensibili nello stato: %q", body)
+			t.Fatalf("header or sensitive data in status: %q", body)
 		}
 	}
 	check("ready", http.StatusOK)
@@ -348,11 +348,11 @@ func TestSenderGraceLiveStatus(t *testing.T) {
 	}
 	r.Body.Close()
 	if r.StatusCode != http.StatusNoContent {
-		t.Fatalf("presenza: stato %d", r.StatusCode)
+		t.Fatalf("presence: status %d", r.StatusCode)
 	}
 	check("away", http.StatusOK)
 	if _, err := reg.Peek(res.Slug); err != nil {
-		t.Fatalf("lo stato ha consumato il link: %v", err)
+		t.Fatalf("status check consumed the link: %v", err)
 	}
 	cancelUpload(t, http.DefaultClient, base, res.Slug, res.Token)
 	check(reasonGoneSender, http.StatusGone)
@@ -365,7 +365,7 @@ func TestBrowserPeerReadiness(t *testing.T) {
 	res := openStream(t, http.DefaultClient, req)
 	defer res.close()
 	if res.Ready == nil || *res.Ready || res.ReadyTTL != 5 {
-		t.Fatalf("prenotazione senza ricevente: %+v", res.reservation)
+		t.Fatalf("reservation without receiver: %+v", res.reservation)
 	}
 	check := func(enhanced bool, state string, code int, ready bool) {
 		t.Helper()
@@ -385,15 +385,15 @@ func TestBrowserPeerReadiness(t *testing.T) {
 		}
 		if json.Unmarshal(body, &m) != nil || resp.StatusCode != code || m.State != state ||
 			(enhanced && (m.Ready == nil || *m.Ready != ready)) || (!enhanced && m.Ready != nil) {
-			t.Fatalf("stato enhanced=%v: %d %q", enhanced, resp.StatusCode, body)
+			t.Fatalf("status enhanced=%v: %d %q", enhanced, resp.StatusCode, body)
 		}
 		if resp.Header.Get("Cache-Control") != "no-store" || strings.Contains(string(body), res.Token) || strings.Contains(string(body), "private.bin") {
-			t.Fatalf("stato non sicuro: %q", body)
+			t.Fatalf("unsafe status: %q", body)
 		}
 	}
 	next := func(want bool) {
 		t.Helper()
-		got := within(t, 5*time.Second, "conferma nello stream", func() *bool {
+		got := within(t, 5*time.Second, "confirmation in the stream", func() *bool {
 			for res.sc.Scan() {
 				var m struct {
 					Ready *bool `json:"ready"`
@@ -405,10 +405,10 @@ func TestBrowserPeerReadiness(t *testing.T) {
 			return nil
 		})
 		if got == nil {
-			t.Fatalf("stream chiuso senza conferma: %v", res.sc.Err())
+			t.Fatalf("stream closed without confirmation: %v", res.sc.Err())
 		}
 		if *got != want {
-			t.Fatalf("stream READY=%v, atteso %v", *got, want)
+			t.Fatalf("stream READY=%v, expected %v", *got, want)
 		}
 	}
 	check(true, "away", http.StatusOK, false)
@@ -421,15 +421,15 @@ func TestBrowserPeerReadiness(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("PUT non agganciato")
+			t.Fatal("PUT not attached")
 		}
 	}
-	// La prima osservazione è avvenuta mentre il body era assente.
+	// The first observation happened while the body was absent.
 	next(true)
 	check(false, "ready", http.StatusOK, false)
 	check(true, "ready", http.StatusOK, true)
 	if _, err := reg.Peek(res.Slug); err != nil {
-		t.Fatalf("controllo ha consumato il link: %v", err)
+		t.Fatalf("control check consumed the link: %v", err)
 	}
 	done := make(chan struct{})
 	go func() {
@@ -439,7 +439,7 @@ func TestBrowserPeerReadiness(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	within(t, 5*time.Second, "inizio relay", func() bool { <-s.Started(); return true })
+	within(t, 5*time.Second, "relay start", func() bool { <-s.Started(); return true })
 	check(true, "active", http.StatusOK, true)
 	check(false, "claimed", http.StatusGone, false)
 	if err := reg.Foreground(res.Slug, res.Token, false); err != nil {
@@ -447,9 +447,9 @@ func TestBrowserPeerReadiness(t *testing.T) {
 	}
 	check(true, "active", http.StatusOK, false)
 	cancelUpload(t, http.DefaultClient, base, res.Slug, res.Token)
-	within(t, 5*time.Second, "fine ricevente", func() bool { <-done; return true })
+	within(t, 5*time.Second, "receiver end", func() bool { <-done; return true })
 	if s.PeerReady() {
-		t.Fatal("sessione annullata ancora READY")
+		t.Fatal("cancelled session still READY")
 	}
 }
 
@@ -482,16 +482,16 @@ func TestCancelInterruptsBlockedReceiver(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("il ricevente non è rimasto bloccato")
+			t.Fatal("the receiver did not stay blocked")
 		}
 	}
 	if status := cancelUpload(t, http.DefaultClient, base, res.Slug, res.Token); status != http.StatusNoContent {
-		t.Fatalf("Cancel: stato %d", status)
+		t.Fatalf("Cancel: status %d", status)
 	}
 	select {
 	case <-put:
 	case <-time.After(2 * time.Second):
-		t.Fatal("Cancel non sblocca una scrittura verso un ricevente che non legge")
+		t.Fatal("Cancel does not unblock a write to a receiver that does not read")
 	}
 	waitLen(t, reg, 0)
 }
@@ -521,18 +521,18 @@ func TestSenderGraceResumeControlDuringRelay(t *testing.T) {
 	req.Header.Set(tokenHeader, res.Token)
 	again := openStream(t, http.DefaultClient, req)
 	if !again.Started {
-		t.Fatal("lo stream ripreso non segnala il relay già iniziato")
+		t.Fatal("the resumed stream does not report that the relay has already started")
 	}
 	go func() { _, _ = pw.Write([]byte(data[1:])); pw.Close() }()
-	got := within(t, 5*time.Second, "body dopo il recupero del controllo", func() string {
+	got := within(t, 5*time.Second, "body after control recovery", func() string {
 		b, _ := io.ReadAll(dl.Body)
 		return string(b)
 	})
 	if got != data {
-		t.Fatalf("body %q, atteso %q", got, data)
+		t.Fatalf("body %q, expected %q", got, data)
 	}
 	if last, _ := again.outcome(t, 5*time.Second); last.Outcome != outcomeOK {
-		t.Fatalf("esito %+v", last)
+		t.Fatalf("outcome %+v", last)
 	}
 	if r := <-put; r.err != nil {
 		t.Fatal(r.err)

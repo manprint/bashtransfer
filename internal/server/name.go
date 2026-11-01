@@ -7,12 +7,12 @@ import (
 
 const maxNameRunes = 128
 
-// SanitizeName rende sicuro il nome file preso dal path (D5): niente directory,
-// caratteri di controllo, virgolette o backslash, punti iniziali; massimo 128 caratteri; "download" se vuoto.
-// Il nome finisce tra virgolette doppie in una riga di shell che l'utente incolla: `$`, backtick
-// e `!` (espansioni di bash anche tra virgolette) diventano `_`. Sono scartati anche i controlli
-// C1 (CSI per alcuni terminali), i separatori di riga Unicode e i controlli bidirezionali, che
-// mascherano l'estensione nel testo mostrato.
+// SanitizeName makes the file name taken from the path safe (D5): no directories,
+// control characters, quotes or backslashes, no leading dots; at most 128 characters; "download" if empty.
+// The name ends up in double quotes in a shell line the user pastes: `$`, backtick
+// and `!` (bash expansions even inside quotes) become `_`. C1 controls (CSI for some terminals),
+// Unicode line separators and bidirectional controls, which hide the extension in the displayed
+// text, are also discarded.
 func SanitizeName(raw string) string {
 	if i := strings.LastIndex(raw, "/"); i >= 0 {
 		raw = raw[i+1:]
@@ -28,23 +28,23 @@ func SanitizeName(raw string) string {
 			b.WriteRune(r)
 		}
 	}
-	// Punti iniziali tolti: "." e ".." sono directory (`curl -o "."` fallisce) e un nome come
-	// ".bashrc" sovrascriverebbe un file nascosto del ricevente che esegue il comando nella home.
+	// Leading dots removed: "." and ".." are directories (`curl -o "."` fails) and a name like
+	// ".bashrc" would overwrite a hidden file of the receiver running the command in the home.
 	s := strings.TrimLeftFunc(b.String(), func(r rune) bool { return r == '.' || unicode.IsSpace(r) })
 	s = strings.TrimSpace(s)
 	if rs := []rune(s); len(rs) > maxNameRunes {
-		// Il taglio può lasciare uno spazio in coda: TrimSpace di nuovo.
+		// The cut may leave a trailing space: TrimSpace again.
 		s = strings.TrimSpace(string(rs[:maxNameRunes]))
 	}
-	// "-" è lo stdout per curl -o e wget -O: il ricevente non avrebbe un file.
+	// "-" is stdout for curl -o and wget -O: the receiver would have no file.
 	if s == "" || s == "-" {
 		return "download"
 	}
 	return s
 }
 
-// isInvisibleFormat riconosce i caratteri Unicode che cambiano la visualizzazione del testo
-// senza comparire: separatori di riga e paragrafo, marcatori e override bidirezionali.
+// isInvisibleFormat recognizes Unicode characters that change how text is displayed
+// without appearing: line and paragraph separators, bidirectional marks and overrides.
 func isInvisibleFormat(r rune) bool {
 	switch {
 	case r == 0x2028 || r == 0x2029:

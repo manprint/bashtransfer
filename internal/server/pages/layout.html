@@ -92,7 +92,7 @@ footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
   .card{padding:.9rem .8rem 1rem; margin-bottom:1rem}
   h2{font-size:1.05rem; margin-bottom:.8rem}
   h3{margin:1rem 0 .3rem}
-  /* Il pulsante copia lascia al comando tutta la larghezza: va a capo invece di scorrere. */
+  /* Give commands the full width below Copy: wrap instead of scrolling. */
   .cmd{grid-template-columns:minmax(0,1fr); gap:.4rem; margin:.45rem 0 .8rem}
   .cmd .copy{justify-self:center; width:var(--btn-sm); min-height:var(--tap); padding:.3rem 0}
   .rows{gap:.35rem}
@@ -136,7 +136,7 @@ footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
     t.setAttribute("readonly", "");
     t.style.position = "fixed";
     t.style.opacity = "0";
-    // Evita lo zoom automatico del campo temporaneo su iOS.
+    // Prevent iOS from automatically zooming the temporary field.
     t.style.fontSize = "16px";
     document.body.appendChild(t);
     t.select();
@@ -151,7 +151,7 @@ footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
     }
     return Promise.resolve(fallbackCopy(text));
   }
-  // Delega: vale anche per i pulsanti creati dopo il caricamento (i link dell'upload).
+  // Delegate to include buttons created after load (upload links).
   document.addEventListener("click", function (ev) {
     var btn = ev.target.closest("[data-copy]");
     if (!btn) return;

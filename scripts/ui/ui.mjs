@@ -1,10 +1,10 @@
-// Test frontend di bashtransfer con Playwright (Chromium): pagine, invio dal browser, download dalla
-// pagina, esiti e annullamento. Si lancia con scripts/ui/run.sh, che avvia i server.
-// Env: BASE (server, attesa lunga), BASE_SHORT (attesa 3s), BASE_AUTH (Basic auth u:p), BASE_GRACE
-// (BASHT_SENDER_GRACE=8, tolleranza del mittente), OUT (cartella
-// vuota per file e screenshot), TAG (nome della prova), ONLY (regex dei nomi dei test), CHROME
-// (eseguibile Chromium al posto di quello installato da Playwright), EXCLUDE_HOSTS (host raggiungibili
-// oltre a 127.0.0.1 e localhost, separati da virgola).
+// Bashtransfer frontend tests with Playwright (Chromium): pages, browser uploads, page downloads,
+// outcomes and cancellation. Run through scripts/ui/run.sh, which starts the servers.
+// Env: BASE (long-wait server), BASE_SHORT (3s wait), BASE_AUTH (Basic auth u:p), BASE_GRACE
+// (BASHT_SENDER_GRACE=8, sender grace), OUT (empty directory
+// for files and screenshots), TAG (test label), ONLY (test-name regex), CHROME
+// (Chromium executable instead of the Playwright installation), EXCLUDE_HOSTS (extra reachable
+// hosts beyond 127.0.0.1 and localhost, comma-separated).
 import { chromium } from 'playwright-core';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 
 for (const k of ['BASE', 'BASE_SHORT', 'BASE_AUTH', 'BASE_GRACE', 'OUT']) {
-  if (!process.env[k]) { console.error(`${k} non impostata: usare scripts/ui/run.sh`); process.exit(2); }
+  if (!process.env[k]) { console.error(`${k} not set: use scripts/ui/run.sh`); process.exit(2); }
 }
 const { BASE, BASE_SHORT, BASE_AUTH, BASE_GRACE, OUT } = process.env;
 const TAG = process.env.TAG || 'direct';
@@ -34,7 +34,7 @@ function mkfile(name, size) {
   return p;
 }
 
-// Esegue una riga di shell (exec: kill raggiunge il programma) in cwd.
+// Run a shell command in cwd (exec lets kill reach the program).
 function sh(line, cwd = OUT) {
   fs.mkdirSync(cwd, { recursive: true });
   const p = spawn('bash', ['-c', 'exec ' + line], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -59,10 +59,10 @@ async function test(name, fn) {
   }
 }
 
-// Nessuna connessione fuori dai server di test: niente servizi Google in background, e ogni nome
-// diverso dagli host di test (EXCLUDE_HOSTS, separati da virgola) non si risolve.
+// No connections outside test servers: disable background Google services and prevent
+// names other than test hosts (comma-separated EXCLUDE_HOSTS) from resolving.
 const allowed = ['127.0.0.1', 'localhost', ...(process.env.EXCLUDE_HOSTS || '').split(',').filter(Boolean)];
-// channel 'chromium': il Chromium completo in modalità headless, non la headless shell.
+// channel 'chromium': full Chromium in headless mode, not the headless shell.
 const browser = await chromium.launch({
   ...(process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: 'chromium' }),
   headless: true,
@@ -83,7 +83,7 @@ async function newPage(opts = {}) {
   page.errors = [];
   page.on('console', (m) => { if (m.type() === 'error') page.errors.push(m.text()); });
   page.on('pageerror', (e) => page.errors.push(e.message));
-  // Traccia di rete con orario ISO (come i log dei server): serve a diagnosticare i fallimenti.
+  // Network trace with ISO timestamps matching server logs, for failure diagnosis.
   page.net = [];
   page.on('response', (r) => page.net.push(`${new Date().toISOString()} ${r.status()} ${r.request().method()} ${r.url()}`));
   page.on('requestfailed', (r) => page.net.push(`${new Date().toISOString()} FAILED ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
@@ -91,8 +91,8 @@ async function newPage(opts = {}) {
   return page;
 }
 
-// Stampa e salva in OUT lo stato della pagina e del mittente su un fallimento, per il runner (il
-// file <name>-fail.json e lo screenshot finiscono nell'artifact ui).
+// Print and save page/sender state in OUT on failure for the runner
+// (<name>-fail.json and its screenshot are included in the ui artifact).
 async function diagnose(page, name, sender) {
   const info = {
     name,
@@ -109,8 +109,8 @@ async function diagnose(page, name, sender) {
   await page.screenshot({ path: path.join(OUT, `${name}-fail.png`), fullPage: true }).catch(() => {});
   console.log(`DIAG ${name} ${JSON.stringify(info, null, 1)}`);
 }
-// Proxy TCP davanti a target che taglia le connessioni su comando, come un telefono che perde la
-// rete: sever() chiude tutte le connessioni aperte, block impedisce di aprirne di nuove.
+// TCP proxy that cuts connections on demand, like a phone losing its network:
+// sever() closes open connections; block prevents new ones.
 async function severProxy(target) {
   const t = new URL(target);
   const socks = new Set();
@@ -128,47 +128,47 @@ async function severProxy(target) {
   return px;
 }
 
-// allow: errori attesi, per esempio il caricamento di una pagina 404/410 o il PUT interrotto.
+// allow: expected errors, e.g. loading a 404/410 page or an interrupted PUT.
 function noErrors(page, what, allow) {
   const errs = page.errors.filter((e) => !(allow && allow.test(e)));
-  assert(errs.length === 0, `${what}: errori console ${JSON.stringify(errs)}`);
+  assert(errs.length === 0, `${what}: console errors ${JSON.stringify(errs)}`);
 }
 const LOAD_4XX = /^Failed to load resource: the server responded with a status of 4(04|10) /;
 const PUT_FAILED = /^Failed to load resource: net::ERR_|^Failed to load resource: the server responded with a status of 404 /;
 
-// Controlli di allineamento: su desktop campo e pulsante della stessa riga alla stessa altezza,
-// pulsanti di copia della stessa larghezza; su telefono il pulsante non schiaccia il comando: sta
-// sopra al campo negli elenchi e sotto nei comandi singoli, con un'area di tocco adeguata. I
-// comandi vanno a capo invece di scorrere in orizzontale, a ogni larghezza.
+// Alignment checks: desktop row fields/buttons align vertically and Copy buttons have
+// equal widths; mobile buttons do not squeeze commands: above list fields and below
+// standalone commands, with adequate touch targets. Commands wrap instead of scrolling
+// horizontally at every width.
 async function layoutChecks(page) {
   return page.evaluate(() => {
     const bad = [];
     const r = (el) => el.getBoundingClientRect();
-    if (document.documentElement.scrollWidth > innerWidth) bad.push(`scroll orizzontale ${document.documentElement.scrollWidth} > ${innerWidth}`);
+    if (document.documentElement.scrollWidth > innerWidth) bad.push(`horizontal scroll ${document.documentElement.scrollWidth} > ${innerWidth}`);
     const narrow = matchMedia('(max-width: 40rem)').matches;
     const copies = [...document.querySelectorAll('.copy')].filter((b) => b.offsetParent);
     const widths = new Set(copies.map((b) => Math.round(r(b).width)));
-    if (widths.size > 1) bad.push(`larghezze pulsanti copia ${[...widths]}`);
+    if (widths.size > 1) bad.push(`Copy button widths ${[...widths]}`);
     for (const b of copies) {
       const f = document.getElementById(b.dataset.copy);
       if (!f) continue;
       const a = r(f), c = r(b);
       if (narrow) {
-        // Su telefono i Copy sono compatti e centrati sotto o accanto al comando.
-        if (c.width < 43 || c.height < 34) bad.push(`pulsante copia troppo piccolo ${b.dataset.copy}: ${c.width}x${c.height}`);
-        if (!(c.bottom <= a.top + 1 || c.top >= a.bottom - 1)) bad.push(`pulsante sovrapposto ${b.dataset.copy}`);
+        // On mobile, Copy buttons are compact and centered below or beside commands.
+        if (c.width < 43 || c.height < 34) bad.push(`Copy button too small ${b.dataset.copy}: ${c.width}x${c.height}`);
+        if (!(c.bottom <= a.top + 1 || c.top >= a.bottom - 1)) bad.push(`overlapping button ${b.dataset.copy}`);
       } else {
-        if (Math.abs(a.top - c.top) > 1 || Math.abs(a.height - c.height) > 1) bad.push(`riga ${b.dataset.copy}: campo ${a.top}/${a.height} pulsante ${c.top}/${c.height}`);
-        if (c.left < a.right) bad.push(`pulsante sovrapposto ${b.dataset.copy}`);
+        if (Math.abs(a.top - c.top) > 1 || Math.abs(a.height - c.height) > 1) bad.push(`row ${b.dataset.copy}: field ${a.top}/${a.height} button ${c.top}/${c.height}`);
+        if (c.left < a.right) bad.push(`overlapping button ${b.dataset.copy}`);
       }
     }
     for (const f of document.querySelectorAll('.field')) {
-      if (f.offsetParent && f.scrollWidth > f.clientWidth + 1) bad.push(`comando non va a capo: ${f.textContent} (${f.scrollWidth} > ${f.clientWidth})`);
+      if (f.offsetParent && f.scrollWidth > f.clientWidth + 1) bad.push(`command does not wrap: ${f.textContent} (${f.scrollWidth} > ${f.clientWidth})`);
     }
-    // Campi di ogni griglia allineati a sinistra.
+    // Fields in each grid align on the left.
     for (const g of document.querySelectorAll('.rows, .cmd')) {
       const lefts = new Set([...g.querySelectorAll('.field')].map((f) => Math.round(r(f).left)));
-      if (lefts.size > 1) bad.push(`campi non allineati in ${g.className}: ${[...lefts]}`);
+      if (lefts.size > 1) bad.push(`fields misaligned in ${g.className}: ${[...lefts]}`);
     }
     return bad;
   });
@@ -181,7 +181,7 @@ async function linkRows(page) {
   ]);
 }
 
-// Pattern deterministico per i file creati nella pagina.
+// Deterministic pattern for files created in the page.
 const pattern = (n) => { const b = Buffer.alloc(n); for (let i = 0; i < n; i++) b[i] = (i * 31 + 7 + (i >> 11)) & 255; return b; };
 
 async function dropFiles(page, files) {
@@ -231,21 +231,21 @@ for (const w of [320, 390]) for (const dark of [false, true]) {
       await sender.waitForSelector('#x-links:not([hidden])');
       const url = (await linkRows(sender))[3].line;
       await peerBadge(sender, 'x-ready', false);
-      assert(await sender.isEnabled('#x-copy'), 'UNREADY impedisce di condividere il link');
+      assert(await sender.isEnabled('#x-copy'), 'UNREADY prevents link sharing');
       let confirm = false;
       await receiver.route('**/*?status=1', (route) => confirm
         ? route.continue()
         : route.fulfill({ json: { state: 'ready' } }));
       await receiver.goto(url);
       await peerBadge(receiver, 'dl-ready', false);
-      assert(await receiver.isDisabled('#dl button'), 'stato senza conferma server abilita Download');
+      assert(await receiver.isDisabled('#dl button'), 'state without server confirmation enables Download');
       await peerBadge(sender, 'x-ready', false);
       confirm = true;
       await receiver.evaluate(() => window.dispatchEvent(new Event('online')));
       await peerBadge(receiver, 'dl-ready', true);
       await peerBadge(sender, 'x-ready', true);
-      assert(await receiver.isEnabled('#dl button'), 'READY non abilita Download');
-      assert((await fetch(url, { headers: { Accept: 'text/html' } })).status === 200, 'READY ha consumato il link');
+      assert(await receiver.isEnabled('#dl button'), 'READY does not enable Download');
+      assert((await fetch(url, { headers: { Accept: 'text/html' } })).status === 200, 'READY consumed the link');
       for (const [page, role] of [[sender, 'sender'], [receiver, 'receiver']]) {
         assert((await layoutChecks(page)).length === 0, `layout badge ${role} ${w}`);
         await page.screenshot({ path: path.join(OUT, `ready-${role}-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
@@ -253,7 +253,7 @@ for (const w of [320, 390]) for (const dark of [false, true]) {
       await sender.click('#x-cancel');
       await peerBadge(sender, 'x-ready', false);
       await peerBadge(receiver, 'dl-ready', false);
-      assert(await receiver.isDisabled('#dl button'), 'sessione annullata ancora scaricabile');
+      assert(await receiver.isDisabled('#dl button'), 'cancelled session still downloadable');
     } finally {
       await sender.context().close();
       await receiver.context().close();
@@ -283,7 +283,7 @@ await test('peer readiness expires and ignores a late response after backgroundi
     });
     await receiver.waitForFunction(() => typeof window.__releaseStatus === 'function');
     await peerBadge(receiver, 'dl-ready', false);
-    assert(await receiver.isDisabled('#dl button'), 'conferma scaduta ma Download ancora abilitato');
+    assert(await receiver.isDisabled('#dl button'), 'confirmation expired but Download remains enabled');
     await receiver.evaluate(() => {
       window.__visible = false;
       document.dispatchEvent(new Event('visibilitychange'));
@@ -291,9 +291,9 @@ await test('peer readiness expires and ignores a late response after backgroundi
     });
     await sleep(100);
     await peerBadge(receiver, 'dl-ready', false);
-    assert(await receiver.isDisabled('#dl button'), 'risposta vecchia riabilita Download');
+    assert(await receiver.isDisabled('#dl button'), 'stale response re-enables Download');
     await peerBadge(sender, 'x-ready', false);
-    assert((await fetch(url, { headers: { Accept: 'text/html' } })).status === 200, 'scadenza presenza ha consumato il link');
+    assert((await fetch(url, { headers: { Accept: 'text/html' } })).status === 200, 'presence expiry consumed the link');
     await receiver.evaluate(() => {
       window.__holdStatus = false;
       window.__visible = true;
@@ -304,8 +304,8 @@ await test('peer readiness expires and ignores a late response after backgroundi
     const [dl] = await Promise.all([receiver.waitForEvent('download'), receiver.click('#dl button')]);
     const saved = path.join(OUT, 'ready-lease-received.bin');
     await dl.saveAs(saved);
-    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(path.join(OUT, 'src', 'ready-lease.bin'))), 'contenuto alterato dalle conferme');
-    assert((await waitResult(sender)).cls === 'result ok', 'esito relay');
+    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(path.join(OUT, 'src', 'ready-lease.bin'))), 'confirmations changed the content');
+    assert((await waitResult(sender)).cls === 'result ok', 'relay outcome');
     await peerBadge(sender, 'x-ready', false);
     await peerBadge(receiver, 'dl-ready', false);
   } finally {
@@ -330,10 +330,10 @@ await test('peer readiness rejects failed status responses and retries', async (
     await receiver.evaluate(() => window.dispatchEvent(new Event('online')));
     await (await response).finished();
     await receiver.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
-    assert((await receiver.textContent('#dl-ready')) === 'UNREADY' && await receiver.isDisabled('#dl button'), 'risposta HTTP fallita viene considerata READY');
+    assert((await receiver.textContent('#dl-ready')) === 'UNREADY' && await receiver.isDisabled('#dl button'), 'failed HTTP response is treated as READY');
     failing = false;
     await peerBadge(receiver, 'dl-ready', true);
-    assert(await receiver.isEnabled('#dl button'), 'errore transitorio non recuperato automaticamente');
+    assert(await receiver.isEnabled('#dl button'), 'transient error not recovered automatically');
     await sender.click('#x-cancel');
   } finally {
     await sender.context().close();
@@ -345,24 +345,24 @@ for (const [w, dark, font] of [[1280, false], [1280, true], [390, false], [390, 
   await test(`home layout ${w} ${dark ? 'dark' : 'light'}${font ? ' fallback font' : ''}`, async () => {
     const page = await newPage({ viewport: { width: w, height: 900 }, dark });
     const resp = await page.goto(BASE + '/');
-    assert(resp.status() === 200, `stato ${resp.status()}`);
+    assert(resp.status() === 200, `status ${resp.status()}`);
     if (font) await page.addStyleTag({ content: `body { font-family: ${font}; }` });
     await page.screenshot({ path: path.join(OUT, `home-${w}-${dark ? 'dark' : 'light'}${font ? '-fallback-font' : ''}.png`), fullPage: true });
     const first = await page.$eval('main > section', (s) => ({ h2: s.querySelector('h2').textContent, drop: !!s.querySelector('#drop') }));
-    assert(first.drop && /Send a file/.test(first.h2), `prima sezione ${JSON.stringify(first)}`);
+    assert(first.drop && /Send a file/.test(first.h2), `first section ${JSON.stringify(first)}`);
     const box = await page.$eval('#drop', (d) => d.getBoundingClientRect().toJSON());
-    assert(box.height >= 150 && box.height <= 280, `altezza riquadro ${box.height}`);
+    assert(box.height >= 150 && box.height <= 280, `drop box height ${box.height}`);
     const pick = await page.$eval('#pick', (b) => ({ ...b.getBoundingClientRect().toJSON(), text: b.textContent }));
-    assert(pick.text === 'Upload' && pick.top > box.top && pick.bottom < box.bottom, `pulsante Upload ${JSON.stringify(pick)}`);
+    assert(pick.text === 'Upload' && pick.top > box.top && pick.bottom < box.bottom, `Upload button ${JSON.stringify(pick)}`);
     const bad = await layoutChecks(page);
     assert(bad.length === 0, bad.join('; '));
     const roles = await page.$$eval('h2', (hs) => hs.map((h) => h.textContent.trim()));
-    assert(roles.some((r) => r.startsWith('Sender') && r.includes('terminal')) && roles.some((r) => r.startsWith('Receiver')), `titoli ${roles}`);
+    assert(roles.some((r) => r.startsWith('Sender') && r.includes('terminal')) && roles.some((r) => r.startsWith('Receiver')), `headings ${roles}`);
     const receiver = await page.$eval('section[aria-labelledby="receive"]', (s) => ({
       color: getComputedStyle(s.querySelector('.role-recv')).color,
       tools: [...s.querySelectorAll('.label')].map((l) => ({ color: getComputedStyle(l).color, weight: getComputedStyle(l).fontWeight })),
     }));
-    assert(receiver.tools.length === 3 && receiver.tools.every((l) => l.color === receiver.color && l.weight === '700'), `stile strumenti ricevente ${JSON.stringify(receiver)}`);
+    assert(receiver.tools.length === 3 && receiver.tools.every((l) => l.color === receiver.color && l.weight === '700'), `receiver tool styling ${JSON.stringify(receiver)}`);
     noErrors(page, 'home');
     await page.context().close();
   });
@@ -372,14 +372,14 @@ await test('home copy button', async () => {
   const page = await newPage({ clipboard: BASE });
   await page.goto(BASE + '/');
   await page.click('[data-copy="c-send"]');
-  // L'etichetta cambia quando la scrittura negli appunti (asincrona) è riuscita.
+  // The label changes after the asynchronous clipboard write succeeds.
   await page.waitForFunction(() => document.querySelector('[data-copy="c-send"]').textContent !== 'Copy', null, { timeout: 2000 }).catch(() => {});
   const txt = await page.textContent('[data-copy="c-send"]');
   const clip = await page.evaluate(() => navigator.clipboard.readText());
-  assert(txt === 'Copied', `etichetta ${txt}`);
-  assert(clip === `curl ${BASE} -T FILE`, `appunti ${clip}`);
+  assert(txt === 'Copied', `label ${txt}`);
+  assert(clip === `curl ${BASE} -T FILE`, `clipboard ${clip}`);
   await sleep(1700);
-  assert((await page.textContent('[data-copy="c-send"]')) === 'Copy', 'etichetta non ripristinata');
+  assert((await page.textContent('[data-copy="c-send"]')) === 'Copy', 'label not restored');
   noErrors(page, 'home copy');
   await page.context().close();
 });
@@ -402,12 +402,12 @@ await test('copy feedback cannot mark a new sender link as copied', async () => 
     await page.click('#x-again');
     await page.setInputFiles('#file', mkfile('copy-new.bin', 100));
     await page.waitForSelector('#x-links:not([hidden])');
-    assert((await linkRows(page))[3].line !== old, 'il nuovo invio riusa il vecchio link');
+    assert((await linkRows(page))[3].line !== old, 'new upload reuses the old link');
     await page.evaluate(async () => {
       window.__finishCopy();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert((await page.textContent('#x-copy')) === 'Copy link', 'esito della vecchia copia applicato al nuovo link');
+    assert((await page.textContent('#x-copy')) === 'Copy link', 'old copy outcome applied to the new link');
     await page.click('#x-cancel');
     noErrors(page, 'stale Copy feedback', PUT_FAILED);
   } finally { await page.context().close(); }
@@ -417,14 +417,14 @@ await test('home password ZIP commands copy', async () => {
   const page = await newPage({ clipboard: BASE });
   await page.goto(BASE + '/');
   const commands = await page.$$eval('section[aria-labelledby="send-zip"] .field', (cs) => cs.map((c) => ({ id: c.id, line: c.textContent })));
-  assert(commands.length === 6, `comandi ZIP/history mancanti: ${commands.length}`);
+  assert(commands.length === 6, `missing ZIP/history commands: ${commands.length}`);
   for (const { id, line } of commands) {
     await page.click(`[data-copy="${id}"]`);
     await page.waitForFunction((id) => document.querySelector(`[data-copy="${id}"]`).textContent === 'Copied', id, { timeout: 2000 });
     const clip = await page.evaluate(() => navigator.clipboard.readText());
-    assert(clip === line, `copia incompleta ${id}: ${clip}`);
+    assert(clip === line, `incomplete copy ${id}: ${clip}`);
     const parsed = spawnSync('bash', ['-n', '-c', clip], { env, encoding: 'utf8' });
-    assert(parsed.status === 0, `sintassi Bash ${id}: ${parsed.stderr || parsed.error}`);
+    assert(parsed.status === 0, `Bash syntax ${id}: ${parsed.stderr || parsed.error}`);
   }
   noErrors(page, 'home ZIP copy');
   await page.context().close();
@@ -448,26 +448,26 @@ for (const [w, dark] of [[320, false], [320, true], [390, false], [390, true]]) 
         button: s.querySelector('#x-copy').getBoundingClientRect().toJSON(),
         label: s.querySelector('.share-label').getBoundingClientRect().toJSON(),
       }));
-      assert(share.text === 'Share:' && share.color === share.senderColor && share.weight === '700', `etichetta Share ${JSON.stringify(share)}`);
-      assert(share.button.left > share.label.right && share.button.height >= 44, `riga Share ${JSON.stringify(share)}`);
-      assert(await page.isVisible('#x-copy') && !(await page.isVisible('#x-c3')), 'sul telefono Share non è solo etichetta e pulsante');
-      assert(!(await page.isVisible('#x-c0')), 'comandi Bash aperti prima della richiesta');
-      assert((await layoutChecks(page)).length === 0, 'layout Share compatto');
+      assert(share.text === 'Share:' && share.color === share.senderColor && share.weight === '700', `Share label ${JSON.stringify(share)}`);
+      assert(share.button.left > share.label.right && share.button.height >= 44, `Share row ${JSON.stringify(share)}`);
+      assert(await page.isVisible('#x-copy') && !(await page.isVisible('#x-c3')), 'mobile Share is not just a label and button');
+      assert(!(await page.isVisible('#x-c0')), 'Bash commands expanded before requested');
+      assert((await layoutChecks(page)).length === 0, 'compact Share layout');
       await page.locator('main > section').first().screenshot({ path: path.join(OUT, `share-${w}-${dark ? 'dark' : 'light'}.png`) });
       await page.click('#x-copy');
       await page.waitForFunction(() => document.getElementById('x-copy').textContent === 'Copied');
-      assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'copia del link pubblico non valida');
+      assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'invalid public link copy');
       await page.click('#x-terminal summary');
-      assert(await page.isVisible('#x-c0') && await page.isVisible('#x-copy'), 'i comandi Bash nascondono Share');
+      assert(await page.isVisible('#x-c0') && await page.isVisible('#x-copy'), 'Bash commands hide Share');
       await page.click('[data-copy="x-c0"]');
       await page.waitForFunction(() => document.querySelector('[data-copy="x-c0"]').textContent === 'Copied');
-      assert((await page.evaluate(() => navigator.clipboard.readText())) === `curl -f -OJ "${url}"`, 'copia del comando Bash non valida');
+      assert((await page.evaluate(() => navigator.clipboard.readText())) === `curl -f -OJ "${url}"`, 'invalid Bash command copy');
       const bad = await layoutChecks(page);
       assert(bad.length === 0, bad.join('; '));
       await page.locator('main > section').first().screenshot({ path: path.join(OUT, `commands-${w}-${dark ? 'dark' : 'light'}.png`) });
       await page.click('#x-cancel');
       await waitResult(page, 5000);
-      assert((await layoutChecks(page)).length === 0, 'layout esito mobile');
+      assert((await layoutChecks(page)).length === 0, 'mobile outcome layout');
       noErrors(page, 'mobile sharing layout', PUT_FAILED);
     } finally { await page.context().close(); }
   });
@@ -484,19 +484,19 @@ await test('mobile download and error page layouts', async () => {
       const page = await newPage({ viewport: { width: w, height: 844 }, dark });
       try {
         const response = await page.goto(url);
-        assert(response.status() === 200, `pagina download ${response.status()}`);
+        assert(response.status() === 200, `download page ${response.status()}`);
         assert((await layoutChecks(page)).length === 0, `layout download ${w}/${dark}`);
         const tools = await page.$eval('.rows.tools', (s) => ({
           color: getComputedStyle(document.querySelector('.role-recv')).color,
           labels: [...s.querySelectorAll('.label')].map((l) => ({ color: getComputedStyle(l).color, weight: getComputedStyle(l).fontWeight })),
         }));
-        assert(tools.labels.length === 3 && tools.labels.every((l) => l.color === tools.color && l.weight === '700'), 'stili dei tool ricevente incoerenti');
+        assert(tools.labels.length === 3 && tools.labels.every((l) => l.color === tools.color && l.weight === '700'), 'inconsistent receiver tool styling');
         await page.screenshot({ path: path.join(OUT, `download-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
         const missing = await page.goto(BASE + '/AbC123xY9z');
-        assert(missing.status() === 404, `pagina errore ${missing.status()}`);
-        assert((await layoutChecks(page)).length === 0, `layout errore ${w}/${dark}`);
+        assert(missing.status() === 404, `error page ${missing.status()}`);
+        assert((await layoutChecks(page)).length === 0, `error layout ${w}/${dark}`);
         const font = await page.evaluate(() => parseFloat(getComputedStyle(document.body).fontSize));
-        assert(font >= 14 && font < 16, `carattere mobile ${font}`);
+        assert(font >= 14 && font < 16, `mobile font size ${font}`);
         await page.screenshot({ path: path.join(OUT, `error-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
         noErrors(page, 'mobile download/error', LOAD_4XX);
       } finally { await page.context().close(); }
@@ -514,30 +514,30 @@ await test('upload button + curl receiver from the table', async () => {
   await page.setInputFiles('#file', src);
   await page.waitForSelector('#x-links:not([hidden])', { timeout: 10000 });
   const rows = await linkRows(page);
-  assert(rows.map((r) => r.label).join(',') === 'curl,wget,aria2c,direct', `etichette ${JSON.stringify(rows)}`);
+  assert(rows.map((r) => r.label).join(',') === 'curl,wget,aria2c,direct', `labels ${JSON.stringify(rows)}`);
   const url = rows[3].line;
   assert(url.startsWith(BASE + '/') && url.length > BASE.length + 5, `direct ${url}`);
-  assert(rows[0].line === `curl -f -OJ "${url}"`, `riga curl ${rows[0].line}`);
-  assert(rows[1].line === `wget --content-disposition "${url}"`, `riga wget ${rows[1].line}`);
-  assert(rows[2].line === `aria2c -x1 -s1 --allow-overwrite=false "${url}"`, `riga aria2c ${rows[2].line}`);
-  assert((await page.textContent('#x-name')) === 'upload.bin' && (await page.textContent('#x-size')) === '24.0 MiB', 'nome/dimensione');
-  // Su un telefono passare a un'altra app ferma l'invio: l'avviso lo dice accanto ai link.
+  assert(rows[0].line === `curl -f -OJ "${url}"`, `curl row ${rows[0].line}`);
+  assert(rows[1].line === `wget --content-disposition "${url}"`, `wget row ${rows[1].line}`);
+  assert(rows[2].line === `aria2c -x1 -s1 --allow-overwrite=false "${url}"`, `aria2c row ${rows[2].line}`);
+  assert((await page.textContent('#x-name')) === 'upload.bin' && (await page.textContent('#x-size')) === '24.0 MiB', 'filename/size');
+  // Switching apps on a phone stops uploading: show the warning beside the links.
   const hint = await page.textContent('#x-links');
-  assert(/Keep this page open and in the foreground until the end/.test(hint) && /split screen/.test(hint), `avviso primo piano: ${hint}`);
-  // Copia del link diretto.
+  assert(/Keep this page open and in the foreground until the end/.test(hint) && /split screen/.test(hint), `foreground warning: ${hint}`);
+  // Copy the direct link.
   await page.click('[data-copy="x-c3"]');
   await page.waitForFunction(() => document.querySelector('[data-copy="x-c3"]').textContent === 'Copied', null, { timeout: 2000 });
-  assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'copia link diretto');
+  assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'direct link copy');
   await sleep(2600);
   const waitStatus = await page.textContent('#x-status');
-  assert(waitStatus === 'Waiting for the receiver to start the download…', `stato in attesa: ${waitStatus}`);
-  // Prima del ricevente nessun avanzamento: i byte nei buffer di rete non sono consegnati.
+  assert(waitStatus === 'Waiting for the receiver to start the download…', `waiting status: ${waitStatus}`);
+  // No progress before the receiver: bytes in network buffers are not delivered.
   const waitPct = await page.textContent('#x-pct');
-  assert(waitPct === '0%', `avanzamento senza ricevente: ${waitPct}`);
+  assert(waitPct === '0%', `progress without a receiver: ${waitPct}`);
   const bad = await layoutChecks(page);
   assert(bad.length === 0, bad.join('; '));
   await page.screenshot({ path: path.join(OUT, 'upload-waiting.png'), fullPage: true });
-  // Ricevente: il comando curl della tabella, rallentato per osservare il progresso.
+  // Receiver: the table's curl command, slowed down to observe progress.
   const recvDir = path.join(OUT, 'recv-curl');
   const rcv = sh(rows[0].line.replace(/^curl /, 'curl --limit-rate 6M '), recvDir);
   const samples = [];
@@ -552,24 +552,24 @@ await test('upload button + curl receiver from the table', async () => {
     })));
     if (i === 4) await page.screenshot({ path: path.join(OUT, 'upload-progress.png'), fullPage: true });
   }
-  console.log('     campioni:', samples.map((s) => `${s.pct} ${s.rate} [${s.amount}] ${s.status}`).join(' | '));
+  console.log('     samples:', samples.map((s) => `${s.pct} ${s.rate} [${s.amount}] ${s.status}`).join(' | '));
   const mid = samples.filter((s) => s.now > 0 && s.now < 100);
-  assert(mid.length > 0, 'nessun campione intermedio');
-  assert(mid.some((s) => /^\d+\.\d (KiB|MiB)\/s$/.test(s.rate)), 'velocità assente');
-  assert(mid.some((s) => s.status === 'Sending to the receiver…'), 'stato invio assente');
-  assert(mid.some((s) => /left$/.test(s.amount)), 'tempo residuo assente');
-  for (let i = 1; i < samples.length; i++) assert(samples[i].now >= samples[i - 1].now, 'progresso non monotono');
+  assert(mid.length > 0, 'no intermediate samples');
+  assert(mid.some((s) => /^\d+\.\d (KiB|MiB)\/s$/.test(s.rate)), 'missing transfer rate');
+  assert(mid.some((s) => s.status === 'Sending to the receiver…'), 'missing sending status');
+  assert(mid.some((s) => /left$/.test(s.amount)), 'missing remaining time');
+  for (let i = 1; i < samples.length; i++) assert(samples[i].now >= samples[i - 1].now, 'non-monotonic progress');
   const r = await rcv.done;
-  assert(r.code === 0, `curl ricevente: ${r.code} ${r.err}`);
+  assert(r.code === 0, `curl receiver: ${r.code} ${r.err}`);
   const res = await waitResult(page);
-  assert(res.cls === 'result ok' && /^Done: the receiver got the whole file \(24\.0 MiB in \d/.test(res.text), `esito ${JSON.stringify(res)}`);
-  assert(await page.$eval('#x-links', (e) => e.hidden), 'link ancora visibili');
-  assert((await page.getAttribute('#x-bar', 'aria-valuenow')) === '100', 'barra non al 100');
+  assert(res.cls === 'result ok' && /^Done: the receiver got the whole file \(24\.0 MiB in \d/.test(res.text), `outcome ${JSON.stringify(res)}`);
+  assert(await page.$eval('#x-links', (e) => e.hidden), 'links still visible');
+  assert((await page.getAttribute('#x-bar', 'aria-valuenow')) === '100', 'progress bar not at 100');
   const got = fs.readFileSync(path.join(recvDir, 'upload.bin'));
-  assert(sha(got) === sha(fs.readFileSync(src)), 'contenuto ricevuto diverso');
+  assert(sha(got) === sha(fs.readFileSync(src)), 'received content mismatch');
   await page.screenshot({ path: path.join(OUT, 'upload-done.png'), fullPage: true });
   await page.click('#x-again');
-  assert(await page.isVisible('#drop') && !(await page.isVisible('#xfer')), 'Send another file non ripristina');
+  assert(await page.isVisible('#drop') && !(await page.isVisible('#xfer')), 'Send another file does not reset');
   noErrors(page, 'upload');
   await page.context().close();
 });
@@ -580,11 +580,11 @@ await test('drag and drop + browser receiver on the download page', async () => 
   const page = await newPage();
   await page.goto(BASE + '/');
   await dropFiles(page, [{ name, size }]);
-  assert(await page.evaluate(() => window.__over), 'classe over assente su dragenter');
+  assert(await page.evaluate(() => window.__over), 'over class missing on dragenter');
   await page.waitForSelector('#x-links:not([hidden])', { timeout: 10000 });
-  assert(!(await page.$eval('#drop', (d) => d.classList.contains('over'))), 'classe over rimasta');
+  assert(!(await page.$eval('#drop', (d) => d.classList.contains('over'))), 'over class remains');
   const url = (await linkRows(page))[3].line;
-  // Anteprima in scuro su telefono: non consuma il link.
+  // Dark mobile preview: does not consume the link.
   const peek = await newPage({ viewport: { width: 390, height: 844 }, dark: true });
   await peek.goto(url);
   await peek.screenshot({ path: path.join(OUT, 'download-390-dark.png'), fullPage: true });
@@ -593,29 +593,29 @@ await test('drag and drop + browser receiver on the download page', async () => 
   await peek.context().close();
   const rp = await newPage();
   const resp = await rp.goto(url);
-  assert(resp.status() === 200, `pagina download ${resp.status()}`);
+  assert(resp.status() === 200, `download page ${resp.status()}`);
   const info = await rp.$$eval('.file dd', (d) => d.map((x) => x.textContent));
-  assert(info[0] === name && info[1] === '3.0 MiB (3,145,728 bytes)', `dati file ${info}`);
+  assert(info[0] === name && info[1] === '3.0 MiB (3,145,728 bytes)', `file details ${info}`);
   const tools = await rp.$$eval('.rows.tools .label', (l) => l.map((x) => x.textContent));
-  assert(tools.join(',') === 'curl,wget,aria2c', `comandi pagina download ${tools}`);
+  assert(tools.join(',') === 'curl,wget,aria2c', `download page commands ${tools}`);
   const bad = await layoutChecks(rp);
   assert(bad.length === 0, bad.join('; '));
   await rp.screenshot({ path: path.join(OUT, 'download-1280.png'), fullPage: true });
   const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: 15000 }), rp.click('#dl button')]);
-  assert(dl.suggestedFilename() === name, `nome suggerito ${dl.suggestedFilename()}`);
+  assert(dl.suggestedFilename() === name, `suggested filename ${dl.suggestedFilename()}`);
   const saved = path.join(OUT, 'recv-browser.bin');
   await dl.saveAs(saved);
-  assert(sha(fs.readFileSync(saved)) === sha(pattern(size)), 'contenuto scaricato diverso');
+  assert(sha(fs.readFileSync(saved)) === sha(pattern(size)), 'downloaded content mismatch');
   const btn = await rp.$eval('#dl button', (b) => ({ dis: b.disabled, t: b.textContent }));
-  assert(btn.dis && btn.t === 'Download requested', `pulsante dopo il click ${JSON.stringify(btn)}`);
+  assert(btn.dis && btn.t === 'Download requested', `button after click ${JSON.stringify(btn)}`);
   const res = await waitResult(page);
-  assert(res.cls === 'result ok', `esito mittente ${JSON.stringify(res)}`);
+  assert(res.cls === 'result ok', `sender outcome ${JSON.stringify(res)}`);
   noErrors(rp, 'download');
   noErrors(page, 'upload drop');
   const again = await rp.goto(url);
-  assert(again.status() === 410 && /Link already used or expired/.test(await rp.textContent('h2')), `link usato ${again.status()}`);
+  assert(again.status() === 410 && /Link already used or expired/.test(await rp.textContent('h2')), `used link ${again.status()}`);
   await rp.screenshot({ path: path.join(OUT, 'message-410.png'), fullPage: true });
-  noErrors(rp, 'pagina 410', LOAD_4XX);
+  noErrors(rp, '410 page', LOAD_4XX);
   await page.context().close();
   await rp.context().close();
 });
@@ -625,8 +625,8 @@ await test('drop of several files is refused', async () => {
   await page.goto(BASE + '/');
   await dropFiles(page, [{ name: 'a.txt', size: 10 }, { name: 'b.txt', size: 10 }]);
   await sleep(300);
-  assert((await page.textContent('#drop-error')) === 'Drop one file at a time.' && (await page.isVisible('#drop-error')), 'messaggio errore');
-  assert(!(await page.isVisible('#xfer')), 'upload partito');
+  assert((await page.textContent('#drop-error')) === 'Drop one file at a time.' && (await page.isVisible('#drop-error')), 'error message');
+  assert(!(await page.isVisible('#xfer')), 'upload started');
   await page.screenshot({ path: path.join(OUT, 'drop-error.png') });
   noErrors(page, 'drop multipli');
   await page.context().close();
@@ -642,21 +642,21 @@ await test('cancel closes the link', async () => {
   await sleep(1500);
   await page.click('#x-cancel');
   const res = await waitResult(page, 5000);
-  assert(res.cls === 'result err' && res.text === 'Cancelled: the link no longer works.', `esito ${JSON.stringify(res)}`);
+  assert(res.cls === 'result err' && res.text === 'Cancelled: the link no longer works.', `outcome ${JSON.stringify(res)}`);
   const ms = await waitGone(url, 1000);
-  assert(ms >= 0, 'link ancora valido 1 s dopo Cancel');
-  console.log(`     link 410 ${ms} ms dopo Cancel`);
-  // Il ricevente che apre il link dopo Cancel non vede "già usato": nessuno ha scaricato nulla.
+  assert(ms >= 0, 'link still valid 1 s after Cancel');
+  console.log(`     link 410 ${ms} ms after Cancel`);
+  // A receiver opening the link after Cancel must not see "already used": nothing was downloaded.
   const rp = await newPage();
   const rr = await rp.goto(url);
-  assert(rr.status() === 410 && (await rp.textContent('h2')) === 'Sender stopped', `ricevente dopo Cancel ${rr.status()} ${await rp.textContent('h2')}`);
+  assert(rr.status() === 410 && (await rp.textContent('h2')) === 'Sender stopped', `receiver after Cancel ${rr.status()} ${await rp.textContent('h2')}`);
   await rp.context().close();
   await page.screenshot({ path: path.join(OUT, 'upload-cancelled.png'), fullPage: true });
   noErrors(page, 'cancel', PUT_FAILED);
   await page.context().close();
 });
 
-// Stato del link senza consumarlo: la pagina di download (Accept: text/html) è 200 o 410.
+// Non-consuming link state: download page (Accept: text/html) returns 200 or 410.
 async function linkStatus(url) {
   const r = await fetch(url, { headers: { Accept: 'text/html' } });
   await r.arrayBuffer();
@@ -679,14 +679,14 @@ await test('closing the page closes the link', async () => {
   await page.waitForSelector('#x-links:not([hidden])');
   const url = (await linkRows(page))[3].line;
   await sleep(1500);
-  // Come l'utente: chiude la scheda e conferma l'avviso di beforeunload.
+  // Act like the user: close the tab and confirm the beforeunload warning.
   let asked = false;
   page.on('dialog', (d) => { asked = d.type() === 'beforeunload'; d.accept(); });
   await Promise.all([page.waitForEvent('close'), page.close({ runBeforeUnload: true })]);
-  assert(asked, 'nessun avviso beforeunload durante un invio');
+  assert(asked, 'no beforeunload warning during an upload');
   const ms = await waitGone(url, 3000);
-  assert(ms >= 0, 'link ancora valido 3 s dopo la chiusura della pagina');
-  console.log(`     link 410 ${ms} ms dopo la chiusura`);
+  assert(ms >= 0, 'link still valid 3 s after page closure');
+  console.log(`     link 410 ${ms} ms after closure`);
   await page.context().close();
 });
 
@@ -697,7 +697,7 @@ await test('without the DELETE the grace period closes the link', async () => {
   await page.setInputFiles('#file', src);
   await page.waitForSelector('#x-links:not([hidden])');
   const url = (await linkRows(page))[3].line;
-  // Senza l'annullamento esplicito (crash, DELETE perso): resta la chiusura dello stream e del PUT.
+  // Without explicit cancellation (crash, lost DELETE), only stream/PUT closure remains.
   await page.evaluate(() => {
     const f = window.fetch;
     window.__deletes = 0;
@@ -705,10 +705,10 @@ await test('without the DELETE the grace period closes the link', async () => {
   });
   await sleep(1500);
   await page.click('#x-cancel');
-  assert((await page.evaluate(() => window.__deletes)) === 1, 'Cancel senza DELETE');
+  assert((await page.evaluate(() => window.__deletes)) === 1, 'Cancel without DELETE');
   const ms = await waitGone(url, 30000);
-  assert(ms >= 0, 'link ancora valido dopo la tolleranza');
-  console.log(`     link 410 ${ms} ms dopo la chiusura dello stream, senza DELETE`);
+  assert(ms >= 0, 'link still valid after grace');
+  console.log(`     link 410 ${ms} ms after stream closure, without DELETE`);
   await page.context().close();
 });
 
@@ -723,8 +723,8 @@ await test('closing the page during the download stops the receiver', async () =
   await page.waitForFunction(() => document.getElementById('x-status').textContent === 'Sending to the receiver…', null, { timeout: 10000 });
   await page.close({ runBeforeUnload: false });
   const r = await Promise.race([rcv.done, sleep(8000).then(() => null)]);
-  assert(r, 'ricevente non interrotto entro 8 s');
-  assert(r.code !== 0, `ricevente uscito con 0: ${r.out}`);
+  assert(r, 'receiver not interrupted within 8 s');
+  assert(r.code !== 0, `receiver exited with 0: ${r.out}`);
   await page.context().close();
 });
 
@@ -736,10 +736,10 @@ await test('expired link reported to the browser sender', async () => {
   await page.waitForSelector('#x-links:not([hidden])');
   const url = (await linkRows(page))[3].line;
   const res = await waitResult(page, 20000);
-  assert(res.cls === 'result err' && res.text === 'No receiver started the download in time: the link is closed.', `esito ${JSON.stringify(res)}`);
+  assert(res.cls === 'result err' && res.text === 'No receiver started the download in time: the link is closed.', `outcome ${JSON.stringify(res)}`);
   const rp = await newPage();
   const rr = await rp.goto(url);
-  assert(rr.status() === 410 && (await rp.textContent('h2')) === 'Link expired', `ricevente dopo la scadenza ${rr.status()} ${await rp.textContent('h2')}`);
+  assert(rr.status() === 410 && (await rp.textContent('h2')) === 'Link expired', `receiver after expiry ${rr.status()} ${await rp.textContent('h2')}`);
   await rp.context().close();
   await page.screenshot({ path: path.join(OUT, 'upload-expired.png'), fullPage: true });
   noErrors(page, 'expired', PUT_FAILED);
@@ -758,14 +758,14 @@ await test('receiver gone reported to the browser sender', async () => {
   rcv.p.kill('SIGKILL');
   await rcv.done;
   const res = await waitResult(page, 20000);
-  assert(res.cls === 'result err' && res.text === 'The receiver disconnected or stopped downloading.', `esito ${JSON.stringify(res)}`);
+  assert(res.cls === 'result err' && res.text === 'The receiver disconnected or stopped downloading.', `outcome ${JSON.stringify(res)}`);
   await page.screenshot({ path: path.join(OUT, 'upload-receiver-gone.png'), fullPage: true });
   noErrors(page, 'receiver gone', PUT_FAILED);
   await page.context().close();
 });
 
-// Tolleranza del mittente (BASHT_SENDER_GRACE=8 su BASE_GRACE). La pagina del mittente passa da un
-// proxy che taglia le connessioni, come un telefono che perde la rete in secondo piano.
+// Sender grace (BASHT_SENDER_GRACE=8 on BASE_GRACE). Route the sender page through a proxy
+// that cuts connections, like a phone losing its network in the background.
 async function graceSender(px, name, size) {
   const src = mkfile(name, size);
   const page = await newPage();
@@ -797,7 +797,7 @@ await test('peer readiness follows sender foreground loss and recovery', async (
     });
     await peerBadge(s.page, 'x-ready', false);
     await peerBadge(receiver, 'dl-ready', false);
-    assert(await receiver.isDisabled('#dl button'), 'mittente assente ma Download abilitato');
+    assert(await receiver.isDisabled('#dl button'), 'sender absent but Download enabled');
     await s.page.evaluate(() => {
       window.__visible = true;
       document.dispatchEvent(new Event('visibilitychange'));
@@ -824,9 +824,9 @@ await test('sender grace: the page reconnects and a curl receiver gets the file'
     const rcv = sh(`curl -sS -f -OJ "${s.direct}"`, path.join(OUT, 'grace1'));
     const r = await rcv.done;
     assert(r.code === 0, `curl ${r.code} ${r.err}`);
-    assert(sha(fs.readFileSync(path.join(OUT, 'grace1', 'grace1.bin'))) === sha(fs.readFileSync(s.src)), 'file ricevuto diverso');
+    assert(sha(fs.readFileSync(path.join(OUT, 'grace1', 'grace1.bin'))) === sha(fs.readFileSync(s.src)), 'received file mismatch');
     const res = await waitResult(s.page, 20000);
-    assert(res.cls === 'result ok' && /^Done: the receiver got the whole file/.test(res.text), `esito ${JSON.stringify(res)}`);
+    assert(res.cls === 'result ok' && /^Done: the receiver got the whole file/.test(res.text), `outcome ${JSON.stringify(res)}`);
     noErrors(s.page, 'grace reconnect', PUT_FAILED);
   } finally { px.close(); if (s) await s.page.context().close().catch(() => {}); }
 });
@@ -837,30 +837,30 @@ await test('sender grace: a browser receiver pressing Download while the sender 
   try {
     s = await graceSender(px, 'grace2.bin', 24 << 20);
     await sleep(1000);
-    // Nessun nuovo collegamento: il mittente resta assente finché il ricevente non ha premuto Download.
+    // No new connections: keep the sender absent until the receiver attempts Download.
     px.block = true;
     px.sever();
     rp = await newPage();
     let away = false;
     for (let i = 0; i < 40 && !away; i++) {
       const resp = await rp.goto(s.direct);
-      assert(resp.status() === 200, `pagina ${resp.status()}`);
+      assert(resp.status() === 200, `page ${resp.status()}`);
       away = await rp.isVisible('#dl-away');
       if (!away) await sleep(500);
     }
-    assert(away, 'la pagina di download non avvisa che il mittente è assente');
-    assert(await rp.isDisabled('#dl button'), 'il download è disponibile con il mittente assente');
-    assert(/link has not been used/.test(await rp.textContent('#dl-status')), 'lo stato non spiega che il link resta intatto');
-    assert((await fetch(s.direct, { headers: { Accept: 'text/html' } })).status === 200, 'l’attesa ha consumato il link');
+    assert(away, 'download page does not warn that the sender is absent');
+    assert(await rp.isDisabled('#dl button'), 'download available while sender is absent');
+    assert(/link has not been used/.test(await rp.textContent('#dl-status')), 'status does not explain that the link stays intact');
+    assert((await fetch(s.direct, { headers: { Accept: 'text/html' } })).status === 200, 'waiting consumed the link');
     px.block = false;
     await rp.waitForFunction(() => !document.querySelector('#dl button').disabled, null, { timeout: 15000 });
-    assert(!(await rp.isVisible('#dl-away')), 'lo stato non si aggiorna al ritorno del mittente');
+    assert(!(await rp.isVisible('#dl-away')), 'status does not update when sender returns');
     const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: 30000 }), rp.click('#dl button')]);
     const saved = path.join(OUT, 'recv-grace2.bin');
     await dl.saveAs(saved);
-    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file ricevuto diverso');
+    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'received file mismatch');
     const res = await waitResult(s.page, 20000);
-    assert(res.cls === 'result ok', `esito ${JSON.stringify(res)}`);
+    assert(res.cls === 'result ok', `outcome ${JSON.stringify(res)}`);
   } finally {
     px.close();
     for (const p of [rp, s && s.page]) if (p) await p.context().close().catch(() => {});
@@ -878,18 +878,18 @@ await test('sender grace: the link closes if the sender does not come back in ti
     rp = await newPage();
     await rp.goto(s.direct);
     await rp.waitForFunction(() => /Sender stopped/.test(document.getElementById('dl-status').textContent), null, { timeout: 30000 });
-    assert(await rp.isDisabled('#dl button'), 'il pulsante resta attivo dopo la scadenza');
-    assert((await waitGone(s.direct, 30000)) >= 0, 'il server non ha fatto scadere la tolleranza');
+    assert(await rp.isDisabled('#dl button'), 'button remains enabled after expiry');
+    assert((await waitGone(s.direct, 30000)) >= 0, 'server did not expire grace');
     px.block = false;
     const res = await waitResult(s.page, 15000);
-    assert(res.cls === 'result err' && /no longer works/.test(res.text), `esito ${JSON.stringify(res)}`);
+    assert(res.cls === 'result err' && /no longer works/.test(res.text), `outcome ${JSON.stringify(res)}`);
     let gone = null;
     for (let i = 0; i < 40 && !gone; i++) {
       const resp = await rp.goto(s.direct);
       if (resp.status() === 410) gone = await rp.textContent('h2');
       else await sleep(500);
     }
-    assert(gone === 'Sender stopped', `pagina dopo la scadenza: ${gone}`);
+    assert(gone === 'Sender stopped', `page after expiry: ${gone}`);
   } finally {
     px.close();
     for (const p of [rp, s && s.page]) if (p) await p.context().close().catch(() => {});
@@ -914,11 +914,11 @@ await test('native sharing: return guidance, cancellation and Copy fallback', as
     await page.setInputFiles('#file', src);
     await page.waitForSelector('#x-links:not([hidden])');
     const url = (await linkRows(page))[3].line;
-    assert(await page.isVisible('#x-share'), 'pulsante di condivisione nativa assente');
+    assert(await page.isVisible('#x-share'), 'native sharing button missing');
     const shareBox = await page.locator('#x-share').boundingBox();
-    assert(shareBox.height >= 44 && shareBox.height <= 48, `pulsante Link su più righe: ${shareBox.height}`);
-    assert(!(await page.isVisible('#x-copy')), 'azioni di condivisione duplicate sul telefono');
-    assert(/After sharing, return to this browser page/.test(await page.textContent('#x-share-hint')), 'istruzioni di ritorno assenti');
+    assert(shareBox.height >= 44 && shareBox.height <= 48, `Link button wraps: ${shareBox.height}`);
+    assert(!(await page.isVisible('#x-copy')), 'duplicate sharing actions on mobile');
+    assert(/After sharing, return to this browser page/.test(await page.textContent('#x-share-hint')), 'return instructions missing');
     const bad = await layoutChecks(page);
     assert(bad.length === 0, bad.join('; '));
     await page.locator('main > section').first().screenshot({ path: path.join(OUT, 'share-native-390.png') });
@@ -926,22 +926,22 @@ await test('native sharing: return guidance, cancellation and Copy fallback', as
       await page.evaluate((mode) => { window.__shareMode = mode; }, mode);
       await page.click('#x-share');
       await page.waitForFunction(() => !document.getElementById('x-share').disabled);
-      assert(await page.isVisible('#x-links'), 'la condivisione ha annullato il link');
+      assert(await page.isVisible('#x-links'), 'sharing cancelled the link');
       if (mode === 'fail') {
-        assert(/Use Copy/.test(await page.textContent('#x-share-status')), 'fallback Copy assente');
-        assert(await page.isVisible('#x-copy') && !(await page.isVisible('#x-share')), 'fallback Copy non sostituisce Share');
+        assert(/Use Copy/.test(await page.textContent('#x-share-status')), 'Copy fallback missing');
+        assert(await page.isVisible('#x-copy') && !(await page.isVisible('#x-share')), 'Copy fallback does not replace Share');
         await page.click('#x-copy');
         await page.waitForFunction(() => document.getElementById('x-copy').textContent === 'Copied');
-        assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'fallback Copy diverso dal link pubblico');
+        assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'Copy fallback differs from public link');
       }
     }
     const shares = await page.evaluate(() => window.__shares);
-    assert(shares.length === 3 && shares.every((s) => s.url === url && !s.files), `condivisione ${JSON.stringify(shares)}`);
+    assert(shares.length === 3 && shares.every((s) => s.url === url && !s.files), `sharing ${JSON.stringify(shares)}`);
     const recv = path.join(OUT, 'recv-share');
     const r = await sh(`curl -sS -f -OJ "${url}"`, recv).done;
-    assert(r.code === 0, `download dopo la condivisione: ${r.err}`);
-    assert(sha(fs.readFileSync(path.join(recv, 'share.bin'))) === sha(fs.readFileSync(src)), 'file dopo la condivisione diverso');
-    assert((await waitResult(page)).cls === 'result ok', 'invio dopo la condivisione fallito');
+    assert(r.code === 0, `download after sharing: ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(recv, 'share.bin'))) === sha(fs.readFileSync(src)), 'file mismatch after sharing');
+    assert((await waitResult(page)).cls === 'result ok', 'upload failed after sharing');
     noErrors(page, 'share', PUT_FAILED);
   } finally { await page.context().close(); }
 });
@@ -981,15 +981,15 @@ await test('foreground return recovers a silent stalled connection', async () =>
     await page.evaluate(() => { window.__xhr.onerror = null; });
     px.sever();
     await sleep(1500);
-    assert((await page.textContent('#x-status')) === WAITING, 'la simulazione ha notificato la perdita alla UI');
+    assert((await page.textContent('#x-status')) === WAITING, 'simulation notified the UI of connection loss');
     const upload = page.waitForRequest((r) => r.method() === 'PUT' && r.url() === url);
     await page.evaluate(() => window.dispatchEvent(new Event('pageshow')));
     await upload;
     const recv = path.join(OUT, 'recv-silent');
     const r = await sh(`curl -sS -f -OJ "${direct}"`, recv).done;
-    assert(r.code === 0, `download dopo il ritorno: ${r.err}`);
-    assert(sha(fs.readFileSync(path.join(recv, 'silent.bin'))) === sha(fs.readFileSync(src)), 'file dopo il ritorno diverso');
-    assert((await waitResult(page)).cls === 'result ok', 'il ritorno in primo piano non ha recuperato la sessione');
+    assert(r.code === 0, `download after return: ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(recv, 'silent.bin'))) === sha(fs.readFileSync(src)), 'file mismatch after return');
+    assert((await waitResult(page)).cls === 'result ok', 'foreground return did not recover the session');
     noErrors(page, 'silent resume', PUT_FAILED);
   } finally { px.close(); await page.context().close(); }
 });
@@ -1001,11 +1001,11 @@ await test('native sharing unavailable keeps Copy usable', async () => {
     await page.goto(BASE + '/');
     await page.setInputFiles('#file', mkfile('copy-only.bin', 100));
     await page.waitForSelector('#x-links:not([hidden])');
-    assert(!(await page.isVisible('#x-share')), 'condivisione mostrata senza supporto');
+    assert(!(await page.isVisible('#x-share')), 'sharing shown without support');
     const url = (await linkRows(page))[3].line;
     await page.click('[data-copy="x-c3"]');
     await page.waitForFunction(() => document.querySelector('[data-copy="x-c3"]').textContent === 'Copied');
-    assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'fallback di copia non funzionante');
+    assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'copy fallback not working');
     await page.click('#x-cancel');
   } finally { await page.context().close(); }
 });
@@ -1029,12 +1029,12 @@ await test('pipe upload landing shows unknown size', async () => {
     const m = /\| direct +\| (\S+) +\|/.exec(up.out);
     if (m) url = m[1];
   }
-  assert(url, `tabella curl senza riga direct: ${up.out}`);
+  assert(url, `curl table missing direct row: ${up.out}`);
   const page = await newPage();
   const resp = await page.goto(url);
-  assert(resp.status() === 200, `pagina ${resp.status()}`);
+  assert(resp.status() === 200, `page ${resp.status()}`);
   const info = await page.$$eval('.file dd', (d) => d.map((x) => x.textContent));
-  assert(info[0] === 'stream.bin' && info[1] === 'unknown (streamed by the sender)', `dati ${info}`);
+  assert(info[0] === 'stream.bin' && info[1] === 'unknown (streamed by the sender)', `details ${info}`);
   let dl;
   try {
     [dl] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }), page.click('#dl button')]);
@@ -1044,20 +1044,20 @@ await test('pipe upload landing shows unknown size', async () => {
   }
   const saved = path.join(OUT, 'recv-stream.bin');
   await dl.saveAs(saved);
-  assert(fs.statSync(saved).size === 100000, `dimensione ${fs.statSync(saved).size}`);
+  assert(fs.statSync(saved).size === 100000, `size ${fs.statSync(saved).size}`);
   const r = await up.done;
-  assert(r.code === 0 && /OK: download completato, 100000 byte/.test(r.out), `mittente ${r.code} ${r.out.slice(-200)}`);
+  assert(r.code === 0 && /OK: download completed, 100000 bytes/.test(r.out), `sender ${r.code} ${r.out.slice(-200)}`);
   noErrors(page, 'pipe');
   await page.context().close();
 });
 
-// Server con Basic auth (BASE_AUTH, utente u, password p): senza credenziali la pagina lo dice,
-// con le credenziali del browser l'invio funziona (il PUT usa il token, non le credenziali).
+// Basic auth server (BASE_AUTH, user u, password p): the page reports missing credentials;
+// browser credentials allow uploads (PUT uses the token, not the credentials).
 {
   const BA = BASE_AUTH;
   await test('login required for the browser sender', async () => {
     const page = await newPage();
-    // Il browser chiede utente e password con la sua finestra; qui l'utente preme Annulla.
+    // The browser prompts for credentials in its dialog; simulate the user cancelling.
     const cdp = await page.context().newCDPSession(page);
     await cdp.send('Fetch.enable', { handleAuthRequests: true, patterns: [{ urlPattern: '*' }] });
     let asked = 0;
@@ -1066,8 +1066,8 @@ await test('pipe upload landing shows unknown size', async () => {
     await page.goto(BA + '/');
     await page.setInputFiles('#file', mkfile('auth-none.bin', 1000));
     const res = await waitResult(page, 10000);
-    assert(asked === 1, `richieste di login ${asked}`);
-    assert(res.cls === 'result err' && res.text === 'This server requires a login to send files.', `esito ${JSON.stringify(res)}`);
+    assert(asked === 1, `login requests ${asked}`);
+    assert(res.cls === 'result err' && res.text === 'This server requires a login to send files.', `outcome ${JSON.stringify(res)}`);
     noErrors(page, 'auth none', /status of 401/);
     await page.context().close();
   });
@@ -1081,10 +1081,10 @@ await test('pipe upload landing shows unknown size', async () => {
     const curl = (await linkRows(page))[0].line;
     const dir = path.join(OUT, 'recv-auth');
     const r = await sh(curl, dir).done;
-    assert(r.code === 0, `curl ricevente ${r.code} ${r.err}`);
-    assert(sha(fs.readFileSync(path.join(dir, 'auth-ok.bin'))) === sha(fs.readFileSync(src)), 'contenuto diverso');
+    assert(r.code === 0, `curl receiver ${r.code} ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(dir, 'auth-ok.bin'))) === sha(fs.readFileSync(src)), 'content mismatch');
     const res = await waitResult(page);
-    assert(res.cls === 'result ok', `esito ${JSON.stringify(res)}`);
+    assert(res.cls === 'result ok', `outcome ${JSON.stringify(res)}`);
     noErrors(page, 'auth ok');
     await page.context().close();
   });

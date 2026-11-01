@@ -1,6 +1,6 @@
-# Build statico (CGO_ENABLED=0) e runtime senza shell. Immagini pinnate per tag e digest (D14).
-# Il builder gira sulla piattaforma di build e compila in modo incrociato per TARGETOS/TARGETARCH:
-# l'immagine multi-architettura (amd64, arm64) non richiede emulazione.
+# Static build (CGO_ENABLED=0) and shell-free runtime. Images pinned by tag and digest (D14).
+# Builder runs on the build platform and cross-compiles for TARGETOS/TARGETARCH:
+# the multi-architecture image (amd64, arm64) needs no emulation.
 FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS builder
 ARG TARGETOS
 ARG TARGETARCH
@@ -14,6 +14,6 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c
 COPY --from=builder /out/bashtransfer /bashtransfer
 USER nonroot:nonroot
 EXPOSE 8080
-# Runtime senza shell né curl: il binario si controlla da solo (GET / su BASHT_LISTEN, solo loopback).
+# Runtime has no shell or curl: the binary checks itself (GET / on BASHT_LISTEN, loopback only).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD ["/bashtransfer", "-healthcheck"]
 ENTRYPOINT ["/bashtransfer"]

@@ -1,10 +1,10 @@
-# Test e pubblicazione dell'immagine su GitHub Container Registry (ghcr.io/<owner>/<repo>).
-#   pull request:   test (vet, race, e2e) e ui (Playwright); l'immagine viene costruita ma non pubblicata.
-#   push su main:   test, poi immagine con tag main e sha-<commit>.
-#   tag vX.Y.Z:     test, poi immagine con tag X.Y.Z, X.Y e latest.
-# Immagine multi-architettura (linux/amd64, linux/arm64) con cross-compilazione Go, SBOM e
-# provenance. Il token è GITHUB_TOKEN: nessun secret da configurare.
-# Action fissate per commit SHA (versione nel commento): aggiornarle insieme, SHA e commento.
+# Test and publish the image to GitHub Container Registry (ghcr.io/<owner>/<repo>).
+#   pull request:   test (vet, race, e2e) and ui (Playwright); build but do not publish the image.
+#   push to main:   test, then image tagged main and sha-<commit>.
+#   tag vX.Y.Z:     test, then image tagged X.Y.Z, X.Y and latest.
+# Multi-architecture image (linux/amd64, linux/arm64) with Go cross-compilation, SBOM and
+# provenance. Uses GITHUB_TOKEN: no secrets to configure.
+# Actions are pinned to commit SHAs (version in comments): update SHA and comment together.
 name: image
 
 on:
@@ -23,7 +23,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  # Allineata al builder del Dockerfile.
+  # Matches the Dockerfile builder.
   GO_VERSION: "1.27.3"
 
 jobs:
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
-          # Nessuna dipendenza esterna (niente go.sum): la cache dei moduli non serve.
+          # No external dependencies (no go.sum): module caching is unnecessary.
           cache: false
 
       - name: gofmt
@@ -48,9 +48,9 @@ jobs:
       - name: test (race)
         run: go test -race -count=1 ./...
 
-      # aria2c esercita la terza riga dei comandi stampati, busybox il wget dei sistemi minimali;
-      # curl, wget e python3 sono già sul runner. Alla fine l'e2e esegue scripts/invariant.py
-      # (la sorgente non viene mai alterata), che con BASHT_INV_REQUIRE fallisce se ne manca uno.
+      # aria2c exercises the third printed row; busybox tests wget on minimal systems.
+      # curl, wget and python3 are already available. The e2e ends with scripts/invariant.py
+      # (source preservation), which fails on missing tools when BASHT_INV_REQUIRE is set.
       - name: e2e
         env:
           BASHT_INV_REQUIRE: curl,wget,aria2c,busybox
@@ -59,10 +59,10 @@ jobs:
           sudo apt-get install -y -qq aria2 busybox
           bash scripts/e2e.sh
 
-  # Test frontend con Playwright (Chromium headless, playwright-core fissato in scripts/ui): pagine
-  # web, invio dal browser e download dalla pagina, con server diretti e attraverso Apache 2.4 in
-  # h2c (immagine httpd fissata per digest in scripts/ui/run.sh). Screenshot e file come artifact
-  # se un test fallisce.
+  # Frontend tests with Playwright (headless Chromium, playwright-core pinned in scripts/ui):
+  # pages, browser upload and page download, directly and through Apache 2.4/h2c
+  # (httpd image pinned by digest in scripts/ui/run.sh). Preserve screenshots and files as
+  # artifacts if a test fails.
   ui:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -84,7 +84,7 @@ jobs:
           npm ci --no-audit --no-fund
           npx playwright-core install --with-deps --no-shell chromium
 
-      - name: ui (diretto)
+      - name: ui (direct)
         env:
           BASHT_UI_OUT: ${{ runner.temp }}/ui
         run: bash scripts/ui/run.sh direct
@@ -131,12 +131,12 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=branch
             type=sha,format=short
-          # latest solo per i tag di release, non per ogni push su main.
+          # latest only for release tags, not every push to main.
           flavor: |
             latest=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
             org.opencontainers.image.title=bashtransfer
-            org.opencontainers.image.description=Relay di file in streaming: curl -T in invio, curl/wget/aria2c in ricezione, nessun salvataggio su disco.
+            org.opencontainers.image.description=Streaming file relay: send with curl -T, receive with curl/wget/aria2c, no disk storage.
 
       - name: build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

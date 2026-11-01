@@ -1,112 +1,139 @@
-# Architettura
+# Architecture
 
-bashtransfer è un relay HTTP/1.1: il body di un `PUT` (mittente) viene copiato nella risposta di un `GET` (ricevente) mentre arriva, senza disco e senza buffer oltre quello di copia. Questo documento descrive come funziona il codice; uso, configurazione e log sono nel [README](../README.md), il deploy in [operazioni.md](operazioni.md).
+bashtransfer is a streaming HTTP relay: the body of a `PUT` (sender) is copied into the download response (receiver) as it arrives. It does not keep files on disk or in a RAM store: it keeps only metadata and bounded buffers in transit. It supports HTTP/1.1 and unencrypted HTTP/2 towards the backend (h2c, used by the Apache proxy). This document describes how the code works; usage, configuration and logs are in the [README](../README.md), deployment in [operazioni.md](operazioni.md), and guidance for agents in [AGENTS.md](../AGENTS.md).
 
-## Componenti
+## Components
 
 ```
 client ──TLS──▶ nginx (stream, :443) ──TCP──▶ app (:8080, Go net/http)
                                                ├─ server.handler   upload / download / usage / reserve / cancel
-                                               ├─ server.pages     pagine HTML (home, download, messaggi)
-                                               ├─ relay.Registry   sessioni, slug, tombstone
-                                               └─ relay.Copier     copia con buffer riusabili
+                                               ├─ server.pages     HTML pages (home, download, messages)
+                                               ├─ relay.Registry   sessions, slugs, tombstones
+                                               └─ relay.Copier     copy with reusable buffers
 ```
 
-| Pacchetto | File | Responsabilità |
+| Package | File | Responsibility |
 |---|---|---|
-| `cmd/bashtransfer` | `main.go` | configurazione, logger, `http.Server`, segnali e arresto ordinato, `-healthcheck` |
-| `internal/config` | `config.go` | lettura e validazione delle variabili `BASHT_*` |
-| `internal/slug` | `slug.go` | slug di 10 caratteri `[0-9A-Za-z]` da `crypto/rand`, senza bias modulo (~59 bit) |
-| `internal/relay` | `registry.go` | stato delle sessioni: unico punto che lo muta, sotto un mutex |
-| `internal/relay` | `copy.go` | `Copier` (pool di buffer, flush per scrittura), `IdleReader` (inattività e interruzione del mittente) |
-| `internal/server` | `handler.go` | routing, upload, download, gestione di `Range`, prenotazione e annullamento degli invii dal browser, log |
-| `internal/server` | `pages.go`, `pages/*.html` | pagine per i browser (home con l'invio, pagina di download, messaggi di errore), incorporate con `embed`, CSP senza risorse esterne |
-| `internal/server` | `receiver.go` | adattatore della risposta del ricevente: header, scadenza di scrittura |
-| `internal/server` | `peer*.go` | rilevamento della caduta di un mittente in attesa (Linux, `ppoll` con `POLLRDHUP`) |
-| `internal/server` | `name.go`, `auth.go` | sanitizzazione del nome, Basic auth a tempo costante |
+| `cmd/bashtransfer` | `main.go` | configuration, logger, `http.Server`, signals and graceful shutdown, `-healthcheck` |
+| `internal/config` | `config.go` | reading and validating the `BASHT_*` variables |
+| `internal/slug` | `slug.go` | 10-character slugs `[0-9A-Za-z]` from `crypto/rand`, without modulo bias (~59 bits) |
+| `internal/relay` | `registry.go` | session state: the only place that mutates it, under a mutex |
+| `internal/relay` | `copy.go` | `Copier` (buffer pool, flush per write), `IdleReader` (idle timeout and sender interruption) |
+| `internal/server` | `handler.go` | routing, upload, download, `Range` handling, reservation and cancellation of browser uploads, logging |
+| `internal/server` | `pages.go`, `pages/*.html` | pages for browsers (home with the upload form, download page, error messages), embedded with `embed`, CSP with no external resources |
+| `internal/server` | `receiver.go` | adapter for the receiver's response: headers, write deadline |
+| `internal/server` | `peer*.go` | detection of a waiting sender going away (Linux, `ppoll` with `POLLRDHUP`) |
+| `internal/server` | `name.go`, `auth.go` | file name sanitization, constant-time Basic auth |
 
-nginx usa il modulo `stream` (proxy TCP con TLS), non il proxy HTTP: l'app risponde al `PUT` con i comandi prima di leggere il body, e il proxy HTTP di nginx in quel caso interrompe l'upload.
+nginx uses the `stream` module (TCP proxy with TLS), not the HTTP proxy: the app answers the `PUT` with the commands before reading the body, and nginx's HTTP proxy would interrupt the upload in that case.
 
-## Ciclo di vita di una sessione
+## Frontend
+
+The frontend uses vanilla HTML, CSS and JavaScript, with no framework, bundler or Node.js service in production. `pages.go` loads the files in `internal/server/pages/` with `go:embed` and renders them with `html/template`, escaping the server's data:
+
+- `layout.html`: common structure, responsive CSS, color variables and copy script;
+- `home.html`: file selection, sharing, terminal commands and ZIP, sender status and progress;
+- `download.html`: file information, connection confirmation and download form;
+- `message.html`: unknown, used, expired and other link errors.
+
+Scripts, styles and the icon are inline; the CSP forbids external resources and limits forms and JavaScript requests to the required destinations. The theme follows `prefers-color-scheme`; roles and status labels reuse the same style and shared colors. The browser uses `fetch` for checks and polling, `XMLHttpRequest` for the body, and an NDJSON stream reader for events and outcome. Web Share shares only the link, with a fallback to copying.
+
+Rendering produces ordinary HTML pages, not a SPA with a client-side router. A template change requires a new build and restarting the app. Node.js and Playwright belong exclusively to the browser suite in `scripts/ui/`.
+
+## Session lifecycle
 
 ```
-            PUT                        GET (Claim)                    copia finita
+            PUT                        GET (Claim)                    copy finished
   ────────────▶  waiting  ─────────────────────────▶  relaying  ─────────────────▶  finished
                    │  │                                  │                          (tombstone 410)
-   WAIT_TIMEOUT o  │  │ il mittente chiude               │ errore (mittente, ricevente,
-   arresto server  │  │ (POLLRDHUP, ogni 1 s)            │ inattività, lunghezza)
+   WAIT_TIMEOUT or │  │ the sender closes                │ error (sender, receiver,
+   server shutdown │  │ (POLLRDHUP, every 1 s)           │ idle, length)
                    ▼  ▼                                  ▼
                expired / sender_gone                  aborted
                (tombstone 410)                        (tombstone 410)
 ```
 
-1. **Upload** (`handler.upload`): autorizzazione, `EnableFullDuplex` (risposta prima della lettura del body), `Registry.Create` (slug unico, timer di attesa), `100 Continue` se richiesto, la tabella dei comandi (curl, wget, aria2c, direct), flush. Poi l'handler attende in `select`:
-   - `Attached()`: un ricevente ha reclamato lo slug, inizia la copia;
-   - `Expired()`: timer di attesa scaduto o arresto del server;
-   - `r.Context().Done()`: connessione chiusa da net/http;
-   - ticker del controllo del mittente (solo Linux): `peerClosed` vede FIN o RST anche con byte del body non letti nel buffer del kernel.
-2. **Download** (`handler.download`): slug valido, nessun `Range` da un byte > 0, `Registry.Claim` (riesce una volta sola). L'handler del ricevente non scrive nulla: consegna il proprio `ResponseWriter` al mittente attraverso il canale `attached` e attende `Finished()`. Se il client del ricevente se ne va, registra `ErrReceiverGone` con `Abort` e continua ad attendere `Finished()`: il `ResponseWriter` resta valido finché il mittente lo usa.
-3. **Relay**: la goroutine del mittente scrive header e body nella risposta del ricevente (`responseReceiver`), con flush dopo ogni scrittura. Con lunghezza nota la risposta ha `Content-Length`; altrimenti è chunked.
-4. **Fine**: il mittente chiama sempre `Registry.Finish` (defer), che rimuove la sessione, lascia una tombstone (410 per 24 ore, al massimo 100000) e chiude `Finished()`. Il ricevente, sbloccato, termina la risposta; se la sessione ha un errore e la risposta è iniziata, interrompe la connessione senza chunk finale (`panic(http.ErrAbortHandler)`), così il client vede un errore invece di un file troncato con esito positivo. Il mittente riceve in fondo alla propria risposta la riga `OK` (tutti i byte scritti verso il ricevente) o `ERRORE` (byte consegnati e motivo, oppure scadenza senza ricevente). In caso di errore, su HTTP/1 la risposta al mittente si chiude in scrittura, attende `abortLinger` (500 ms, perché curl legga la riga) e poi viene interrotta, così curl esce con codice 18; su HTTP/2 lo stream termina regolarmente (un reset farebbe aggiungere ad Apache una sua pagina 502).
+1. **Upload** (`handler.upload`): authorization, `EnableFullDuplex` (response before reading the body), `Registry.Create` (unique slug, wait timer), `100 Continue` if requested, the command table (curl, wget, aria2c, direct), flush. Then the handler waits in `select`:
+   - `Attached()`: a receiver has claimed the slug, the copy starts;
+   - `Expired()`: wait timer expired or server shutdown;
+   - `r.Context().Done()`: connection closed by net/http;
+   - sender check ticker (Linux only): `peerClosed` sees FIN or RST even when body bytes remain unread in the kernel buffer.
+2. **Download** (`handler.download`): valid slug, no `Range` starting from a byte > 0, `Registry.Claim` (succeeds only once). The receiver's handler writes nothing: it hands its own `ResponseWriter` to the sender through the `attached` channel and waits for `Finished()`. If the receiver's client leaves, it records `ErrReceiverGone` with `Abort` and keeps waiting for `Finished()`: the `ResponseWriter` stays valid as long as the sender uses it.
+3. **Relay**: the sender's goroutine writes headers and body into the receiver's response (`responseReceiver`), flushing after each write. With a known length the response has `Content-Length`; otherwise it is chunked.
+4. **End**: the sender always calls `Registry.Finish` (defer), which removes the session, leaves a tombstone (410 for 24 hours, at most 100000) and closes `Finished()`. The receiver, unblocked, ends its response; if the session has an error and the response has started, it aborts the connection without a final chunk (`panic(http.ErrAbortHandler)`), so the client sees an error instead of a truncated file reported as successful. At the end of its response, the sender receives the line `OK` (all bytes written to the receiver) or `ERRORE` (the fixed Italian marker, kept unchanged for compatibility: bytes delivered and the reason, or expiry without a receiver). On error, over HTTP/1 the sender's response is closed for writing, waits `abortLinger` (500 ms, so curl can read the line), and is then interrupted, so curl exits with code 18; over HTTP/2 the stream ends normally (a reset would make Apache add its own 502 page).
 
-### Invio dal browser
+### Sending from the browser
 
-La pagina non può usare la risposta del `PUT` come curl: su HTTP/1 il browser la legge solo dopo aver inviato tutto il body, e la risposta di un trasferimento interrotto si perde nel reset della connessione. L'invio usa quindi due richieste:
+The page cannot use the `PUT` response the way curl does: over HTTP/1 the browser reads it only after sending the whole body, and the response to an interrupted transfer is lost when the connection is reset. The upload therefore uses two requests:
 
-1. **Prenotazione** (`handler.reserve`, `POST /` con JSON `{name, size}`): `Registry.Reserve` crea una sessione con un token (128 bit) e un timer di aggancio di 30 secondi, senza mittente. La risposta è uno stream NDJSON che resta aperto: prima riga link, token e comandi; poi `waiting`, `attached`, `progress` (byte consegnati, `Session.Delivered`, ogni 500 ms) e l'esito (`Session.Result`). Lo stream scrive almeno una riga al secondo: è anche il modo in cui il server si accorge che la pagina è chiusa (dietro Apache, solo dopo alcune scritture fallite).
-2. **Body** (`handler.upload` con `X-Bashtransfer-Token`): `Registry.Bind` lega il `PUT` alla prenotazione (token a tempo costante, una volta sola) e da lì il flusso è quello di curl. La lunghezza deve essere quella prenotata: il ricevente la vede già in `Content-Length`.
+1. **Reservation** (`handler.reserve`, `POST /` with JSON `{name, size}`): `Registry.Reserve` creates a session with a token (128 bits) and a 30-second attach timer, with no sender yet. The response is an NDJSON stream that stays open: first line link, token and commands; then `waiting`, `attached`, `progress` (bytes delivered, `Session.Delivered`, every 500 ms) and the outcome (`Session.Result`). The stream writes at least one line per second: this is also how the server notices that the page has closed (behind Apache, only after a few failed writes).
+2. **Body** (`handler.upload` with `X-Bashtransfer-Token`): `Registry.BindDetachable` binds the `PUT` to the reservation with a constant-time token comparison; the attachment can be replaced before the relay, not during the copy. From there the flow is the same as curl's. The length must be the reserved one: the receiver already sees it in `Content-Length`. The browser starts the `PUT` immediately, but the server does not read the file before the receiver's claim.
 
-La sessione termina per esito del relay, `DELETE /<slug>` con il token (Cancel o chiusura vera della pagina), scadenza dell'attesa o mancato `PUT` entro 30 secondi. Con `BASHT_SENDER_GRACE` (default 120 secondi), un mittente assente prima del relay conserva la sessione per un riaggancio: si conservano solo metadati, mai il file.
+The session ends with the relay outcome, `DELETE /<slug>` with the token (Cancel or the page really closing), expiry of the wait, or no `PUT` within 30 seconds. With `BASHT_SENDER_GRACE` (default 120 seconds), a sender absent before the relay keeps the session for a reattach: only metadata is kept, never the file.
 
-La UI negozia `foreground` nella prenotazione e invia piccole conferme di presenza ogni cinque secondi (`POST /<slug>` autenticato dal token). Passare in secondo piano, o non confermare la presenza per 15 secondi, stacca il body in attesa e avvia la tolleranza. Lo stream di avanzamento è indipendente: perderlo da solo non interrompe un upload sano. I client senza presenza mantengono il comportamento precedente dello stream.
+The UI negotiates `foreground` in the reservation and sends small presence confirmations every five seconds (`POST /<slug>`, authenticated by the token). Moving to the background, or not confirming presence for 15 seconds, detaches the waiting body and starts the grace period. The progress stream is independent: losing it alone does not interrupt a healthy upload. Clients without presence keep the previous stream behavior.
 
-Al ritorno in primo piano `Registry.Resume` con `rebind` stacca il vecchio body prima del relay; `BeginRelay` rende atomici l'inizio della copia e la sostituzione del mittente. Se il relay è già iniziato, lo stream ripreso dichiara `started` e non viene reinviato il file. Non è prevista ripresa dei byte dopo una caduta del body.
+On returning to the foreground, `Registry.Resume` with `rebind` detaches the old body before the relay; `BeginRelay` makes the start of the copy and the sender replacement atomic. If the relay has already started, the resumed stream reports `started` and the file is not sent again. Byte resumption after a body drop is not supported.
 
-Il ricevente legge `GET /<slug>?status=1` senza reclamare la sessione. Il browser abilita Download solo con il mittente disponibile; `ClaimReady` verifica nuovamente la disponibilità sotto lock, lasciando intatto il link in caso di assenza. I riceventi da terminale continuano a poter reclamare una sessione e attendere il mittente.
+The receiver reads `GET /<slug>?status=1` without claiming the session. The UI enables Download only after a recent connection confirmation; `ClaimReady` rechecks the sender's availability under lock, leaving the link intact if the sender is absent. Terminal receivers can still claim a session and wait for the sender.
 
-Il link aperto in un browser (`Accept: text/html`) o da un programma di anteprima (User-Agent di chat, posta, Office) dà la pagina di download (`handler.landing`, `Registry.Peek`: non reclama lo slug). Il pulsante della pagina fa un `POST /<slug>`, gestito come il `GET` di curl.
+A link opened in a browser (`Accept: text/html`) or by a preview program (User-Agent of chat, mail or Office apps) returns the download page (`handler.landing`, `Registry.Peek`: does not claim the slug). The page's button sends a `POST /<slug>`, handled like curl's `GET`.
 
-## Concorrenza
+### Peer readiness
 
-- **Una goroutine scrive al ricevente**: quella del mittente. L'handler del ricevente tocca il `ResponseWriter` solo dopo `Finished()`, la cui chiusura dà l'ordinamento happens-before (anche per il campo `started`).
-- **Stato della sessione** (`claimed`, `err`, mappa delle sessioni, tombstone) protetto da `Registry.mu`. `Slug`, `ID`, `Name`, `Length`, `Created` sono immutabili.
-- **Canali**: `attached` (buffer 1, un solo invio sotto lock in `Claim`), `expired` (chiuso una volta sotto lock), `finished` (chiuso una volta con `sync.Once`), `aborted` (chiuso una volta sotto lock alla prima `Abort`). Nessun invio bloccante sotto lock.
-- **Interruzione del relay**: durante la copia una goroutine attende `Aborted()`; alla disconnessione o a Cancel, imposta scadenze passate sia sulla lettura dal mittente (`IdleReader.Stop`) sia sulla scrittura al ricevente. Anche un ricevente connesso che non legge viene interrotto subito, senza attendere il timeout di inattività. Per questo la risposta al mittente ha `Connection: close`.
-- **Scadenze**: lettura del mittente rinnovata a ogni `Read` (`BASHT_IDLE_TIMEOUT`), scrittura al ricevente rinnovata a ogni `Write` (stesso valore) e rimossa a fine risposta, perché la connessione del ricevente può essere riusata (keep-alive). I timer di aggancio e tolleranza sono associati a una generazione: un callback già in coda non può terminare un aggancio successivo.
-- **Errori di flush**: anche un errore nell'ultimo flush verso il ricevente viene propagato come `receiver_gone`, anziché dichiarare `OK` solo perché `Write` aveva accettato i byte nel buffer.
-- **Arresto**: `Shutdown` chiude il listener e chiama `Registry.ExpireWaiting` (i mittenti in attesa terminano con `expired`); i trasferimenti in corso hanno 10 secondi, poi `Close`. `stop_grace_period` di compose (15 s) resta sopra.
+READY does not mean a file has been uploaded to the server. `Session.PeerReady` uses a single predicate under `Registry.mu`: session still alive and error-free, sender available, and, before the claim, a recent presence from the receiver's page. Between claim and `BeginRelay` the session is UNREADY; after the start, the data connection confirms the receiver. The sender's availability remains required during the copy too.
 
-## Codici HTTP
+The receiver's page sends `GET /<slug>?status=1` with `X-Bashtransfer-Readiness: 1` every two seconds. `ObserveReceiver` only updates a presence timestamp, valid for five seconds, without claiming or reading the file. The response includes `ready` and `ready_ttl`; a claimed but live session may be `starting` or `active` (`200`). The check without the header keeps the previous protocol: `ready`/`away` before the claim, `claimed` with `410` after. The legacy `ready` state alone indicates the sender's availability, not that both peers are attached.
 
-| Richiesta | Stato | Quando |
+The sender negotiates `readiness: true` in the reservation and in the resume. The NDJSON stream sends the initial value, the readiness transitions and heartbeats; `attached` then includes the current confirmation. Without negotiation, the events for older clients stay unchanged. `attached` signals the actual start of the relay, not merely the `PUT` being attached.
+
+Both UIs start UNREADY and let local confirmations expire. The receiver's page accepts confirmations only from successful status responses and invalidates stale requests when visibility changes, the network is lost, or the download is requested. After the click it keeps monitoring the transfer, but does not re-enable the button; another visitor to an already active link stays UNREADY. Share remains usable before confirmation, to avoid a circular requirement.
+
+The labels are conservative updates, not an instant fault detector: READY does not guarantee future connections or completion. After the end they return to UNREADY; the sender's outcome and the browser download show whether the file arrived.
+
+## Concurrency
+
+- **One goroutine writes to the receiver**: the sender's. The receiver's handler touches the `ResponseWriter` only after `Finished()`, whose closing establishes the happens-before ordering (including for the `started` field).
+- **Session state** (`claimed`, `err`, session map, tombstones) protected by `Registry.mu`. `Slug`, `ID`, `Name`, `Length`, `Created` are immutable.
+- **Channels**: `attached` (buffer 1, a single send under lock in `Claim`), `expired` (closed once under lock), `finished` (closed once with `sync.Once`), `aborted` (closed once under lock on the first `Abort`). No blocking send under lock.
+- **Relay interruption**: during the copy a goroutine waits on `Aborted()`; on disconnection or Cancel, it sets past deadlines both on the read from the sender (`IdleReader.Stop`) and on the write to the receiver. Even a connected receiver that does not read is interrupted immediately, without waiting for the idle timeout. For this reason the response to the sender has `Connection: close`.
+- **Deadlines**: the sender read deadline is renewed on every `Read` (`BASHT_IDLE_TIMEOUT`), the receiver write deadline is renewed on every `Write` (same value) and removed at the end of the response, because the receiver's connection may be reused (keep-alive). The attach and grace timers are tied to a generation: a callback already queued cannot end a later attachment.
+- **Flush errors**: even an error in the last flush to the receiver is propagated as `receiver_gone`, rather than declaring `OK` just because `Write` had accepted the bytes into the buffer.
+- **Shutdown**: `Shutdown` closes the listener and calls `Registry.ExpireWaiting` (waiting senders end with `expired`); ongoing transfers get 10 seconds, then `Close`. Compose's `stop_grace_period` (15 s) stays above that.
+
+## HTTP status codes
+
+| Request | Status | When |
 |---|---|---|
-| `GET /` | 200 | testo d'uso (anche healthcheck); ai browser la pagina di cortesia |
-| `POST /` | 200 | prenotazione di un invio dal browser: stream NDJSON fino all'esito |
-| `POST /` | 400, 401, 415, 503 | JSON non valido o senza `size`; auth; `Content-Type` non JSON; capacità |
-| `PUT /[nome]` | 200 | comandi; il body della risposta resta aperto fino alla fine del relay |
-| `PUT` | 401 | auth configurata e credenziali assenti o errate |
-| `PUT` | 503 | `BASHT_MAX_SESSIONS` raggiunto |
-| `GET /`, `PUT` | 400 | `Host` vuoto o con caratteri che la shell interpreta (solo senza `BASHT_PUBLIC_URL`) |
-| `GET /<slug>` | 200 | download (header `Content-Disposition`, `Accept-Ranges: none`, `Cache-Control: no-store`); ai browser e alle anteprime la pagina di download, che non consuma lo slug |
-| `POST /<slug>` | come `GET` | download dal pulsante della pagina |
-| `PUT /<slug>` + token | 200, 400, 404 | body dell'invio dal browser; lunghezza diversa dalla prenotazione; token errato o prenotazione scaduta |
-| `DELETE /<slug>` + token | 204, 404 | annulla l'invio dal browser; token errato o sessione conclusa |
-| `GET /<slug>` | 400 | `Range` che non parte dal primo byte; lo slug non viene consumato |
-| `GET /<slug>` | 404 | slug sconosciuto o sintassi non valida (ai browser con una pagina) |
-| `GET /<slug>` | 410 | slug già reclamato, concluso o scaduto (per 24 ore; ai browser con una pagina) |
-| `GET /<slug>` | 503 | trasferimento interrotto prima di iniziare la risposta |
-| altri metodi | 405 | con `Allow: GET, POST, PUT` (anche `HEAD`, e `DELETE` senza token) |
-| path con più segmenti | 404 | |
+| `GET /` | 200 | usage text (also healthcheck); browsers get the courtesy page |
+| `POST /` | 200 | reservation of a browser upload: NDJSON stream until the outcome |
+| `POST /` | 400, 401, 415, 503 | invalid JSON or missing `size`; auth; non-JSON `Content-Type`; capacity |
+| `PUT /[name]` | 200 | commands; the response body stays open until the end of the relay |
+| `PUT` | 401 | auth configured and credentials missing or wrong |
+| `PUT` | 503 | `BASHT_MAX_SESSIONS` reached |
+| `GET /`, `PUT` | 400 | empty `Host` or with characters the shell interprets (only without `BASHT_PUBLIC_URL`) |
+| `GET /<slug>` | 200 | download (`Content-Disposition`, `Accept-Ranges: none`, `Cache-Control: no-store` headers); browsers and previews get the download page, which does not consume the slug |
+| `POST /<slug>` | like `GET` | download from the page's button |
+| `POST /<slug>` + token and JSON `foreground` | 204, 404 | sender presence update; wrong token or session already ended |
+| `GET /<slug>?status=1` | 200, 404, 410 | non-consuming check; with the readiness header also `starting`/`active` for live claimed sessions |
+| `PUT /<slug>` + token | 200, 400, 404 | body of the browser upload; length different from the reservation; wrong token or expired reservation |
+| `DELETE /<slug>` + token | 204, 404 | cancels the browser upload; wrong token or session already ended |
+| `GET /<slug>` | 400 | `Range` not starting from the first byte; the slug is not consumed |
+| `GET /<slug>` | 404 | unknown slug or invalid syntax (browsers get a page) |
+| `GET /<slug>` | 410 | slug already claimed, finished or expired (for 24 hours; browsers get a page) |
+| `GET /<slug>` | 503 | transfer interrupted before the response started |
+| other methods | 405 | with `Allow: GET, POST, PUT` (also `HEAD`, and `DELETE` without a token) |
+| paths with multiple segments | 404 | |
 
-## Scelte di progetto
+## Design choices
 
-- **Go, net/http, nessuna dipendenza esterna.** Il relay copia con `io.CopyBuffer` e un buffer da 256 KiB da `sync.Pool`; misurato alla pari con una baseline a due hop (README, "Prestazioni"). Il limite reale è TCP: vedi README, "Prestazioni di rete".
-- **Flush a ogni scrittura**: lo stream deve arrivare al ricevente mentre il mittente invia (scenario `tar | curl`), senza attendere che un buffer si riempia. Ogni scrittura è grande quanto la lettura dal mittente (fino al buffer di copia), quindi il costo per byte resta basso.
-- **Un solo ricevente, nessun Range.** Il body del mittente si legge una volta sola. Il download parallelo a segmenti (aria2 `-x N`) richiederebbe disco o RAM non limitata e non aumenterebbe la velocità, limitata dall'upload del mittente. Una ripresa riceve `400` (non `416`, che `curl -C -` interpreta come file già completo) e non consuma lo slug.
-- **Slug come segreto**: 10 caratteri, ~59 bit; i log usano un ID separato.
-- **Nome del file**: preso dal path e ripulito (README, "Limiti del nome"). Arriva al ricevente solo in `Content-Disposition`: le righe stampate non contengono il nome, così nessuna indica un file da scrivere.
-- **La sorgente non viene mai alterata**: le tre righe stampate non sovrascrivono un file esistente (`curl -OJ` crea con `O_EXCL`, `wget --content-disposition` e `aria2c --allow-overwrite=false` rinominano). Ogni risposta che non è un download ha `Content-Disposition: inline; filename="bashtransfer.txt"`, perché un `curl -OJ` su un errore o sulla tabella non ripieghi sul nome nell'URL, che per il mittente è la sorgente. `scripts/invariant.py` verifica l'invariante su tutte le varianti dei comandi (README, "La sorgente non viene mai alterata").
-- **Rilevamento del mittente in attesa**: net/http non vede la chiusura del client finché il body non è letto; `ppoll` con `POLLRDHUP` a timeout zero la vede subito, anche con dati non letti. Fuori da Linux resta solo `BASHT_WAIT_TIMEOUT`.
-- **Basic auth solo sull'invio** (`PUT` di curl e `POST /` del browser): confronto a tempo costante sui digest SHA-256 di utente e password. Il `PUT` e il `DELETE` del browser sono autorizzati dal token della prenotazione.
-- **Invio dal browser senza CORS**: `POST /` accetta solo `application/json`, `PUT` e `DELETE` richiedono `X-Bashtransfer-Token`; un altro sito non può inviarli senza un preflight, che il server non autorizza. Il token viaggia in un header, non nella query registrata dai proxy.
-- **Pagina di download prima del file**: i link incollati in chat e posta vengono aperti dalle anteprime; con un `GET` che scarica, l'anteprima consumerebbe il link prima del ricevente.
+- **Go, net/http, no external dependencies.** The relay copies with `io.CopyBuffer` and a 256 KiB buffer from `sync.Pool`; measured on par with a two-hop baseline (README, "Performance"). The real limit is TCP: see README, "Network performance".
+- **Flush on every write**: the stream must reach the receiver while the sender is still sending (`tar | curl` scenario), without waiting for a buffer to fill. Each write is as large as the read from the sender (up to the copy buffer), so the cost per byte stays low.
+- **One receiver, no Range.** The sender's body is read only once. Segmented parallel download (aria2 `-x N`) would require disk or unbounded RAM and would not increase speed, which is limited by the sender's upload. A resume request gets `400` (not `416`, which `curl -C -` interprets as an already complete file) and does not consume the slug.
+- **Slug as a secret**: 10 characters, ~59 bits; the logs use a separate ID.
+- **File name**: taken from the path and cleaned up (README, "Name limits"). It reaches the receiver only in `Content-Disposition`: the printed lines do not contain the name, so none of them points to a file to write.
+- **The source is never altered**: the three printed lines do not overwrite an existing file (`curl -OJ` creates with `O_EXCL`, `wget --content-disposition` and `aria2c --allow-overwrite=false` rename). Every response that is not a download has `Content-Disposition: inline; filename="bashtransfer.txt"`, so that a `curl -OJ` on an error or on the table does not fall back to the name in the URL, which for the sender is the source. `scripts/invariant.py` checks the invariant across all command variants (README, "The source is never altered").
+- **Detecting a waiting sender**: net/http does not see the client closing until the body is read; `ppoll` with `POLLRDHUP` at zero timeout sees it immediately, even with unread data. Outside Linux, only `BASHT_WAIT_TIMEOUT` remains.
+- **Basic auth only on upload** (curl's `PUT` and the browser's `POST /`): constant-time comparison of the SHA-256 digests of user and password. The browser's `PUT` and `DELETE` are authorized by the reservation token.
+- **Browser upload without CORS**: `POST /` accepts only `application/json`, `PUT` and `DELETE` require `X-Bashtransfer-Token`; another site cannot send them without a preflight, which the server does not authorize. The token travels in a header, not in the query string logged by proxies.
+- **Download page before the file**: links pasted into chat and mail are opened by previews; with a `GET` that downloads, the preview would consume the link before the receiver.
