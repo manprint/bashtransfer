@@ -316,45 +316,81 @@ Apache's HTTP/1.1 proxy (`ProxyPass http://`) does not work: it sends the whole 
 
 What to do:
 
-1. Start the app with an image that includes h2c support (later than `sha-66a3f84`) and with `BASHT_PUBLIC_URL` equal to the public URL: Apache does not pass `Host` or `X-Forwarded-Proto` to the printed commands. The app must be reachable from Apache on the `BASHT_LISTEN` port (same Docker network, or a port published on `127.0.0.1`).
+1. Start the app with an image that includes h2c support (later than `sha-66a3f84`) and with `BASHT_PUBLIC_URL` equal to the public HTTPS URL. This fixes the URLs in the commands independently of the incoming `Host` and forwarded headers. The app must be reachable only from Apache on the `BASHT_LISTEN` port (a private shared Docker network, or a port published on `127.0.0.1` for Apache on the host). Do not publish port 8080 to the Internet or start nginx alongside Apache on the same public ports. An app-only Compose example and deployment checks are in [Apache deployment](docs/operazioni.md#apache-deployment).
 2. Enable the modules. `proxy_http2` uses the nghttp2 library (included in the Debian/Ubuntu `apache2` packages). `mod_http2` (HTTP/2 towards clients) is not needed: if `a2enmod` enables it as a dependency, `Protocols http/1.1` in the vhost (see below) excludes it for this site:
 
    ```bash
-   a2enmod proxy proxy_http proxy_http2 headers ssl
+   sudo a2enmod proxy proxy_http proxy_http2 headers ssl reqtimeout
    ```
 
-3. In the TLS vhost, replace the two `ProxyPass` and `ProxyPassReverse` lines that pointed to `http://`:
+3. In the global Apache configuration, not inside the vhost, reduce the banner:
+
+   ```apache
+   ServerTokens Prod
+   ServerSignature Off
+   ```
+
+   These settings do not replace security updates. Check the installed Debian package revision and active modules; the `Server` banner alone does not establish whether a CVE has been patched.
+
+4. Use this TLS vhost, adapting the hostname, backend and certificate paths:
 
    ```apache
    <VirtualHost *:443>
        ServerName bashtransfer.mydomain.it
 
+       ErrorLog ${APACHE_LOG_DIR}/bashtransfer-error.log
+       LogFormat "%{%Y-%m-%dT%H:%M:%S%z}t %m %>s %B %D" bashtransfer_private
+       CustomLog ${APACHE_LOG_DIR}/bashtransfer-access.log bashtransfer_private
+
        Protocols http/1.1
 
        ProxyRequests     Off
        ProxyPreserveHost On
-       ProxyPass         / h2c://bash-transfer:8080/ flushpackets=on timeout=600 connectiontimeout=5 retry=0
+       ProxyPass         / h2c://bash-transfer:8080/ flushpackets=on timeout=3900 connectiontimeout=5 retry=0 keepalive=On
        ProxyPassReverse  / h2c://bash-transfer:8080/
        ProxyIOBufferSize 65536
+       RequestHeader set X-Forwarded-Proto expr=%{REQUEST_SCHEME}
+       RequestReadTimeout handshake=30 header=20-40,MinRate=500 body=0
        LimitRequestBody  0
        SetEnv no-gzip    1
        SetEnv no-brotli  1
 
+       Header onsuccess unset Strict-Transport-Security
+       Header always set Strict-Transport-Security "max-age=31536000"
+       Header onsuccess unset Permissions-Policy
+       Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), web-share=(self)"
+       Header onsuccess unset X-Content-Type-Options
+       Header always set X-Content-Type-Options "nosniff"
+       Header onsuccess unset Referrer-Policy
+       Header always set Referrer-Policy "no-referrer"
+       Header onsuccess unset X-Frame-Options
+       Header always set X-Frame-Options "DENY"
+
        SSLCertificateFile    /etc/letsencrypt/live/bashtransfer.mydomain.it/fullchain.pem
        SSLCertificateKeyFile /etc/letsencrypt/live/bashtransfer.mydomain.it/privkey.pem
        Include /etc/letsencrypt/options-ssl-apache.conf
+       SSLProtocol -all +TLSv1.2 +TLSv1.3
    </VirtualHost>
    ```
 
    `Protocols http/1.1` keeps the client-to-Apache connection on HTTP/1.1: with HTTP/2 towards the client (if `mod_http2` is loaded and `Protocols` does not exclude it) the upload is limited by Apache's flow-control window and, on a network with latency, drops considerably (measured locally with 40 ms of simulated RTT: about 11 MB/s with h2, over 200 MB/s with HTTP/1.1; the download does not change). Only `proxy_http2` towards the app stays h2c. `bash-transfer` is the container name on the network shared with Apache; with the app on `127.0.0.1` use `h2c://127.0.0.1:8080/`.
-4. Check and reload:
+
+   `RequestReadTimeout` bounds the initial TLS handshake and request headers, but explicitly disables the body timer and minimum rate: a waiting relay or a slow pipe must not inherit `body=20,MinRate=500`. `LimitRequestBody 0` preserves arbitrary file and stream sizes. This is a deliberate tradeoff: use bounded session limits, optional upload authentication and appropriate connection/rate controls at Apache, which sees the client IP. Do not add modules that buffer the complete upload.
+
+   `timeout=3900` is an I/O inactivity timeout, not a maximum transfer duration. It gives margin above a one-hour `BASHT_WAIT_TIMEOUT` and a five-minute `BASHT_IDLE_TIMEOUT`; adjust it when changing those budgets. Keepalive traffic also resets it while waiting.
+
+   The `onsuccess unset` / `always set` pairs normalize both Apache header tables, avoiding duplicate headers from the app and covering Apache-generated errors. HSTS applies only to this hostname: add neither `includeSubDomains` nor `preload` without checking their implications, and enable it only once HTTPS and certificate renewal work. The permissions policy keeps native Web Share available. `X-Frame-Options` supplements the app's `frame-ancestors 'none'`; do not overwrite the app's CSP, whose form and connection policies vary by page. Removing its `unsafe-inline` requires an application change, not an extra proxy CSP.
+
+   `SSLProtocol` is deliberately after the Certbot include so the TLS version policy is not overwritten by that file. Check the complete configuration, including other vhosts and global includes.
+
+5. Check and reload:
 
    ```bash
-   apache2ctl configtest && systemctl reload apache2
+   sudo apache2ctl configtest && sudo systemctl reload apache2
    ```
 
-5. If Apache responds `500` and the `error.log` shows `AH01144: No protocol handler was valid for the URL ... (scheme 'h2c')`, `mod_proxy_http2` is not loaded. Check with `apache2ctl -M | grep http2`: `proxy_http2_module` must appear. With Apache in a container, `a2enmod` must be run in the image (`RUN a2enmod proxy proxy_http proxy_http2 headers ssl` in the Dockerfile): an `a2enmod` run inside the running container is lost when it is recreated.
-6. Verify: `curl -T FILE https://bashtransfer.mydomain.it` must print the table immediately with the `curl`, `wget`, `aria2c`, `direct` lines; running one of them from another terminal, or opening the `direct` link in the browser, the file passes.
+6. If Apache responds `500` and the `error.log` shows `AH01144: No protocol handler was valid for the URL ... (scheme 'h2c')`, `mod_proxy_http2` is not loaded. Check with `apache2ctl -M | grep http2`: `proxy_http2_module` must appear. With a Debian-based Apache container, enable the modules in the image (`RUN a2enmod proxy proxy_http proxy_http2 headers ssl reqtimeout` in the Dockerfile): changes made only in a running container are lost when it is recreated. Other Apache images use their own `LoadModule` configuration.
+7. Verify: `curl -T FILE https://bashtransfer.mydomain.it` must print the table immediately with the `curl`, `wget`, `aria2c`, `direct` lines; running one of them from another terminal, or opening the `direct` link in the browser, the file passes. If upload authentication is configured, add `-u USER` and let curl prompt for the password.
 
 How it behaves:
 
@@ -371,19 +407,12 @@ How it behaves:
 
   The condition leaves the download names intact. It protects a sender who mistakenly adds `-OJ` to the upload and, with older curl versions, from the `503`: curl 8.18 ignores the header on `4xx`/`5xx` responses (verified with Apache 2.4.59, curl 8.18 and 8.5).
 - Upload from the browser: the page closes the link with an explicit `DELETE` (Cancel, closing the page), which passes immediately. If it does not go through and the browser drops the connection, Apache signals the NDJSON stream's closure to the backend only after several failed writes to the browser: the link closes in about 3.5 seconds.
-- Apache's `combined` access log records the request line, that is the slug and, for uploads from the terminal, the file name (`PUT /myfile.zip`): whoever reads the log can download a link that is still active. To avoid recording them, in the vhost replace the line `CustomLog ${APACHE_LOG_DIR}/access.log combined` with:
-
-  ```apache
-  LogFormat "%h %t \"%m\" %>s %b %D" bashtransfer
-  CustomLog ${APACHE_LOG_DIR}/access.log bashtransfer
-  ```
-
-  `%D` is the request duration in microseconds. The browser upload's token travels in a header and does not appear in Apache's logs.
-- Verified with Apache 2.4.69 (image `httpd:2.4`) over plain HTTP towards the client, including the web pages and the upload from the browser (Playwright tests with Chromium); with your own server's version and TLS it is worth repeating the step 6 check with a file of a few hundred MB.
+- Apache's `combined` access log records the request line (including the slug, query and terminal-upload file name), authenticated user and Referer. Whoever reads a live slug can download the file. The private format above records only timestamp, method, status, response bytes and duration (`%D`, microseconds), not IP, path, query, user or headers. Apply it to the site's port-80 vhost too. Other access logs, Apache's error log, debug/trace logging and any upstream proxy need a separate review; the custom format does not redact them. Restrict and handle existing logs according to the retention policy.
+- The h2c relay and web UI were verified with Apache 2.4.69 (image `httpd:2.4`) over plain HTTP towards the client (Playwright with Chromium). This is not a verification of your production vhost or Certbot include. Repeat step 7 and the [Apache deployment checks](docs/operazioni.md#apache-deployment) with your server's package and TLS.
 
 ## Log
 
-One line per event on stderr, in the format set by `BASHT_LOG_FORMAT`. Each line has `time`, `level` and `msg` (the event name, stable: use it to filter). **Slugs, file names, paths and credentials never appear**: a session is identified by `id`, 16 random hexadecimal characters independent of the slug, so whoever reads the logs cannot download.
+One application event per line on stderr, in the format set by `BASHT_LOG_FORMAT`. Each line has `time`, `level` and `msg` (the event name, stable: use it to filter). **Slugs, file names, paths and credentials never appear in the app's logs**: a session is identified by `id`, 16 random hexadecimal characters independent of the slug, so whoever reads these logs cannot download. Proxy access/error logs are separate: see the private log format in [Behind Apache](#dietro-apache-mod_proxy_http2).
 
 | Event (`msg`) | Level | When | Fields |
 |---|---|---|---|

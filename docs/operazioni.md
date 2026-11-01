@@ -1,16 +1,18 @@
 # Operations
 
-Deployment and management of bashtransfer on a VM with Docker. Usage and configuration are in the [README](../README.md); internal workings in [architettura.md](architettura.md).
+Deployment and management of bashtransfer on a VM with Docker. The default Compose stack uses nginx; [Apache deployment](#apache-deployment) is the alternative when Apache already serves HTTPS. Usage and configuration are in the [README](../README.md); internal workings in [architettura.md](architettura.md).
 
 ## VM requirements
 
 - Linux with kernel ≥ 4.15 (TCP sysctls per network namespace), Docker Engine with the `compose` plugin.
-- Ports 80 and 443 reachable from the Internet; no other port is needed (the app publishes no ports).
-- `tcp_bbr` module loaded on the host: compose sets `bbr` in nginx's network namespace, and a container cannot load modules.
+- Ports 80 and 443 reachable from the Internet; the backend must remain private, reachable only by the proxy.
+- For the nginx stack, `tcp_bbr` loaded on the host: compose sets `bbr` in nginx's network namespace, and a container cannot load modules.
 - TLS certificate for the public name (`fullchain.pem`, `privkey.pem`), managed outside the repository (for example certbot on the host).
 - Memory: each active session uses at most one copy buffer (256 KiB by default) in the app, plus the kernel's TCP buffers, which grow up to 32 MiB per socket only as needed; the total is limited by the host's `net.ipv4.tcp_mem`.
 
 ## First deployment
+
+The following steps use the nginx stack. Do not start it on the public ports already used by Apache.
 
 1. Load BBR, including across reboots:
 
@@ -60,7 +62,126 @@ Deployment and management of bashtransfer on a VM with Docker. Usage and configu
 
    The script accepts any certificate. Without auth configured, omit `BASHT_E2E_AUTH`. It leaves a `transfer` entry with `outcome` `aborted` in the logs for each simulated drop case: this is expected.
 
+## Apache deployment
+
+Use Apache as the public TLS endpoint and the app as a private h2c backend. Keep `Protocols http/1.1` on the public vhost and `h2c://` in `ProxyPass`; ordinary `http://` upstream proxying breaks the relay's early response. No upload depot, disk buffering or complete-body buffering is introduced.
+
+### Private backend
+
+For Apache in Docker, attach it and the app to the same private backend network. If a suitable network does not exist, create an internal one and attach the existing Apache container (replace `APACHE_CONTAINER` with its name):
+
+```bash
+docker network create --internal bashtransfer-backend
+docker network connect bashtransfer-backend APACHE_CONTAINER
+```
+
+Apache must retain its public-facing network. Restrict membership of the backend network; do not publish the app's port 8080.
+
+Create a deployment-local `compose.apache.yaml` containing only the backend, rather than starting the repository's nginx service:
+
+```yaml
+services:
+  bash-transfer:
+    image: ${BASHT_IMAGE:?set BASHT_IMAGE}
+    environment:
+      BASHT_LISTEN: ":8080"
+      BASHT_PUBLIC_URL: ${BASHT_PUBLIC_URL:?set BASHT_PUBLIC_URL}
+      BASHT_AUTH_USER: ${BASHT_AUTH_USER:-}
+      BASHT_AUTH_PASSWORD: ${BASHT_AUTH_PASSWORD:-}
+      BASHT_WAIT_TIMEOUT: ${BASHT_WAIT_TIMEOUT:-1h}
+      BASHT_IDLE_TIMEOUT: ${BASHT_IDLE_TIMEOUT:-5m}
+      BASHT_SENDER_GRACE: ${BASHT_SENDER_GRACE:-180}
+      BASHT_MAX_SESSIONS: ${BASHT_MAX_SESSIONS:-20}
+      BASHT_BUF_SIZE: ${BASHT_BUF_SIZE:-262144}
+      BASHT_LOG_FORMAT: json
+    networks:
+      - relay
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+networks:
+  relay:
+    external: true
+    name: ${BASHT_APACHE_NETWORK:?set BASHT_APACHE_NETWORK}
+```
+
+Create an untracked `.env` with permissions `600`, using an image tag or digest actually published to your registry:
+
+```text
+BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.0.0
+BASHT_PUBLIC_URL=https://bashtransfer.mydomain.it
+BASHT_APACHE_NETWORK=bashtransfer-backend
+BASHT_AUTH_USER=user
+BASHT_AUTH_PASSWORD=a-long-password
+```
+
+The timeout/session values in the example are a resilience profile, not mandatory defaults. Set both authentication variables to restrict uploads; omit both only if public uploads are intended. Downloads remain public to holders of the link. Keep secrets out of version control.
+
+```bash
+docker compose -f compose.apache.yaml config --quiet
+docker compose -f compose.apache.yaml pull
+docker compose -f compose.apache.yaml up -d
+docker compose -f compose.apache.yaml ps
+```
+
+The image's healthcheck should report healthy, and Apache must resolve `bash-transfer` on the private network. If Apache runs on the host instead, publish only `127.0.0.1:8080:8080` from the app and use `h2c://127.0.0.1:8080/` in the vhost; do not expose `0.0.0.0:8080`. Adapt the network configuration to that topology.
+
+### Apache configuration and updates
+
+Use the complete [README Apache vhost](../README.md#dietro-apache-mod_proxy_http2), replacing the hostname, certificate paths and backend address. It includes private access logs, HSTS, a Web Share-compatible permissions policy, normalized security headers, explicit TLS 1.2/1.3 and relay-compatible request timeouts. Do not overwrite the application CSP or impose a minimum upload body rate.
+
+On Debian/Ubuntu, verify the package revision and modules before enabling the site:
+
+```bash
+dpkg-query -W apache2 apache2-bin openssl
+sudo a2enmod proxy proxy_http proxy_http2 headers ssl reqtimeout
+sudo apache2ctl -M
+sudo apache2ctl configtest && sudo systemctl reload apache2
+```
+
+Keep the Apache/OpenSSL packages updated from maintained distribution repositories and check the [Debian security tracker](https://security-tracker.debian.org/tracker/source-package/apache2). A banner such as `Apache/2.4.59 (Debian)` does not reveal applied backports. The supplied proxy profile uses a fixed backend, `ProxyRequests Off` and no `RewriteRule`/`SetHandler`; also inspect global configuration and other vhosts.
+
+`RequestReadTimeout handshake=30 header=20-40,MinRate=500 body=0` limits handshake/header stalls without timing out a sender waiting for the receiver. Disabling the body timer applies to the vhost and is a deliberate availability/security tradeoff; authentication, bounded sessions and Apache-side connection/rate controls still matter. Scope those controls to this site and account for legitimate sender/receiver/control connections.
+
+The example proxy timeout is 3900 seconds: an I/O inactivity budget with margin above the app's one-hour wait and five-minute idle profile. Adjust it if those settings change; do not interpret it as a maximum file duration. Keep compression disabled.
+
+For an Apache container, persist module/vhost changes in its image or mounted configuration and run its configuration check and graceful reload there. For a backend image update, change `BASHT_IMAGE` and repeat `pull`/`up -d` with `-f compose.apache.yaml`. App recreation interrupts live sessions; if the backend IP changes, gracefully reload Apache to refresh cached upstream connections/resolution.
+
+Apache can read Certbot's `live/` symlinks directly on the host. In a container, mount the required `live/` and `archive/` trees read-only so those relative links resolve. After renewal, run a configuration check and graceful Apache reload from a Certbot deploy hook, for example on the host:
+
+```bash
+apache2ctl configtest && systemctl reload apache2
+```
+
+Do not add `includeSubDomains` or HSTS preload automatically. Confirm the certificate chain and renewal before enabling long-lived HSTS; its policy is cached by browsers.
+
+### Deployment checks
+
+```bash
+curl -fsS -D - -o /dev/null -H 'Accept: text/html' https://bashtransfer.mydomain.it/
+curl -sSI http://bashtransfer.mydomain.it/
+openssl s_client -connect bashtransfer.mydomain.it:443 -servername bashtransfer.mydomain.it \
+  -verify_hostname bashtransfer.mydomain.it -verify_return_error </dev/null
+```
+
+Expect HTTP-to-HTTPS redirection, a valid hostname/chain, one copy of each security header, and the application's CSP unchanged. Verify TLS 1.0/1.1 are rejected and 1.2/1.3 accepted with a client that supports those protocol probes.
+
+During a controlled smoke test, send a test file (`curl -T FILE https://bashtransfer.mydomain.it`, adding `-u USER` to prompt for the password if configured). The table must appear before a receiver starts. Wait longer than the old request-body timer, then download from another terminal and compare checksums. Also test a pipe and the mobile Share/return/READY flow; a page preview must not consume the link.
+
+The site's access log should contain only timestamp, method, status, response bytes and duration, never the test slug, file name, query, username or Referer. Check the port-80 vhost, additional/global access logs, Apache's error log and any upstream logging too. The app's redacted logs do not guarantee proxy-log privacy. Restrict existing logs and handle them under the retention policy; avoid debug/trace logging in production.
+
 ## Updates
+
+The commands below refer to the nginx stack. For the app-only Apache deployment, use the `-f compose.apache.yaml` commands above.
 
 Set the new tag in `.env` (`BASHT_IMAGE=ghcr.io/owner/bashtransfer:1.1.0`; use version tags, not `latest`, so you know what is running and can roll back), then:
 
@@ -88,6 +209,8 @@ After an update, verify from the workstation and from a phone:
 The Playwright checks simulate mobile viewports and some native APIs; they do not replace this check of real behavior on Android/iOS and in the in-app browsers of chat apps.
 
 ## Certificate renewal
+
+This section concerns nginx; the Apache renewal procedure is in [Apache deployment](#apache-deployment).
 
 nginx reads the certificates at startup. After renewal:
 
@@ -128,7 +251,7 @@ docker compose logs --no-log-prefix app | jq -r 'select(.msg=="transfer" and .ou
 docker compose logs --no-log-prefix app | jq -c 'select(.msg=="request_rejected" and (.reason=="unauthorized" or .reason=="capacity"))'
 ```
 
-`BASHT_LOG_LEVEL=debug` adds `upload_accepted`, `download_claimed`, `receiver_attached` (all with the same `id` as the final `transfer`) and the `404`s. The app only sees nginx's IP: client IPs are not in the app's logs. nginx's `stream` block has no access log.
+`BASHT_LOG_LEVEL=debug` adds `upload_accepted`, `download_claimed`, `receiver_attached` (all with the same `id` as the final `transfer`) and the `404`s. The app only sees the proxy's IP: client IPs are not in the app's logs. nginx's `stream` block has no access log. For Apache, use the private format and review other access/error logs as described in [Apache deployment](#apache-deployment).
 
 ## Monitoring
 
