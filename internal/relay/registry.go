@@ -86,6 +86,7 @@ type Session struct {
 	streams            int
 	monitored          bool
 	foreground         bool
+	receiverSeen       time.Time
 	presenceTimer      *time.Timer
 	presenceGeneration uint64
 	err                error
@@ -284,6 +285,46 @@ func (s *Session) Away() bool {
 
 func (s *Session) awayLocked() bool {
 	return s.Token != "" && (!s.bound || (s.monitored && !s.foreground))
+}
+
+// ReceiverPresenceTimeout limita la validità della conferma della pagina ricevente.
+const ReceiverPresenceTimeout = 5 * time.Second
+
+func (s *Session) peerReadyLocked(now time.Time) bool {
+	return s.reg.sessions[s.Slug] == s && s.err == nil && !s.awayLocked() &&
+		(s.relayStarted() || (!s.claimed && !s.receiverSeen.IsZero() && now.Sub(s.receiverSeen) < ReceiverPresenceTimeout))
+}
+
+// PeerReady conferma il mittente e il ricevente, senza leggere o conservare il file.
+func (s *Session) PeerReady() bool {
+	s.reg.mu.Lock()
+	defer s.reg.mu.Unlock()
+	return s.peerReadyLocked(time.Now())
+}
+
+// PeerStatus è una fotografia atomica delle connessioni della sessione.
+type PeerStatus struct {
+	Ready, Away, Claimed, Started bool
+}
+
+// ObserveReceiver rinnova la presenza della pagina senza reclamare il link.
+func (r *Registry) ObserveReceiver(id string) (PeerStatus, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	r.prune(now)
+	s, ok := r.sessions[id]
+	if !ok {
+		if reason, gone := r.goneReason(id); gone {
+			return PeerStatus{}, &GoneError{reason}
+		}
+		return PeerStatus{}, ErrNotFound
+	}
+	s.receiverSeen = now
+	return PeerStatus{
+		Ready: s.peerReadyLocked(now), Away: s.awayLocked(),
+		Claimed: s.claimed, Started: s.relayStarted(),
+	}, nil
 }
 
 // BeginRelay rende atomici l'inizio della copia e la sostituzione del PUT: un vecchio

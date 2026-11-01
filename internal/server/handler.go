@@ -261,9 +261,11 @@ type reservation struct {
 	Commands []command `json:"commands"`
 	// Grace, se > 0, sono i secondi di tolleranza per un mittente caduto (BASHT_SENDER_GRACE): la
 	// pagina si riaggancia con la ripresa dello stream (POST / con resume) e un nuovo PUT.
-	Grace   int64 `json:"grace,omitempty"`
-	Started bool  `json:"started,omitempty"`
-	Bytes   int64 `json:"bytes,omitempty"`
+	Grace    int64 `json:"grace,omitempty"`
+	Started  bool  `json:"started,omitempty"`
+	Bytes    int64 `json:"bytes,omitempty"`
+	Ready    *bool `json:"ready,omitempty"`
+	ReadyTTL int64 `json:"ready_ttl,omitempty"`
 }
 
 // reserve prenota una sessione per un invio dal browser: POST / con JSON {"name": ..., "size": ...}.
@@ -300,6 +302,7 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		Resume     string `json:"resume"`
 		Rebind     bool   `json:"rebind"`
 		Foreground *bool  `json:"foreground"`
+		Readiness  bool   `json:"readiness"`
 	}
 	// Il body va letto fino in fondo: solo dopo net/http rileva la chiusura della connessione e
 	// annulla il contesto della richiesta.
@@ -348,10 +351,19 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	enc := json.NewEncoder(w)
 	send := func(v any) bool { return enc.Encode(v) == nil && rc.Flush() == nil }
+	var ready *bool
+	var readyTTL int64
+	lastReady := false
+	if req.Readiness {
+		lastReady = s.PeerReady()
+		ready = &lastReady
+		readyTTL = int64(relay.ReceiverPresenceTimeout / time.Second)
+	}
 	if !send(reservation{
 		Slug: s.Slug, URL: u, Token: s.Token, Commands: append(receiverCommands(u), command{"direct", u}),
 		Grace:   int64(grace / time.Second),
 		Started: alreadyStarted, Bytes: s.Delivered(),
+		Ready: ready, ReadyTTL: readyTTL,
 	}) {
 		return
 	}
@@ -359,6 +371,7 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	type event struct {
 		Event string `json:"event"`
 		Bytes *int64 `json:"bytes,omitempty"`
+		Ready *bool  `json:"ready,omitempty"`
 	}
 	tick := time.NewTicker(progressInterval)
 	defer tick.Stop()
@@ -384,13 +397,27 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-started:
 			started, attached = nil, true
-			if !send(event{Event: "attached"}) {
+			var ready *bool
+			if req.Readiness {
+				value := s.PeerReady()
+				ready = &value
+			}
+			if !send(event{Event: "attached", Ready: ready}) {
 				return
 			}
 		case <-tick.C:
 			// L'avanzamento quando cambia; senza novità una riga ogni keepaliveTicks: una scrittura
 			// fallita rivela il mittente caduto anche se la chiusura non arriva al server (proxy).
 			ticks++
+			if req.Readiness {
+				value := s.PeerReady()
+				if value != lastReady || ticks%keepaliveTicks == 0 {
+					if !send(event{Event: "readiness", Ready: &value}) {
+						return
+					}
+					lastReady = value
+				}
+			}
 			ok := true
 			switch n := s.Delivered(); {
 			case attached && (n != last || ticks%keepaliveTicks == 0):

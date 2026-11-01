@@ -358,6 +358,101 @@ func TestSenderGraceLiveStatus(t *testing.T) {
 	check(reasonGoneSender, http.StatusGone)
 }
 
+func TestBrowserPeerReadiness(t *testing.T) {
+	base, reg := newGraceServer(t, time.Minute)
+	req, _ := http.NewRequest(http.MethodPost, base+"/", strings.NewReader(`{"name":"private.bin","size":10,"foreground":true,"readiness":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	res := openStream(t, http.DefaultClient, req)
+	defer res.close()
+	if res.Ready == nil || *res.Ready || res.ReadyTTL != 5 {
+		t.Fatalf("prenotazione senza ricevente: %+v", res.reservation)
+	}
+	check := func(enhanced bool, state string, code int, ready bool) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, base+"/"+res.Slug+"?status=1", nil)
+		if enhanced {
+			req.Header.Set("X-Bashtransfer-Readiness", "1")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		var m struct {
+			State string `json:"state"`
+			Ready *bool  `json:"ready"`
+		}
+		if json.Unmarshal(body, &m) != nil || resp.StatusCode != code || m.State != state ||
+			(enhanced && (m.Ready == nil || *m.Ready != ready)) || (!enhanced && m.Ready != nil) {
+			t.Fatalf("stato enhanced=%v: %d %q", enhanced, resp.StatusCode, body)
+		}
+		if resp.Header.Get("Cache-Control") != "no-store" || strings.Contains(string(body), res.Token) || strings.Contains(string(body), "private.bin") {
+			t.Fatalf("stato non sicuro: %q", body)
+		}
+	}
+	next := func(want bool) {
+		t.Helper()
+		got := within(t, 5*time.Second, "conferma nello stream", func() *bool {
+			for res.sc.Scan() {
+				var m struct {
+					Ready *bool `json:"ready"`
+				}
+				if json.Unmarshal(res.sc.Bytes(), &m) == nil && m.Ready != nil {
+					return m.Ready
+				}
+			}
+			return nil
+		})
+		if got == nil {
+			t.Fatalf("stream chiuso senza conferma: %v", res.sc.Err())
+		}
+		if *got != want {
+			t.Fatalf("stream READY=%v, atteso %v", *got, want)
+		}
+	}
+	check(true, "away", http.StatusOK, false)
+	drop := putUntilCancelled(t, base, res, 10)
+	defer drop()
+	var s *relay.Session
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		s, _ = reg.Reserved(res.Slug, res.Token)
+		if s != nil && !s.Away() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PUT non agganciato")
+		}
+	}
+	// La prima osservazione è avvenuta mentre il body era assente.
+	next(true)
+	check(false, "ready", http.StatusOK, false)
+	check(true, "ready", http.StatusOK, true)
+	if _, err := reg.Peek(res.Slug); err != nil {
+		t.Fatalf("controllo ha consumato il link: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp, err := http.Get(base + "/" + res.Slug); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	within(t, 5*time.Second, "inizio relay", func() bool { <-s.Started(); return true })
+	check(true, "active", http.StatusOK, true)
+	check(false, "claimed", http.StatusGone, false)
+	if err := reg.Foreground(res.Slug, res.Token, false); err != nil {
+		t.Fatal(err)
+	}
+	check(true, "active", http.StatusOK, false)
+	cancelUpload(t, http.DefaultClient, base, res.Slug, res.Token)
+	within(t, 5*time.Second, "fine ricevente", func() bool { <-done; return true })
+	if s.PeerReady() {
+		t.Fatal("sessione annullata ancora READY")
+	}
+}
+
 func TestCancelInterruptsBlockedReceiver(t *testing.T) {
 	base, reg := newGraceServer(t, time.Minute)
 	const size = 16 << 20

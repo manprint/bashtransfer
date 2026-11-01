@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"bashtransfer/internal/relay"
 	"bashtransfer/internal/slug"
@@ -144,7 +145,22 @@ func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 
 func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) {
 	state, message, code := "ready", "", http.StatusOK
-	s, err := h.reg.Peek(id)
+	var ready *bool
+	var readyTTL int64
+	var away, claimed, started bool
+	var err error
+	if r.Header.Get("X-Bashtransfer-Readiness") == "1" {
+		var peer relay.PeerStatus
+		peer, err = h.reg.ObserveReceiver(id)
+		ready, away, claimed, started = &peer.Ready, peer.Away, peer.Claimed, peer.Started
+		readyTTL = int64(relay.ReceiverPresenceTimeout / time.Second)
+	} else {
+		var s *relay.Session
+		s, err = h.reg.Peek(id)
+		if err == nil {
+			away = s.Away()
+		}
+	}
 	switch {
 	case !slug.Valid(id), errors.Is(err, relay.ErrNotFound):
 		state, code = reasonNotFound, http.StatusNotFound
@@ -152,7 +168,11 @@ func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) 
 		state, code = pageClaimed, http.StatusGone
 	case err != nil:
 		state, code = goneReasonOf(err), http.StatusGone
-	case s.Away():
+	case claimed && started:
+		state = "active"
+	case claimed:
+		state = "starting"
+	case away:
 		state = "away"
 	}
 	if m, ok := messages[state]; ok {
@@ -163,9 +183,11 @@ func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) 
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(struct {
-		State   string `json:"state"`
-		Message string `json:"message,omitempty"`
-	}{state, message})
+		State    string `json:"state"`
+		Message  string `json:"message,omitempty"`
+		Ready    *bool  `json:"ready,omitempty"`
+		ReadyTTL int64  `json:"ready_ttl,omitempty"`
+	}{state, message, ready, readyTTL})
 }
 
 // Pagine dei messaggi che non corrispondono a un motivo di rifiuto (reason*): link reclamato da un
@@ -185,7 +207,7 @@ var messages = map[string]struct{ heading, text string }{
 	reasonGoneSender: {"Sender stopped",
 		"The sender closed the page, cancelled or lost the connection before this link was used. Ask the sender to keep the page open and send the file again."},
 	reasonGoneExpired: {"Link expired",
-		"Nobody opened this link in time. Ask the sender to send the file again."},
+		"Nobody started the download in time. Ask the sender to send the file again."},
 	pageClaimed: {"Download already started",
 		"This link is already being downloaded, perhaps from another tab or window: check your browser's downloads. Each link works once; if it was not you, ask the sender to send the file again."},
 	pageAborted: {"Transfer interrupted",

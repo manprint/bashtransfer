@@ -50,7 +50,7 @@
 {{end}}
 {{define "content"}}
 <section class="card" aria-labelledby="upload">
-  <h2 id="upload"><span class="role role-send">Sender</span>Send a file</h2>
+  <h2 id="upload"><span class="role role-send">Sender</span>Send a file<span class="role peer-state is-unready" id="x-ready" role="status" aria-live="polite" aria-atomic="true" title="Share the link first. READY means both connections were recently confirmed by the server.">UNREADY</span></h2>
   <div class="drop" id="drop">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
     <p class="drop-title">Drag a file here</p>
@@ -72,7 +72,7 @@
         <button class="primary" id="x-share" type="button" aria-label="Share link" hidden>Link</button>
         <button class="copy" id="x-copy" type="button" data-copy="x-c3">Copy link</button>
       </div>
-      <p class="muted" id="x-share-hint">One receiver per link. <strong>After sharing, return to this browser page, where the sender is waiting.</strong> Keep this page open and in the foreground until the end: nothing is stored on the server. On the same phone, use split screen; otherwise receive on another device.</p>
+      <p class="muted" id="x-share-hint">Share the link first; READY appears when the receiver connects. One receiver per link. <strong>After sharing, return to this browser page, where the sender is waiting.</strong> Keep this page open and in the foreground until the end: nothing is stored on the server. On the same phone, use split screen; otherwise receive on another device.</p>
       <p class="muted" id="x-grace"></p>
       <p class="status" id="x-share-status" role="status"></p>
       <details class="terminal-options" id="x-terminal" open>
@@ -187,6 +187,18 @@
   // Tolleranza del server per un mittente caduto (secondi; 0 se disattivata, BASHT_SENDER_GRACE): la
   // pagina si riaggancia alla stessa prenotazione. lostAt è l'inizio della caduta, 0 se connessa.
   var grace = 0, lostAt = 0, retry = 0, reserved = false, chosen = null, pulse = 0, sharing = false;
+  var readyTimer = 0, readyTTL = 5000;
+
+  function readiness(value) {
+    clearTimeout(readyTimer);
+    value = value && busy && !sharing && document.visibilityState !== "hidden" && navigator.onLine !== false;
+    var badge = $("x-ready"), text = value ? "READY" : "UNREADY";
+    if (badge.textContent !== text) {
+      badge.textContent = text;
+      badge.className = "role peer-state " + (value ? "is-ready" : "is-unready");
+    }
+    if (value) readyTimer = setTimeout(function () { readiness(false); }, readyTTL);
+  }
 
   function size(n) {
     if (n < 1024) return n + (n === 1 ? " byte" : " bytes");
@@ -231,7 +243,7 @@
     idle: "The upload stalled: no data from this browser for too long.",
     length_mismatch: "The browser sent fewer bytes than the file size.",
     sender_gone: "The upload from this browser was interrupted. If you switched to another app, the phone may have stopped it: keep this page in the foreground and send the file again.",
-    expired: "No receiver opened the link in time: the link is closed."
+    expired: "No receiver started the download in time: the link is closed."
   };
   // cancelLink chiude il link sul server. keepalive: la richiesta parte anche mentre la pagina si
   // chiude. Dietro un proxy la sola chiusura delle connessioni arriva al server in ritardo.
@@ -245,6 +257,7 @@
   function finish(ok, msg) {
     if (!busy) return;
     busy = false;
+    readiness(false);
     lostAt = 0;
     clearInterval(ticker);
     clearTimeout(retry);
@@ -281,6 +294,7 @@
   function start(file) {
     setError("");
     busy = true;
+    readiness(false);
     attached = false;
     total = file.size;
     samples = [];
@@ -302,12 +316,13 @@
     sharing = false;
     $("x-share").disabled = false;
     $("x-share-status").textContent = "";
-    connect(file, JSON.stringify({ name: file.name, size: file.size, foreground: document.visibilityState !== "hidden" }), {});
+    connect(file, JSON.stringify({ name: file.name, size: file.size, foreground: document.visibilityState !== "hidden", readiness: true }), {});
   }
 
   // Al riaggancio il server decide se sostituire il PUT in attesa oppure recuperare solo
   // l'avanzamento di un relay già iniziato.
   function connect(file, body, headers) {
+    readiness(false);
     if (ctl) { var old = ctl; ctl = null; old.abort(); }
     var mine = ctl = new AbortController(), first = true;
     headers["Content-Type"] = "application/json";
@@ -322,6 +337,8 @@
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = "";
       function line(l) {
         var m = JSON.parse(l);
+        if (m.ready_ttl) readyTTL = m.ready_ttl * 1000;
+        if (typeof m.ready === "boolean") readiness(m.ready);
         if (first) {
           first = false;
           lostAt = 0;
@@ -344,7 +361,7 @@
           } else {
             samples = [];
             sample(0);
-            status("Waiting for the receiver to open the link…");
+            status("Waiting for the receiver to start the download…");
             send(file, m);
           }
         } else if (m.outcome) {
@@ -392,6 +409,7 @@
   function lost() {
     if (!busy || lostAt || !link) return;
     lostAt = Date.now();
+    readiness(false);
     clearInterval(ticker);
     if (ctl) { var c = ctl; ctl = null; c.abort(); }
     status("Connection lost. Return to this page and keep it in the foreground: reconnecting…");
@@ -403,7 +421,7 @@
     if (document.visibilityState === "hidden" || sharing) return;
     var h = {};
     h["X-Bashtransfer-Token"] = link.token;
-    connect(chosen, JSON.stringify({ resume: link.slug, rebind: true }), h);
+    connect(chosen, JSON.stringify({ resume: link.slug, rebind: true, readiness: true }), h);
     // Se la risposta non arriva (rete ancora assente) riprova: la richiesta non fallisce subito.
     retry = setTimeout(reconnect, 5000);
   }
@@ -499,6 +517,7 @@
     if (!busy || !link || sharing) return;
     var shared = link, btn = $("x-share");
     sharing = true;
+    readiness(false);
     btn.disabled = true;
     $("x-share-status").textContent = "After sharing, return to this browser page and keep it in the foreground until the download is complete.";
     foreground(false);
@@ -542,9 +561,10 @@
     if (grace > 0) { if (lostAt) reconnect(); else lost(); }
   }
   document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "hidden") foreground(false);
+    if (document.visibilityState === "hidden") { readiness(false); foreground(false); }
     else resume();
   });
+  window.addEventListener("offline", function () { readiness(false); });
   window.addEventListener("online", resume);
   window.addEventListener("pageshow", resume);
 })();

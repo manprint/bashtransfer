@@ -824,3 +824,71 @@ func TestRegistryForegroundHeartbeatExpires(t *testing.T) {
 		t.Fatalf("scadenza della presenza ha chiuso il link invece della tolleranza: %v", err)
 	}
 }
+
+func TestRegistryPeerReadinessLifecycle(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Minute)
+	s, binding := reservedBound(t, r)
+	t.Cleanup(func() { r.Cancel(s); r.Finish(s) })
+	if _, err := r.Peek(s.Slug); err != nil || s.PeerReady() {
+		t.Fatalf("la sola anteprima non deve confermare un ricevente: %v", err)
+	}
+	observe := func(want bool) {
+		t.Helper()
+		peer, err := r.ObserveReceiver(s.Slug)
+		if err != nil || peer.Ready != want || s.PeerReady() != want {
+			t.Fatalf("conferma ricevente: %+v, err=%v, atteso ready=%v", peer, err, want)
+		}
+	}
+	observe(true)
+	if _, err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("la conferma ha consumato il link: %v", err)
+	}
+	r.mu.Lock()
+	s.receiverSeen = time.Now().Add(-ReceiverPresenceTimeout)
+	r.mu.Unlock()
+	if s.PeerReady() {
+		t.Fatal("ricevente non più confermato ancora READY")
+	}
+	if err := r.Foreground(s.Slug, s.Token, false); err != nil {
+		t.Fatal(err)
+	}
+	observe(false)
+	if _, _, err := r.Resume(s.Slug, s.Token, true); err != nil {
+		t.Fatal(err)
+	}
+	observe(false)
+	var err error
+	_, binding, err = r.BindDetachable(s.Slug, s.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observe(true)
+	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); err != nil {
+		t.Fatal(err)
+	}
+	observe(false)
+	if !r.BeginRelay(s, binding) {
+		t.Fatal("relay non iniziato")
+	}
+	r.mu.Lock()
+	s.receiverSeen = time.Now().Add(-2 * ReceiverPresenceTimeout)
+	r.mu.Unlock()
+	if !s.PeerReady() {
+		t.Fatal("il collegamento dati attivo non conferma il ricevente")
+	}
+	if err := r.Foreground(s.Slug, s.Token, false); err != nil || s.PeerReady() {
+		t.Fatalf("mittente in background durante il relay ancora READY: %v", err)
+	}
+	if err := r.Foreground(s.Slug, s.Token, true); err != nil || !s.PeerReady() {
+		t.Fatalf("ritorno durante il relay non confermato: %v", err)
+	}
+	r.Cancel(s)
+	if s.PeerReady() {
+		t.Fatal("sessione annullata ancora READY")
+	}
+	r.Finish(s)
+	if _, err := r.ObserveReceiver(s.Slug); !errors.Is(err, ErrGone) || s.PeerReady() {
+		t.Fatalf("sessione finita ancora disponibile: %v", err)
+	}
+}

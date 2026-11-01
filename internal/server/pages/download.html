@@ -1,6 +1,6 @@
 {{define "content"}}
 <section class="card" aria-labelledby="dl-title">
-  <h2 id="dl-title"><span class="role role-recv">Receiver</span>Download a file</h2>
+  <h2 id="dl-title"><span class="role role-recv">Receiver</span>Download a file<span class="role peer-state is-unready" id="dl-ready" role="status" aria-live="polite" aria-atomic="true" title="READY means both connections were recently confirmed by the server.">UNREADY</span></h2>
   <dl class="file">
     <dt>File</dt><dd>{{.Name}}</dd>
     <dt>Size</dt><dd>{{.Size}}</dd>
@@ -26,63 +26,97 @@
 (function () {
   var form = document.getElementById("dl"), btn = form.querySelector("button");
   var status = document.getElementById("dl-status"), away = document.getElementById("dl-away");
-  var ready = away.hidden, submitted = false, closed = false, checking = false, timer = 0;
+  var badge = document.getElementById("dl-ready");
+  var ready = false, submitted = false, closed = false, pending = null, timer = 0, freshTimer = 0;
   var statusURL = new URL(window.location.href);
   statusURL.searchParams.set("status", "1");
-  function availability(state) {
-    ready = state === "ready";
-    away.hidden = state !== "away";
-    btn.disabled = !ready;
-    btn.textContent = ready ? "Download" : "Waiting for sender…";
-    status.textContent = ready
-      ? "The sender is ready. Press Download once; both sender and receiver must stay connected until it finishes."
-      : "Waiting for the sender to return. No download has started and the link has not been used.";
+  function readiness(value, ttl) {
+    clearTimeout(freshTimer);
+    ready = !!value;
+    var text = ready ? "READY" : "UNREADY";
+    if (badge.textContent !== text) {
+      badge.textContent = text;
+      badge.className = "role peer-state " + (ready ? "is-ready" : "is-unready");
+    }
+    if (ready) freshTimer = setTimeout(function () { unknown(); }, ttl);
+  }
+  function unknown() {
+    readiness(false);
+    btn.disabled = true;
+    btn.textContent = submitted ? "Download requested" : "Checking connection…";
+    status.textContent = submitted
+      ? "Check your browser's downloads. The connections are not confirmed; keep both devices connected."
+      : "Checking both connections. No download has started and the link has not been used.";
+  }
+  function invalidate() {
+    clearTimeout(timer);
+    if (pending) { var old = pending; pending = null; old.abort(); }
+    unknown();
   }
   function poll() {
     clearTimeout(timer);
-    if (submitted || closed || document.visibilityState === "hidden") return;
-    if (checking) return;
-    checking = true;
-    var ctl = new AbortController(), timeout = setTimeout(function () { ctl.abort(); }, 5000);
-    fetch(statusURL.href, { headers: { Accept: "application/json" }, cache: "no-store", signal: ctl.signal })
-      .then(function (r) { return r.json(); }).then(function (m) {
-        if (submitted) return;
-        if (m.state === "ready" || m.state === "away") availability(m.state);
+    if (closed || pending || document.visibilityState === "hidden" || navigator.onLine === false) return;
+    var ctl = pending = new AbortController(), began = Date.now();
+    var timeout = setTimeout(function () { ctl.abort(); }, 5000);
+    fetch(statusURL.href, { headers: { Accept: "application/json", "X-Bashtransfer-Readiness": "1" }, cache: "no-store", signal: ctl.signal })
+      .then(function (r) {
+        if (r.status !== 200 && r.status !== 404 && r.status !== 410) throw new Error("Status check failed");
+        return r.json().then(function (m) { if (r.status !== 200) m.ready = false; return m; });
+      }).then(function (m) {
+        if (pending !== ctl || document.visibilityState === "hidden" || navigator.onLine === false) return;
+        if (m.state === "ready" || m.state === "away" || ((m.state === "active" || m.state === "starting") && submitted)) {
+          var ttl = (m.ready_ttl || 5) * 1000 - (Date.now() - began);
+          var confirmed = m.ready === true && ttl > 0 && (submitted ? m.state === "active" : m.state === "ready");
+          readiness(confirmed, ttl);
+          away.hidden = m.state !== "away";
+          btn.disabled = submitted || !ready;
+          btn.textContent = submitted ? "Download requested" : ready ? "Download" : m.state === "away" ? "Waiting for sender…" : "Checking connection…";
+          status.textContent = submitted
+            ? ready
+              ? "Check your browser's downloads. Keep both devices connected; the sender sees OK when the download is complete."
+              : "Connections are UNREADY. Check your browser's downloads; keep both devices connected and ask the sender to return to their page."
+            : ready
+              ? "Both connections are READY. Press Download once; both devices must stay connected until it finishes."
+              : m.state === "away"
+                ? "Waiting for the sender to return. No download has started and the link has not been used."
+                : "Checking both connections. No download has started and the link has not been used.";
+        }
         else {
           closed = true;
-          ready = false;
+          readiness(false);
           btn.disabled = true;
-          btn.textContent = "Link unavailable";
+          btn.textContent = submitted ? "Download requested" : "Link unavailable";
           away.hidden = true;
           status.textContent = m.message || "This link no longer works. Ask the sender to send the file again.";
         }
       }).catch(function () {
-        if (!submitted) {
-          ready = false;
-          btn.disabled = true;
-          btn.textContent = "Checking connection…";
-          status.textContent = "Could not check the sender. Keep this page open: retrying…";
-        }
+        if (pending === ctl) unknown();
       }).then(function () {
         clearTimeout(timeout);
-        checking = false;
-        if (!submitted && !closed) timer = setTimeout(poll, 2000);
+        if (pending !== ctl) return;
+        pending = null;
+        if (!closed) timer = setTimeout(poll, 2000);
       });
   }
-  availability(ready ? "ready" : "away");
+  unknown();
   poll();
-  document.addEventListener("visibilitychange", poll);
-  window.addEventListener("online", poll);
-  window.addEventListener("pageshow", poll);
+  document.addEventListener("visibilitychange", function () { invalidate(); poll(); });
+  window.addEventListener("offline", invalidate);
+  window.addEventListener("pagehide", invalidate);
+  window.addEventListener("online", function () { invalidate(); poll(); });
+  window.addEventListener("pageshow", function () { invalidate(); poll(); });
   form.addEventListener("submit", function (e) {
     if (!ready || submitted) { e.preventDefault(); poll(); return; }
     submitted = true;
     clearTimeout(timer);
+    if (pending) { var old = pending; pending = null; old.abort(); }
+    readiness(false);
     // Lascia partire il form prima di disattivare il pulsante.
     setTimeout(function () {
       btn.disabled = true;
       btn.textContent = "Download requested";
       status.textContent = "Check your browser's downloads. Keep both devices connected; the sender sees OK when the download is complete.";
+      poll();
     }, 0);
   });
 })();
