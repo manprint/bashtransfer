@@ -105,7 +105,7 @@ if [[ $status -ne 0 ]]; then
 	if [[ "$MODE" == direct ]]; then
 		for i in 0 1 2 3; do echo "--- server-$i.log ---" >&2; tail -n 40 "$TMP/server-$i.log" >&2; done
 	else
-		for c in "${CONTAINERS[@]}"; do echo "--- $c ---" >&2; docker logs --tail 40 "$c" >&2 2>&1; done
+		for c in "${CONTAINERS[@]}"; do echo "--- $c ---" >&2; docker logs --tail 200 "$c" >&2 2>&1; done
 	fi
 	if [[ -z "${BASHT_UI_OUT:-}" ]]; then
 		cp -r "$OUT" "${TMPDIR:-/tmp}/bashtransfer-ui-$MODE-$$"
