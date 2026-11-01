@@ -357,7 +357,7 @@ await test('drag and drop + browser receiver on the download page', async () => 
   await dl.saveAs(saved);
   assert(sha(fs.readFileSync(saved)) === sha(pattern(size)), 'contenuto scaricato diverso');
   const btn = await rp.$eval('#dl button', (b) => ({ dis: b.disabled, t: b.textContent }));
-  assert(btn.dis && btn.t === 'Download started', `pulsante dopo il click ${JSON.stringify(btn)}`);
+  assert(btn.dis && btn.t === 'Download requested', `pulsante dopo il click ${JSON.stringify(btn)}`);
   const res = await waitResult(page);
   assert(res.cls === 'result ok', `esito mittente ${JSON.stringify(res)}`);
   noErrors(rp, 'download');
@@ -440,10 +440,10 @@ await test('closing the page closes the link', async () => {
   await page.context().close();
 });
 
-await test('without the DELETE the stream closes the link', async () => {
+await test('without the DELETE the grace period closes the link', async () => {
   const src = mkfile('crashed.bin', 24 << 20);
   const page = await newPage();
-  await page.goto(BASE + '/');
+  await page.goto(BASE_GRACE + '/');
   await page.setInputFiles('#file', src);
   await page.waitForSelector('#x-links:not([hidden])');
   const url = (await linkRows(page))[3].line;
@@ -456,8 +456,8 @@ await test('without the DELETE the stream closes the link', async () => {
   await sleep(1500);
   await page.click('#x-cancel');
   assert((await page.evaluate(() => window.__deletes)) === 1, 'Cancel senza DELETE');
-  const ms = await waitGone(url, 10000);
-  assert(ms >= 0, 'link ancora valido 10 s dopo la chiusura dello stream');
+  const ms = await waitGone(url, 30000);
+  assert(ms >= 0, 'link ancora valido dopo la tolleranza');
   console.log(`     link 410 ${ms} ms dopo la chiusura dello stream, senza DELETE`);
   await page.context().close();
 });
@@ -565,19 +565,17 @@ await test('sender grace: a browser receiver pressing Download while the sender 
     for (let i = 0; i < 40 && !away; i++) {
       const resp = await rp.goto(s.direct);
       assert(resp.status() === 200, `pagina ${resp.status()}`);
-      away = (await rp.$('#dl-away')) !== null;
+      away = await rp.isVisible('#dl-away');
       if (!away) await sleep(500);
     }
     assert(away, 'la pagina di download non avvisa che il mittente è assente');
-    // Diretto: l'header parte subito, il download del browser inizia con il mittente ancora assente.
-    // Dietro Apache il proxy può trattenere l'header fino ai primi dati: si sblocca il mittente subito.
-    const early = TAG === 'direct';
-    // noWaitAfter: con l'header trattenuto la navigazione resta in attesa e click non tornerebbe.
-    const downloaded = rp.waitForEvent('download', { timeout: early ? 5000 : 30000 });
-    await rp.click('#dl button', { noWaitAfter: true });
-    if (!early) px.block = false;
-    const dl = await downloaded;
+    assert(await rp.isDisabled('#dl button'), 'il download è disponibile con il mittente assente');
+    assert(/link has not been used/.test(await rp.textContent('#dl-status')), 'lo stato non spiega che il link resta intatto');
+    assert((await fetch(s.direct, { headers: { Accept: 'text/html' } })).status === 200, 'l’attesa ha consumato il link');
     px.block = false;
+    await rp.waitForFunction(() => !document.querySelector('#dl button').disabled, null, { timeout: 15000 });
+    assert(!(await rp.isVisible('#dl-away')), 'lo stato non si aggiorna al ritorno del mittente');
+    const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: 30000 }), rp.click('#dl button')]);
     const saved = path.join(OUT, 'recv-grace2.bin');
     await dl.saveAs(saved);
     assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file ricevuto diverso');
@@ -597,10 +595,14 @@ await test('sender grace: the link closes if the sender does not come back in ti
     await sleep(1000);
     px.block = true;
     px.sever();
-    const res = await waitResult(s.page, 20000);
-    assert(res.cls === 'result err' && /no longer works/.test(res.text), `esito ${JSON.stringify(res)}`);
-    px.block = false;
     rp = await newPage();
+    await rp.goto(s.direct);
+    await rp.waitForFunction(() => /Sender stopped/.test(document.getElementById('dl-status').textContent), null, { timeout: 30000 });
+    assert(await rp.isDisabled('#dl button'), 'il pulsante resta attivo dopo la scadenza');
+    assert((await waitGone(s.direct, 30000)) >= 0, 'il server non ha fatto scadere la tolleranza');
+    px.block = false;
+    const res = await waitResult(s.page, 15000);
+    assert(res.cls === 'result err' && /no longer works/.test(res.text), `esito ${JSON.stringify(res)}`);
     let gone = null;
     for (let i = 0; i < 40 && !gone; i++) {
       const resp = await rp.goto(s.direct);
@@ -612,6 +614,108 @@ await test('sender grace: the link closes if the sender does not come back in ti
     px.close();
     for (const p of [rp, s && s.page]) if (p) await p.context().close().catch(() => {});
   }
+});
+
+await test('native sharing: return guidance, cancellation and Copy fallback', async () => {
+  const page = await newPage({ viewport: { width: 390, height: 844 } });
+  const src = mkfile('share.bin', 1 << 20);
+  try {
+    await page.addInitScript(() => {
+      window.__shares = [];
+      window.__shareMode = 'abort';
+      Object.defineProperty(navigator, 'share', { configurable: true, value: (data) => {
+        window.__shares.push(data);
+        if (window.__shareMode === 'abort') return Promise.reject(new DOMException('cancelled', 'AbortError'));
+        if (window.__shareMode === 'fail') return Promise.reject(new Error('unavailable'));
+        return Promise.resolve();
+      } });
+    });
+    await page.goto(BASE_GRACE + '/');
+    await page.setInputFiles('#file', src);
+    await page.waitForSelector('#x-links:not([hidden])');
+    const url = (await linkRows(page))[3].line;
+    assert(await page.isVisible('#x-share'), 'pulsante di condivisione nativa assente');
+    assert(/After sharing, return to this browser page/.test(await page.textContent('#x-share-hint')), 'istruzioni di ritorno assenti');
+    for (const mode of ['abort', 'fail', 'ok']) {
+      await page.evaluate((mode) => { window.__shareMode = mode; }, mode);
+      await page.click('#x-share');
+      await page.waitForFunction(() => !document.getElementById('x-share').disabled);
+      assert(await page.isVisible('#x-links'), 'la condivisione ha annullato il link');
+      if (mode === 'fail') assert(/Use Copy/.test(await page.textContent('#x-share-status')), 'fallback Copy assente');
+    }
+    const shares = await page.evaluate(() => window.__shares);
+    assert(shares.length === 3 && shares.every((s) => s.url === url && !s.files), `condivisione ${JSON.stringify(shares)}`);
+    const recv = path.join(OUT, 'recv-share');
+    const r = await sh(`curl -sS -f -OJ "${url}"`, recv).done;
+    assert(r.code === 0, `download dopo la condivisione: ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(recv, 'share.bin'))) === sha(fs.readFileSync(src)), 'file dopo la condivisione diverso');
+    assert((await waitResult(page)).cls === 'result ok', 'invio dopo la condivisione fallito');
+    noErrors(page, 'share', PUT_FAILED);
+  } finally { await page.context().close(); }
+});
+
+await test('foreground return recovers a silent stalled connection', async () => {
+  const px = await severProxy(BASE_GRACE);
+  const page = await newPage();
+  const src = mkfile('silent.bin', 1 << 20);
+  try {
+    await page.addInitScript(() => {
+      const original = window.fetch;
+      window.fetch = (url, opts) => {
+        const r = original(url, opts);
+        if (url === '/' && opts?.method === 'POST' && JSON.parse(opts.body).name) {
+          return r.then(async (res) => {
+            const reader = res.body.getReader(), first = await reader.read();
+            window.__heldReader = reader;
+            return new Response(new ReadableStream({ start(c) { c.enqueue(first.value); } }), {
+              headers: { 'Content-Type': 'application/x-ndjson' }
+            });
+          });
+        }
+        return r;
+      };
+      const XHR = window.XMLHttpRequest;
+      window.XMLHttpRequest = function () {
+        const xhr = new XHR();
+        window.__xhr = xhr;
+        return xhr;
+      };
+    });
+    await page.goto(px.url + '/');
+    await page.setInputFiles('#file', src);
+    await page.waitForSelector('#x-links:not([hidden])');
+    const url = (await linkRows(page))[3].line;
+    const direct = url.replace(px.url, BASE_GRACE);
+    await page.evaluate(() => { window.__xhr.onerror = null; });
+    px.sever();
+    await sleep(1500);
+    assert((await page.textContent('#x-status')) === WAITING, 'la simulazione ha notificato la perdita alla UI');
+    const upload = page.waitForRequest((r) => r.method() === 'PUT' && r.url() === url);
+    await page.evaluate(() => window.dispatchEvent(new Event('pageshow')));
+    await upload;
+    const recv = path.join(OUT, 'recv-silent');
+    const r = await sh(`curl -sS -f -OJ "${direct}"`, recv).done;
+    assert(r.code === 0, `download dopo il ritorno: ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(recv, 'silent.bin'))) === sha(fs.readFileSync(src)), 'file dopo il ritorno diverso');
+    assert((await waitResult(page)).cls === 'result ok', 'il ritorno in primo piano non ha recuperato la sessione');
+    noErrors(page, 'silent resume', PUT_FAILED);
+  } finally { px.close(); await page.context().close(); }
+});
+
+await test('native sharing unavailable keeps Copy usable', async () => {
+  const page = await newPage({ clipboard: BASE });
+  try {
+    await page.addInitScript(() => Object.defineProperty(navigator, 'share', { configurable: true, value: undefined }));
+    await page.goto(BASE + '/');
+    await page.setInputFiles('#file', mkfile('copy-only.bin', 100));
+    await page.waitForSelector('#x-links:not([hidden])');
+    assert(!(await page.isVisible('#x-share')), 'condivisione mostrata senza supporto');
+    const url = (await linkRows(page))[3].line;
+    await page.click('[data-copy="x-c3"]');
+    await page.waitForFunction(() => document.querySelector('[data-copy="x-c3"]').textContent === 'Copied');
+    assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'fallback di copia non funzionante');
+    await page.click('#x-cancel');
+  } finally { await page.context().close(); }
 });
 
 await test('unknown link page', async () => {

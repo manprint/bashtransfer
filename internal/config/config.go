@@ -51,6 +51,7 @@ func Load(getenv func(string) string) (Config, error) {
 		PublicURL:   getenv("BASHT_PUBLIC_URL"),
 		WaitTimeout: time.Hour,
 		IdleTimeout: 2 * time.Minute,
+		SenderGrace: 2 * time.Minute,
 		MaxSessions: 1000,
 		BufSize:     262144,
 		LogFormat:   LogText,
@@ -85,7 +86,7 @@ func Load(getenv func(string) string) (Config, error) {
 		cfg.IdleTimeout = d
 	}
 
-	// Secondi interi; vuota o 0 disattiva la tolleranza (comportamento di sempre).
+	// Secondi interi; 0 disattiva la tolleranza.
 	if v := getenv("BASHT_SENDER_GRACE"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 || n > maxSenderGraceSeconds {

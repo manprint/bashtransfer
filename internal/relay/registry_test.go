@@ -728,3 +728,99 @@ func TestRegistryGraceRebindStopsTimer(t *testing.T) {
 		t.Fatalf("sessioni %d, Err %v: il riaggancio non ha fermato la scadenza", r.Len(), s.Err())
 	}
 }
+
+func TestRegistryStaleGraceTimerDoesNotExpireNewDetach(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Minute)
+	s, old := reservedBound(t, r)
+	t.Cleanup(func() { r.Cancel(s); r.Finish(s) })
+	expired := make(chan *Session, 1)
+	r.OnGraceExpired(func(s *Session) { expired <- s })
+	r.Detach(s, old)
+	r.mu.Lock()
+	stale := s.bindTimer
+	r.mu.Unlock()
+	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
+	if err != nil || !r.Detach(s, fresh) {
+		t.Fatalf("seconda disconnessione: %v", err)
+	}
+	// Il callback del vecchio timer era già in coda quando il mittente si è riagganciato.
+	stale.Reset(0)
+	select {
+	case <-expired:
+		t.Fatal("il vecchio timer ha fatto scadere la nuova tolleranza")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("nuova tolleranza interrotta dal timer precedente: %v", err)
+	}
+}
+
+func TestRegistryForegroundLifecycle(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Minute)
+	s, old := reservedBound(t, r)
+	t.Cleanup(func() { r.Cancel(s); r.Finish(s) })
+	if err := r.Foreground(s.Slug, s.Token, true); err != nil {
+		t.Fatal(err)
+	}
+	r.StreamOpen(s)
+	if r.StreamClosed(s) || s.Away() {
+		t.Fatal("la sola chiusura del controllo ha staccato il body")
+	}
+	if err := r.Foreground(s.Slug, "wrong", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("presenza con token errato: %v", err)
+	}
+	if err := r.Foreground(s.Slug, s.Token, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); !errors.Is(err, ErrSenderAway) {
+		t.Fatalf("download dal browser con mittente assente: %v", err)
+	}
+	if _, err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("il download in attesa ha consumato il link: %v", err)
+	}
+	if _, started, err := r.Resume(s.Slug, s.Token, true); err != nil || started {
+		t.Fatalf("ripresa prima del relay: started=%v err=%v", started, err)
+	}
+	if r.BeginRelay(s, old) {
+		t.Fatal("il vecchio PUT ha iniziato il relay dopo la ripresa")
+	}
+	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); err != nil || !r.BeginRelay(s, fresh) {
+		t.Fatalf("inizio dal nuovo PUT: %v", err)
+	}
+	if _, started, err := r.Resume(s.Slug, s.Token, true); err != nil || !started {
+		t.Fatalf("ripresa durante il relay: started=%v err=%v", started, err)
+	}
+	select {
+	case <-fresh:
+		t.Fatal("il recupero del controllo ha chiuso il body in trasferimento")
+	default:
+	}
+}
+
+func TestRegistryForegroundHeartbeatExpires(t *testing.T) {
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Minute)
+	s, _ := reservedBound(t, r)
+	t.Cleanup(func() { r.Cancel(s); r.Finish(s) })
+	if err := r.Foreground(s.Slug, s.Token, true); err != nil {
+		t.Fatal(err)
+	}
+	// Simula la scadenza della presenza senza attendere il timeout di produzione.
+	r.mu.Lock()
+	s.presenceTimer.Reset(20 * time.Millisecond)
+	r.mu.Unlock()
+	for deadline := time.Now().Add(time.Second); !s.Away(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("presenza scaduta senza mettere il mittente in tolleranza")
+		}
+	}
+	if _, err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("scadenza della presenza ha chiuso il link invece della tolleranza: %v", err)
+	}
+}

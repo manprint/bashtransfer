@@ -6,9 +6,7 @@
     <dt>Size</dt><dd>{{.Size}}</dd>
   </dl>
   <form id="dl" method="post"><button class="primary" type="submit">Download</button></form>
-  {{- if .Away}}
-  <p class="muted" id="dl-away">The sender is not connected right now, perhaps because their phone is in the background. You can press Download: the file starts when the sender is back.</p>
-  {{- end}}
+  <p class="muted" id="dl-away"{{if not .Away}} hidden{{end}}>The sender is not connected right now, perhaps because their phone is in the background. Ask them to return to their sending page and keep it in the foreground. This page updates automatically; press Download when the sender is ready.</p>
   <p class="muted" id="dl-status" role="status">This link works for one download only: once you press Download, it is used.</p>
 </section>
 {{- if .Commands}}
@@ -26,16 +24,65 @@
 {{end}}
 {{define "script"}}<script>
 (function () {
-  // Il pulsante si disattiva dopo l'invio del form: un secondo POST troverebbe il link già usato.
-  // Il setTimeout lascia partire l'invio prima di disattivarlo.
-  var form = document.getElementById("dl");
-  form.addEventListener("submit", function () {
-    var btn = form.querySelector("button");
-    var status = document.getElementById("dl-status");
+  var form = document.getElementById("dl"), btn = form.querySelector("button");
+  var status = document.getElementById("dl-status"), away = document.getElementById("dl-away");
+  var ready = away.hidden, submitted = false, closed = false, checking = false, timer = 0;
+  var statusURL = new URL(window.location.href);
+  statusURL.searchParams.set("status", "1");
+  function availability(state) {
+    ready = state === "ready";
+    away.hidden = state !== "away";
+    btn.disabled = !ready;
+    btn.textContent = ready ? "Download" : "Waiting for sender…";
+    status.textContent = ready
+      ? "The sender is ready. Press Download once; both sender and receiver must stay connected until it finishes."
+      : "Waiting for the sender to return. No download has started and the link has not been used.";
+  }
+  function poll() {
+    clearTimeout(timer);
+    if (submitted || closed || document.visibilityState === "hidden") return;
+    if (checking) return;
+    checking = true;
+    var ctl = new AbortController(), timeout = setTimeout(function () { ctl.abort(); }, 5000);
+    fetch(statusURL.href, { headers: { Accept: "application/json" }, cache: "no-store", signal: ctl.signal })
+      .then(function (r) { return r.json(); }).then(function (m) {
+        if (submitted) return;
+        if (m.state === "ready" || m.state === "away") availability(m.state);
+        else {
+          closed = true;
+          ready = false;
+          btn.disabled = true;
+          btn.textContent = "Link unavailable";
+          away.hidden = true;
+          status.textContent = m.message || "This link no longer works. Ask the sender to send the file again.";
+        }
+      }).catch(function () {
+        if (!submitted) {
+          ready = false;
+          btn.disabled = true;
+          btn.textContent = "Checking connection…";
+          status.textContent = "Could not check the sender. Keep this page open: retrying…";
+        }
+      }).then(function () {
+        clearTimeout(timeout);
+        checking = false;
+        if (!submitted && !closed) timer = setTimeout(poll, 2000);
+      });
+  }
+  availability(ready ? "ready" : "away");
+  poll();
+  document.addEventListener("visibilitychange", poll);
+  window.addEventListener("online", poll);
+  window.addEventListener("pageshow", poll);
+  form.addEventListener("submit", function (e) {
+    if (!ready || submitted) { e.preventDefault(); poll(); return; }
+    submitted = true;
+    clearTimeout(timer);
+    // Lascia partire il form prima di disattivare il pulsante.
     setTimeout(function () {
       btn.disabled = true;
-      btn.textContent = "Download started";
-      status.textContent = "Check your browser's downloads. The link is now used; the sender sees OK when the download is complete.";
+      btn.textContent = "Download requested";
+      status.textContent = "Check your browser's downloads. Keep both devices connected; the sender sees OK when the download is complete.";
     }, 0);
   });
 })();

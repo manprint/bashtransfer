@@ -152,6 +152,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.usage(w, r)
 	case r.Method == http.MethodPost && seg == "":
 		h.reserve(w, r)
+	case r.Method == http.MethodGet && r.URL.Query().Get("status") == "1":
+		h.linkStatus(w, r, seg)
+	case r.Method == http.MethodPost && seg != "" && r.Header.Get(tokenHeader) != "":
+		h.foreground(w, r, seg)
 	case r.Method == http.MethodGet && (wantsHTML(r) || isPreviewAgent(r)):
 		// Un browser, o un'anteprima di chat e posta, vede la pagina di download: solo il pulsante
 		// (POST) reclama il link, così aprirlo o incollarlo in una chat non lo consuma.
@@ -257,7 +261,9 @@ type reservation struct {
 	Commands []command `json:"commands"`
 	// Grace, se > 0, sono i secondi di tolleranza per un mittente caduto (BASHT_SENDER_GRACE): la
 	// pagina si riaggancia con la ripresa dello stream (POST / con resume) e un nuovo PUT.
-	Grace int64 `json:"grace,omitempty"`
+	Grace   int64 `json:"grace,omitempty"`
+	Started bool  `json:"started,omitempty"`
+	Bytes   int64 `json:"bytes,omitempty"`
 }
 
 // reserve prenota una sessione per un invio dal browser: POST / con JSON {"name": ..., "size": ...}.
@@ -289,9 +295,11 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name   string `json:"name"`
-		Size   *int64 `json:"size"`
-		Resume string `json:"resume"`
+		Name       string `json:"name"`
+		Size       *int64 `json:"size"`
+		Resume     string `json:"resume"`
+		Rebind     bool   `json:"rebind"`
+		Foreground *bool  `json:"foreground"`
 	}
 	// Il body va letto fino in fondo: solo dopo net/http rileva la chiusura della connessione e
 	// annulla il contesto della richiesta.
@@ -302,10 +310,11 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	}
 	grace := h.reg.SenderGrace()
 	var s *relay.Session
+	var alreadyStarted bool
 	if req.Resume != "" {
 		// Riapre lo stream di una prenotazione viva: solo con la tolleranza attiva e il token giusto.
 		var err error
-		if s, err = h.reg.Reserved(req.Resume, r.Header.Get(tokenHeader)); err != nil || grace <= 0 {
+		if s, alreadyStarted, err = h.reg.Resume(req.Resume, r.Header.Get(tokenHeader), req.Rebind); err != nil {
 			h.reject(w, r, slog.LevelInfo, http.StatusNotFound, reasonNotFound, "404 page not found")
 			return
 		}
@@ -317,6 +326,9 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		}
 		h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_reserved",
 			slog.String("id", s.ID), slog.Int64("length", s.Length))
+		if req.Foreground != nil {
+			_ = h.reg.Foreground(s.Slug, s.Token, *req.Foreground)
+		}
 	}
 	// All'uscita dallo stream (pagina chiusa, rete caduta, Cancel, sessione finita): senza tolleranza
 	// la sessione termina (Cancel non fa nulla su una finita); con la tolleranza la chiusura
@@ -338,7 +350,8 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	send := func(v any) bool { return enc.Encode(v) == nil && rc.Flush() == nil }
 	if !send(reservation{
 		Slug: s.Slug, URL: u, Token: s.Token, Commands: append(receiverCommands(u), command{"direct", u}),
-		Grace: int64(grace / time.Second),
+		Grace:   int64(grace / time.Second),
+		Started: alreadyStarted, Bytes: s.Delivered(),
 	}) {
 		return
 	}
@@ -393,6 +406,26 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+func (h *handler) foreground(w http.ResponseWriter, r *http.Request, id string) {
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		h.reject(w, r, slog.LevelDebug, http.StatusUnsupportedMediaType, reasonMediaType, "unsupported media type")
+		return
+	}
+	var req struct {
+		Foreground *bool `json:"foreground"`
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	if err != nil || json.Unmarshal(body, &req) != nil || req.Foreground == nil {
+		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
+		return
+	}
+	if h.reg.Foreground(id, r.Header.Get(tokenHeader), *req.Foreground) != nil {
+		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // cancel annulla un invio dal browser: DELETE /<slug> con il token della prenotazione. La pagina lo
@@ -452,7 +485,6 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			return
 		}
 	}
-	name := s.Name
 	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_accepted",
 		slog.String("id", s.ID), slog.Int64("length", s.Length))
 	tr := transferLog{session: s}
@@ -545,20 +577,16 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		select {
 		case rcv := <-s.Attached():
 			// Un aggancio sostitutivo ha già preso il posto di questo: il ricevente va al nuovo gestore.
-			select {
-			case <-binding:
+			if !h.reg.BeginRelay(s, binding) {
 				s.Requeue(rcv)
 				detached = true
 				drain = 0
 				return
-			default:
 			}
 			rr := rcv.(*responseReceiver)
 			tr.attached = time.Now()
 			h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "receiver_attached",
 				slog.String("id", s.ID), seconds("wait_s", tr.attached.Sub(s.Created)))
-			rr.start(name, s.Length)
-			s.Start()
 			body := relay.NewIdleReader(r.Body, h.opts.IdleTimeout, rc.SetReadDeadline)
 			n, err := h.copyUntilAbort(s, rr, body)
 			tr.bytes = n
@@ -752,9 +780,7 @@ func roundDuration(d time.Duration) time.Duration {
 	return d.Round(100 * time.Millisecond)
 }
 
-// copyUntilAbort copia il body verso il ricevente. Se la sessione viene interrotta durante la
-// copia (ricevente caduto), una lettura del mittente in attesa di dati viene sbloccata subito
-// invece di attendere il prossimo byte o BASHT_IDLE_TIMEOUT.
+// copyUntilAbort sblocca sia la lettura dal mittente sia una scrittura ferma verso il ricevente.
 func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *relay.IdleReader) (int64, error) {
 	copied := make(chan struct{})
 	watched := make(chan struct{})
@@ -763,12 +789,21 @@ func (h *handler) copyUntilAbort(s *relay.Session, rr *responseReceiver, body *r
 		select {
 		case <-s.Aborted():
 			body.Stop()
+			rr.stop()
 		case <-copied:
 		}
 	}()
-	n, err := h.copier.Copy(deliveredCounter{rr, s}, body)
+	rr.start(s.Name, s.Length)
+	var n int64
+	err := rr.flushErr
+	if err == nil {
+		n, err = h.copier.Copy(deliveredCounter{rr, s}, body)
+	}
 	close(copied)
 	<-watched
+	if err == nil {
+		err = rr.flushErr
+	}
 	return n, err
 }
 
@@ -920,8 +955,17 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	rcv := newResponseReceiver(w, h.opts.IdleTimeout)
-	s, err := h.reg.Claim(id, rcv)
+	var s *relay.Session
+	var err error
+	if wantsHTML(r) {
+		s, err = h.reg.ClaimReady(id, rcv)
+	} else {
+		s, err = h.reg.Claim(id, rcv)
+	}
 	switch {
+	case errors.Is(err, relay.ErrSenderAway):
+		h.landing(w, r, id)
+		return
 	case errors.Is(err, relay.ErrNotFound):
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
@@ -939,13 +983,6 @@ func (h *handler) download(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "download_claimed", slog.String("id", s.ID))
-	// Mittente assente in tolleranza: a un browser l'header parte subito, così il download diventa
-	// un download del browser (che prosegue anche con l'app in secondo piano) invece di una
-	// richiesta in attesa; i dati arrivano quando il mittente torna.
-	if h.reg.SenderGrace() > 0 && wantsHTML(r) && s.Away() {
-		rcv.start(s.Name, s.Length)
-	}
-
 	finished := s.Finished()
 	ctxDone := r.Context().Done()
 	for waiting := true; waiting; {

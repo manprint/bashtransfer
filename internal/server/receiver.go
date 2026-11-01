@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"bashtransfer/internal/relay"
@@ -21,10 +22,11 @@ type responseReceiver struct {
 	// writeTimeout, se > 0, è il tempo massimo per una singola scrittura verso il ricevente:
 	// un ricevente connesso che non legge bloccherebbe altrimenti mittente e sessione senza fine.
 	writeTimeout time.Duration
-	// started è scritto sotto mu: start può arrivare dal gestore del ricevente (header anticipato con
-	// il mittente assente) e dalla goroutine del mittente.
-	mu      sync.Mutex
-	started bool
+	mu           sync.Mutex
+	started      bool
+	stopped      atomic.Bool
+	// L'errore del flush è letto e scritto solo dalla goroutine che copia il file.
+	flushErr error
 }
 
 func newResponseReceiver(w http.ResponseWriter, writeTimeout time.Duration) *responseReceiver {
@@ -55,6 +57,12 @@ func (r *responseReceiver) start(name string, length int64) {
 }
 
 func (r *responseReceiver) Write(p []byte) (int, error) {
+	if r.flushErr != nil {
+		return 0, r.flushErr
+	}
+	if r.stopped.Load() {
+		return 0, relay.ErrReceiverGone
+	}
 	r.armWriteDeadline()
 	n, err := r.w.Write(p)
 	if err != nil {
@@ -65,19 +73,31 @@ func (r *responseReceiver) Write(p []byte) (int, error) {
 }
 
 func (r *responseReceiver) Flush() {
-	_ = r.rc.Flush()
+	if r.flushErr == nil {
+		if err := r.rc.Flush(); err != nil {
+			r.flushErr = fmt.Errorf("%w: %w", relay.ErrReceiverGone, err)
+		}
+	}
+}
+
+func (r *responseReceiver) stop() {
+	r.stopped.Store(true)
+	_ = r.rc.SetWriteDeadline(time.Unix(1, 0))
 }
 
 func (r *responseReceiver) armWriteDeadline() {
 	if r.writeTimeout > 0 {
 		_ = r.rc.SetWriteDeadline(time.Now().Add(r.writeTimeout))
 	}
+	if r.stopped.Load() {
+		_ = r.rc.SetWriteDeadline(time.Unix(1, 0))
+	}
 }
 
 // clearWriteDeadline toglie la scadenza lasciata dall'ultima scrittura: la connessione può essere
 // riusata (keep-alive) e un deadline passato farebbe fallire la risposta successiva.
 func (r *responseReceiver) clearWriteDeadline() {
-	if r.writeTimeout > 0 {
+	if r.writeTimeout > 0 || r.stopped.Load() {
 		_ = r.rc.SetWriteDeadline(time.Time{})
 	}
 }

@@ -21,6 +21,7 @@ var (
 	ErrCapacity       = errors.New("session capacity reached")
 	ErrSlugCollision  = errors.New("slug collision")
 	ErrSenderGone     = errors.New("sender gone")
+	ErrSenderAway     = errors.New("sender not available")
 	ErrReceiverGone   = errors.New("receiver gone")
 	ErrLengthMismatch = errors.New("length mismatch")
 	ErrIdle           = errors.New("sender idle")
@@ -45,7 +46,8 @@ func (e *GoneError) Error() string { return ErrGone.Error() }
 func (e *GoneError) Is(target error) bool { return target == ErrGone }
 
 const (
-	slugAttempts = 5
+	slugAttempts          = 5
+	senderPresenceTimeout = 15 * time.Second
 	// tombstoneTTL: per quanto uno slug terminale resta 410 (D17).
 	tombstoneTTL = 24 * time.Hour
 	// maxTombstones limita la memoria delle tombstone (circa 100 byte ciascuna): oltre il limite
@@ -81,14 +83,19 @@ type Session struct {
 	// sostitutivo (BindDetachable). Un aggancio nuovo ne crea uno nuovo.
 	unbind chan struct{}
 	// streams conta gli stream di avanzamento aperti dal mittente nel browser (StreamOpen).
-	streams   int
-	err       error
-	timer     *time.Timer
-	bindTimer *time.Timer
-	attached  chan Receiver
-	expired   chan struct{}
-	finished  chan struct{}
-	aborted   chan struct{}
+	streams            int
+	monitored          bool
+	foreground         bool
+	presenceTimer      *time.Timer
+	presenceGeneration uint64
+	err                error
+	timer              *time.Timer
+	bindTimer          *time.Timer
+	bindGeneration     uint64
+	attached           chan Receiver
+	expired            chan struct{}
+	finished           chan struct{}
+	aborted            chan struct{}
 
 	finishOnce sync.Once
 
@@ -252,6 +259,7 @@ func (r *Registry) BindDetachable(id, token string) (*Session, <-chan struct{}, 
 		close(s.unbind)
 	}
 	s.bound = true
+	s.bindGeneration++
 	s.bindTimer.Stop()
 	s.unbind = make(chan struct{})
 	return s, s.unbind, nil
@@ -267,12 +275,79 @@ func (s *Session) relayStarted() bool {
 	}
 }
 
-// Away riporta se una sessione prenotata non ha un mittente agganciato: il body non è ancora
-// arrivato, o il mittente è caduto e resta in tolleranza.
+// Away riporta se il body non è agganciato o la pagina che gestisce la presenza è assente.
 func (s *Session) Away() bool {
 	s.reg.mu.Lock()
 	defer s.reg.mu.Unlock()
-	return s.Token != "" && !s.bound
+	return s.awayLocked()
+}
+
+func (s *Session) awayLocked() bool {
+	return s.Token != "" && (!s.bound || (s.monitored && !s.foreground))
+}
+
+// BeginRelay rende atomici l'inizio della copia e la sostituzione del PUT: un vecchio
+// aggancio non può iniziare a leggere il file dopo che Resume lo ha staccato.
+func (r *Registry) BeginRelay(s *Session, binding <-chan struct{}) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s.Token != "" && (!s.bound || s.unbind != binding) {
+		return false
+	}
+	s.Start()
+	return true
+}
+
+// Foreground registra la disponibilità della pagina, senza leggere il body del file.
+func (r *Registry) Foreground(id, token string, visible bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.sessions[id]
+	if !ok || s.Token == "" || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 {
+		return ErrNotFound
+	}
+	r.foregroundLocked(s, visible)
+	return nil
+}
+
+func (r *Registry) foregroundLocked(s *Session, visible bool) {
+	s.monitored, s.foreground = true, visible
+	s.presenceGeneration++
+	if s.presenceTimer != nil {
+		s.presenceTimer.Stop()
+	}
+	if !visible {
+		r.detachLocked(s, s.unbind)
+		return
+	}
+	generation := s.presenceGeneration
+	s.presenceTimer = time.AfterFunc(senderPresenceTimeout, func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.sessions[s.Slug] == s && s.presenceGeneration == generation {
+			s.foreground = false
+			r.detachLocked(s, s.unbind)
+		}
+	})
+}
+
+// Resume riapre il controllo della sessione. Rebind stacca il vecchio PUT solo prima
+// del relay; durante la copia si recupera esclusivamente lo stream di avanzamento.
+func (r *Registry) Resume(id, token string, rebind bool) (*Session, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s, ok := r.sessions[id]
+	if !ok || s.Token == "" || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 || r.senderGrace <= 0 {
+		return nil, false, ErrNotFound
+	}
+	started := s.relayStarted()
+	if rebind && !started {
+		r.detachLocked(s, s.unbind)
+	}
+	if s.monitored {
+		r.foregroundLocked(s, true)
+	}
+	return s, started, nil
 }
 
 // Requeue rimette in coda il ricevente letto da Attached da un gestore che cede la sessione a un
@@ -287,18 +362,15 @@ func (r *Registry) StreamOpen(s *Session) {
 	s.streams++
 }
 
-// StreamClosed registra la chiusura di uno stream di avanzamento. Con la tolleranza attiva, la
-// chiusura dell'ultimo stream prima dell'inizio del relay vale come caduta del mittente: il suo PUT
-// con il body non letto non lo rivela in modo affidabile (la chiusura resta in coda dietro i dati
-// nei buffer di rete), lo stream sì. La sessione va in tolleranza come con Detach. Riporta true se
-// l'ha messa in tolleranza.
+// StreamClosed registra la chiusura del controllo. Per i client senza presenza, la chiusura
+// dell'ultimo stream prima del relay avvia la tolleranza. Con presenza, il body è indipendente.
 func (r *Registry) StreamClosed(s *Session) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if s.streams > 0 {
 		s.streams--
 	}
-	if s.streams > 0 || !s.bound {
+	if s.streams > 0 || !s.bound || s.monitored {
 		return false
 	}
 	return r.detachLocked(s, s.unbind) && !s.bound
@@ -327,9 +399,11 @@ func (r *Registry) detachLocked(s *Session, binding <-chan struct{}) bool {
 	}
 	s.bound = false
 	close(s.unbind)
+	s.bindGeneration++
+	generation := s.bindGeneration
 	s.bindTimer.Stop()
 	s.bindTimer = time.AfterFunc(r.senderGrace, func() {
-		if r.unbound(s) {
+		if r.unbound(s, generation) {
 			r.mu.Lock()
 			fn := r.onGraceExpired
 			r.mu.Unlock()
@@ -353,12 +427,10 @@ func (r *Registry) Reserved(id, token string) (*Session, error) {
 	return s, nil
 }
 
-// unbound termina una sessione prenotata senza mittente allo scadere di bindTimeout. Un ricevente
-// agganciato vede la sessione finita con ErrSenderGone. Riporta se ha terminato la sessione: false
-// se il body è già agganciato o la sessione è già finita.
-func (r *Registry) unbound(s *Session) bool {
+// unbound ignora i callback di un aggancio sostituito; generation 0 è l'annullamento esplicito.
+func (r *Registry) unbound(s *Session, generation uint64) bool {
 	r.mu.Lock()
-	if s.bound || r.sessions[s.Slug] != s {
+	if s.bound || r.sessions[s.Slug] != s || (generation != 0 && generation != s.bindGeneration) {
 		r.mu.Unlock()
 		return false
 	}
@@ -368,6 +440,9 @@ func (r *Registry) unbound(s *Session) bool {
 	}
 	s.timer.Stop()
 	s.bindTimer.Stop()
+	if s.presenceTimer != nil {
+		s.presenceTimer.Stop()
+	}
 	delete(r.sessions, s.Slug)
 	r.bury(s.Slug, GoneSenderGone)
 	r.mu.Unlock()
@@ -384,7 +459,7 @@ func (r *Registry) Cancel(s *Session) {
 		return
 	default:
 	}
-	if !r.unbound(s) {
+	if !r.unbound(s, 0) {
 		s.Abort(ErrSenderGone)
 	}
 }
@@ -426,7 +501,8 @@ func (r *Registry) create(name string, length int64, token string, bindTimeout t
 		r.sessions[id] = s
 		s.timer = time.AfterFunc(r.waitTimeout, func() { r.expire(s) })
 		if token != "" {
-			s.bindTimer = time.AfterFunc(bindTimeout, func() { r.unbound(s) })
+			s.bindGeneration = 1
+			s.bindTimer = time.AfterFunc(bindTimeout, func() { r.unbound(s, 1) })
 		}
 		return s, nil
 	}
@@ -453,6 +529,15 @@ func newToken() (string, error) {
 
 // Claim assegna il ricevente allo slug. Esattamente un claim riesce per sessione.
 func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
+	return r.claim(id, rcv, false)
+}
+
+// ClaimReady lascia il link intatto quando il browser deve attendere il mittente.
+func (r *Registry) ClaimReady(id string, rcv Receiver) (*Session, error) {
+	return r.claim(id, rcv, true)
+}
+
+func (r *Registry) claim(id string, rcv Receiver, requireReady bool) (*Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prune(time.Now())
@@ -465,6 +550,9 @@ func (r *Registry) Claim(id string, rcv Receiver) (*Session, error) {
 	}
 	if s.claimed {
 		return nil, ErrClaimed
+	}
+	if requireReady && s.awayLocked() {
+		return nil, ErrSenderAway
 	}
 	s.claimed = true
 	s.timer.Stop()
@@ -500,6 +588,9 @@ func (r *Registry) Finish(s *Session) {
 		delete(r.sessions, s.Slug)
 		r.bury(s.Slug, finishReason(s))
 		s.timer.Stop()
+		if s.presenceTimer != nil {
+			s.presenceTimer.Stop()
+		}
 	}
 	r.mu.Unlock()
 	s.finishOnce.Do(func() { close(s.finished) })
@@ -535,6 +626,9 @@ func (r *Registry) expireLocked(s *Session) {
 		return
 	}
 	s.timer.Stop()
+	if s.presenceTimer != nil {
+		s.presenceTimer.Stop()
+	}
 	delete(r.sessions, s.Slug)
 	r.bury(s.Slug, GoneExpired)
 	close(s.expired)

@@ -1965,6 +1965,44 @@ func TestSenderOutcomeOK(t *testing.T) {
 	}
 }
 
+type flushFailureWriter struct {
+	*httptest.ResponseRecorder
+	failAt, flushes int
+}
+
+func (w *flushFailureWriter) FlushError() error {
+	w.flushes++
+	if w.flushes >= w.failAt {
+		return errors.New("receiver flush failed")
+	}
+	return nil
+}
+
+func TestRelayReportsReceiverFlushFailure(t *testing.T) {
+	for _, failAt := range []int{1, 2} {
+		t.Run(fmt.Sprint(failAt), func(t *testing.T) {
+			reg := relay.NewRegistry(1, time.Hour)
+			s, err := reg.Create("small.bin", 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reg.Finish(s)
+			h := New(reg, relay.NewCopier(4096), Options{}).(*handler)
+			w := &flushFailureWriter{ResponseRecorder: httptest.NewRecorder(), failAt: failAt}
+			rr := newResponseReceiver(w, 0)
+			rr.start(s.Name, s.Length)
+			body := relay.NewIdleReader(strings.NewReader("ab"), 0, func(time.Time) error { return nil })
+			n, err := h.copyUntilAbort(s, rr, body)
+			if !errors.Is(err, relay.ErrReceiverGone) {
+				t.Fatalf("flush fallito: copia %d byte, errore %v invece di ErrReceiverGone", n, err)
+			}
+			if failAt == 1 && n != 0 {
+				t.Fatalf("le intestazioni non sono arrivate ma il body è stato letto: %d byte", n)
+			}
+		})
+	}
+}
+
 // TestSenderOutcomeReceiverGone: il ricevente cade dopo 4096 byte. Il mittente legge l'errore come
 // ultima riga; su HTTP/1 la risposta resta troncata (curl esce con errore), su HTTP/2 termina
 // regolarmente (un proxy h2c aggiungerebbe una sua pagina 502 a un reset).

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -134,11 +135,37 @@ func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	d := pageData{Title: "Download · Bashtransfer", NoIndex: true, Name: s.Name, Size: humanSize(s.Length)}
-	d.Away = h.reg.SenderGrace() > 0 && s.Away()
+	d.Away = s.Away()
 	if base, ok := h.baseURL(r); ok {
 		d.Commands = receiverCommands(base + "/" + id)
 	}
-	servePage(w, http.StatusOK, "download", "'self'", "'none'", d)
+	servePage(w, http.StatusOK, "download", "'self'", "'self'", d)
+}
+
+func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) {
+	state, message, code := "ready", "", http.StatusOK
+	s, err := h.reg.Peek(id)
+	switch {
+	case !slug.Valid(id), errors.Is(err, relay.ErrNotFound):
+		state, code = reasonNotFound, http.StatusNotFound
+	case errors.Is(err, relay.ErrClaimed):
+		state, code = pageClaimed, http.StatusGone
+	case err != nil:
+		state, code = goneReasonOf(err), http.StatusGone
+	case s.Away():
+		state = "away"
+	}
+	if m, ok := messages[state]; ok {
+		message = m.heading + ". " + m.text
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(struct {
+		State   string `json:"state"`
+		Message string `json:"message,omitempty"`
+	}{state, message})
 }
 
 // Pagine dei messaggi che non corrispondono a un motivo di rifiuto (reason*): link reclamato da un

@@ -1,8 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -95,9 +99,8 @@ func TestSenderGraceReservation(t *testing.T) {
 	}
 }
 
-// TestSenderGraceRebind: il mittente cade prima del ricevente, il ricevente (un browser) preme
-// Download e riceve subito l'header; il mittente torna con la ripresa dello stream e un nuovo PUT
-// e il file arriva intero, con l'esito sullo stream ripreso.
+// TestSenderGraceRebind: il browser attende senza consumare il link; il mittente torna
+// con un nuovo PUT e il download successivo arriva intero.
 func TestSenderGraceRebind(t *testing.T) {
 	base, reg := newGraceServer(t, time.Minute)
 	client := &http.Client{}
@@ -113,11 +116,11 @@ func TestSenderGraceRebind(t *testing.T) {
 	_, body := browserDo(t, http.MethodGet, base+"/"+res.Slug)
 	wantContains(t, "pagina con mittente assente", body, "The sender is not connected right now")
 
-	// Il pulsante: l'header arriva prima dei dati, con il mittente ancora assente.
+	// Il pulsante non deve avviare un download né consumare il link mentre il mittente è assente.
 	req, _ := http.NewRequest(http.MethodPost, base+"/"+res.Slug, strings.NewReader(""))
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	dl := within(t, 5*time.Second, "header del download con il mittente assente", func() *http.Response {
+	waiting := within(t, 5*time.Second, "pagina in attesa del mittente", func() *http.Response {
 		r, err := client.Do(req)
 		if err != nil {
 			t.Error(err)
@@ -125,12 +128,15 @@ func TestSenderGraceRebind(t *testing.T) {
 		}
 		return r
 	})
-	if dl == nil {
+	if waiting == nil {
 		t.FailNow()
 	}
-	defer dl.Body.Close()
-	if dl.StatusCode != http.StatusOK || !strings.HasPrefix(dl.Header.Get("Content-Disposition"), "attachment") {
-		t.Fatalf("download: stato %d, Content-Disposition %q", dl.StatusCode, dl.Header.Get("Content-Disposition"))
+	waiting.Body.Close()
+	if waiting.StatusCode != http.StatusOK || !strings.HasPrefix(waiting.Header.Get("Content-Type"), "text/html") {
+		t.Fatalf("attesa: stato %d, Content-Type %q", waiting.StatusCode, waiting.Header.Get("Content-Type"))
+	}
+	if _, err := reg.Peek(res.Slug); err != nil {
+		t.Fatalf("il pulsante in attesa ha consumato il link: %v", err)
 	}
 
 	// Il mittente torna: nuovo stream e nuovo PUT con lo stesso token.
@@ -142,6 +148,19 @@ func TestSenderGraceRebind(t *testing.T) {
 	go func() {
 		put <- webPut(client, base, res.Slug, res.Token, strings.NewReader(string(data)), int64(len(data)))
 	}()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if s, err := reg.Reserved(res.Slug, res.Token); err == nil && !s.Away() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mittente non riagganciato")
+		}
+	}
+	dl, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dl.Body.Close()
 	got := within(t, 10*time.Second, "download dopo il ritorno del mittente", func() []byte {
 		b, _ := io.ReadAll(dl.Body)
 		return b
@@ -282,10 +301,145 @@ func TestSenderGraceStreamLoss(t *testing.T) {
 	if s, err := reg.Reserved(res.Slug, res.Token); err != nil || s.Away() {
 		t.Fatalf("mittente tolto con uno stream ancora aperto: %v", err)
 	}
-
 	again.close()
 	s := waitAway(t, reg, res)
 	if reg.Len() != 1 || s.Err() != nil {
 		t.Fatalf("sessioni %d, Err %v dopo la caduta dello stream, attesa sessione viva", reg.Len(), s.Err())
+	}
+}
+
+func TestSenderGraceLiveStatus(t *testing.T) {
+	base, reg := newGraceServer(t, time.Minute)
+	res := reserveUpload(t, http.DefaultClient, base, "private.bin", 10)
+	drop := putUntilCancelled(t, base, res, 10)
+	defer drop()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		if s, err := reg.Reserved(res.Slug, res.Token); err == nil && !s.Away() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("PUT non agganciato")
+		}
+	}
+	check := func(want string, code int) {
+		t.Helper()
+		r, err := http.Get(base + "/" + res.Slug + "?status=1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		var m struct{ State string }
+		if json.Unmarshal(body, &m) != nil || m.State != want || r.StatusCode != code {
+			t.Fatalf("stato: %d %q, atteso %d %q", r.StatusCode, body, code, want)
+		}
+		if r.Header.Get("Cache-Control") != "no-store" || strings.Contains(string(body), res.Token) || strings.Contains(string(body), "private.bin") {
+			t.Fatalf("header o dati sensibili nello stato: %q", body)
+		}
+	}
+	check("ready", http.StatusOK)
+	check("ready", http.StatusOK)
+	req, _ := http.NewRequest(http.MethodPost, base+"/"+res.Slug, strings.NewReader(`{"foreground":false}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(tokenHeader, res.Token)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusNoContent {
+		t.Fatalf("presenza: stato %d", r.StatusCode)
+	}
+	check("away", http.StatusOK)
+	if _, err := reg.Peek(res.Slug); err != nil {
+		t.Fatalf("lo stato ha consumato il link: %v", err)
+	}
+	cancelUpload(t, http.DefaultClient, base, res.Slug, res.Token)
+	check(reasonGoneSender, http.StatusGone)
+}
+
+func TestCancelInterruptsBlockedReceiver(t *testing.T) {
+	base, reg := newGraceServer(t, time.Minute)
+	const size = 16 << 20
+	res := reserveUpload(t, http.DefaultClient, base, "blocked.bin", size)
+	put := make(chan webResult, 1)
+	go func() {
+		put <- webPut(http.DefaultClient, base, res.Slug, res.Token, strings.NewReader(strings.Repeat("x", size)), size)
+	}()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.(*net.TCPConn).SetReadBuffer(4096)
+	fmt.Fprintf(conn, "GET /%s HTTP/1.1\r\nHost: localhost\r\n\r\n", res.Slug)
+	if _, err := http.ReadResponse(bufio.NewReader(conn), nil); err != nil {
+		t.Fatal(err)
+	}
+	s, err := reg.Reserved(res.Slug, res.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		n := s.Delivered()
+		time.Sleep(100 * time.Millisecond)
+		if n > 0 && n == s.Delivered() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("il ricevente non è rimasto bloccato")
+		}
+	}
+	if status := cancelUpload(t, http.DefaultClient, base, res.Slug, res.Token); status != http.StatusNoContent {
+		t.Fatalf("Cancel: stato %d", status)
+	}
+	select {
+	case <-put:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Cancel non sblocca una scrittura verso un ricevente che non legge")
+	}
+	waitLen(t, reg, 0)
+}
+
+func TestSenderGraceResumeControlDuringRelay(t *testing.T) {
+	base, reg := newGraceServer(t, time.Minute)
+	data := "the whole file"
+	res := reserveUpload(t, http.DefaultClient, base, "a.bin", int64(len(data)))
+	if err := reg.Foreground(res.Slug, res.Token, true); err != nil {
+		t.Fatal(err)
+	}
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	put := make(chan webResult, 1)
+	go func() { put <- webPut(http.DefaultClient, base, res.Slug, res.Token, pr, int64(len(data))) }()
+	go func() { _, _ = pw.Write([]byte(data[:1])) }()
+	dl := get(t, context.Background(), base+"/"+res.Slug)
+	defer dl.Body.Close()
+	s, err := reg.Reserved(res.Slug, res.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-s.Started()
+	res.close()
+	req, _ := http.NewRequest(http.MethodPost, base+"/", strings.NewReader(`{"resume":"`+res.Slug+`","rebind":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(tokenHeader, res.Token)
+	again := openStream(t, http.DefaultClient, req)
+	if !again.Started {
+		t.Fatal("lo stream ripreso non segnala il relay già iniziato")
+	}
+	go func() { _, _ = pw.Write([]byte(data[1:])); pw.Close() }()
+	got := within(t, 5*time.Second, "body dopo il recupero del controllo", func() string {
+		b, _ := io.ReadAll(dl.Body)
+		return string(b)
+	})
+	if got != data {
+		t.Fatalf("body %q, atteso %q", got, data)
+	}
+	if last, _ := again.outcome(t, 5*time.Second); last.Outcome != outcomeOK {
+		t.Fatalf("esito %+v", last)
+	}
+	if r := <-put; r.err != nil {
+		t.Fatal(r.err)
 	}
 }

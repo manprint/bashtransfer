@@ -39,7 +39,7 @@
     <p class="drop-title">Drag a file here</p>
     <p class="muted">or</p>
     <button class="primary" id="pick" type="button">Upload</button>
-    <p class="muted">One file at a time. Keep this page open while the receiver downloads it.</p>
+    <p class="muted">One file at a time. Keep this page open and in the foreground while the receiver downloads it.</p>
     <p class="drop-error" id="drop-error" role="alert" hidden></p>
     <input type="file" id="file" hidden>
   </div>
@@ -50,8 +50,11 @@
     </div>
     <div id="x-links" hidden>
       <h3>Send this to the receiver</h3>
+      <button class="primary" id="x-share" type="button" hidden>Share link</button>
       <div class="rows tools" id="x-rows"></div>
-      <p class="muted">One receiver per link. <strong>Keep this page open and in the foreground until the end:</strong> if you switch to another app, a phone may stop the upload and the link stops working. To receive on the same phone, use split screen; otherwise open the link on another device.</p>
+      <p class="muted" id="x-share-hint">One receiver per link. <strong>After sharing, return to this browser page, where the sender is waiting.</strong> Keep this page open and in the foreground until the end: nothing is stored on the server, so the receiver needs this browser to send the file. To receive on the same phone, use split screen; otherwise open the link on another device.</p>
+      <p class="muted" id="x-grace"></p>
+      <p class="status" id="x-share-status" role="status"></p>
     </div>
     <div class="bar" id="x-bar" role="progressbar" aria-label="Transfer" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
     <div class="stats"><span class="pct" id="x-pct">0%</span><span id="x-rate"></span><span id="x-amount"></span></div>
@@ -124,10 +127,10 @@
   var $ = function (id) { return document.getElementById(id); };
   var drop = $("drop"), input = $("file"), xfer = $("xfer"), bar = $("x-bar");
   // link è la prenotazione (slug e token), ctl chiude il suo stream, xhr invia il file.
-  var link = null, ctl = null, xhr = null, busy = false, attached = false, total = 0, samples = [], ticker = 0, fallback = 0;
+  var link = null, ctl = null, xhr = null, busy = false, attached = false, total = 0, samples = [], ticker = 0;
   // Tolleranza del server per un mittente caduto (secondi; 0 se disattivata, BASHT_SENDER_GRACE): la
   // pagina si riaggancia alla stessa prenotazione. lostAt è l'inizio della caduta, 0 se connessa.
-  var grace = 0, lostAt = 0, retry = 0, reserved = false, chosen = null;
+  var grace = 0, lostAt = 0, retry = 0, reserved = false, chosen = null, pulse = 0, sharing = false;
 
   function size(n) {
     if (n < 1024) return n + (n === 1 ? " byte" : " bytes");
@@ -188,8 +191,8 @@
     busy = false;
     lostAt = 0;
     clearInterval(ticker);
-    clearTimeout(fallback);
     clearTimeout(retry);
+    clearInterval(pulse);
     if (!ok) {
       if (ctl) ctl.abort();
       if (xhr) xhr.abort();
@@ -240,13 +243,14 @@
     grace = 0;
     lostAt = 0;
     chosen = file;
-    connect(file, JSON.stringify({ name: file.name, size: file.size }), {});
+    sharing = false;
+    $("x-share").disabled = false;
+    $("x-share-status").textContent = "";
+    connect(file, JSON.stringify({ name: file.name, size: file.size, foreground: document.visibilityState !== "hidden" }), {});
   }
 
-  // connect apre lo stream NDJSON della prenotazione: la risposta resta aperta per tutto il
-  // trasferimento con la prenotazione, poi attached, progress e infine l'esito. Chiuderlo annulla
-  // l'invio. Con resume (headers col token) riapre lo stream della prenotazione già creata, dopo una
-  // caduta, e ripete il PUT.
+  // Al riaggancio il server decide se sostituire il PUT in attesa oppure recuperare solo
+  // l'avanzamento di un relay già iniziato.
   function connect(file, body, headers) {
     if (ctl) { var old = ctl; ctl = null; old.abort(); }
     var mine = ctl = new AbortController(), first = true;
@@ -265,23 +269,35 @@
         if (first) {
           first = false;
           lostAt = 0;
+          clearTimeout(retry);
           if (!reserved) {
             reserved = true;
-            link = { slug: m.slug, token: m.token };
+            link = { slug: m.slug, token: m.token, url: m.url };
             grace = m.grace || 0;
             showLinks(m.commands);
+            $("x-grace").textContent = grace > 0
+              ? "If the connection is lost before downloading starts, the link stays available for " + duration(grace) + ". Return here promptly after sharing. An interrupted download cannot be resumed."
+              : "Connection recovery is disabled on this server. Switching apps may close the link.";
+            clearInterval(pulse);
+            pulse = setInterval(function () { if (document.visibilityState !== "hidden" && !sharing) foreground(true); }, 5000);
           }
-          attached = false;
-          samples = [];
-          status("Waiting for the receiver to open the link…");
-          send(file, m);
+          attached = !!m.started;
+          if (attached) {
+            sample(m.bytes || 0);
+            render();
+          } else {
+            samples = [];
+            sample(0);
+            status("Waiting for the receiver to open the link…");
+            send(file, m);
+          }
         } else if (m.outcome) {
           link = null;
           outcome(m);
         } else if (m.event === "attached") {
           // La velocità parte dal primo avanzamento: il primo blocco riempie solo i buffer di rete.
+          if (!attached) samples = [];
           attached = true;
-          samples = [];
           render();
           clearInterval(ticker);
           ticker = setInterval(function () { if (samples.length) sample(delivered()); render(); }, 500);
@@ -306,8 +322,8 @@
       if (!busy || ctl !== mine) return;
       // Già in riconnessione: il tentativo è fallito, si riprova dopo un secondo.
       if (!e.shown && lostAt) { clearTimeout(retry); retry = setTimeout(reconnect, 1000); return; }
-      // Connessione persa prima del ricevente, con la tolleranza del server: ci si riaggancia.
-      if (!e.shown && reserved && grace > 0 && !attached) { lost(); return; }
+      // Anche durante la copia si può recuperare il solo stream di avanzamento.
+      if (!e.shown && reserved && grace > 0) { lost(); return; }
       if (busy) cancelLink();
       finish(false, e.shown ? e.message : (reserved
         ? "The connection to the server was lost: the link no longer works. If you switched to another app, the phone may have stopped the page: keep it in the foreground and send the file again."
@@ -315,30 +331,23 @@
     });
   }
 
-  // lost: la connessione è caduta prima che un ricevente iniziasse (su un telefono, l'app in secondo
-  // piano). Il link resta valido per la tolleranza del server: si riprova finché la pagina è tornata
-  // in primo piano, poi si riapre lo stream e si ripete il PUT.
+  // Non interrompere il PUT qui: il server potrebbe aver iniziato il relay prima
+  // che questa pagina ricevesse attached.
   function lost() {
     if (!busy || lostAt || !link) return;
     lostAt = Date.now();
-    attached = false;
     clearInterval(ticker);
-    if (xhr) { var x = xhr; xhr = null; x.abort(); }
     if (ctl) { var c = ctl; ctl = null; c.abort(); }
-    status("Connection lost. Keep this page open and in the foreground: reconnecting…");
+    status("Connection lost. Return to this page and keep it in the foreground: reconnecting…");
     reconnect();
   }
   function reconnect() {
     clearTimeout(retry);
     if (!busy || !lostAt || !link) return;
-    if (Date.now() - lostAt > grace * 1000) {
-      cancelLink();
-      finish(false, "The connection was lost for too long: the link no longer works. Keep this page in the foreground and send the file again.");
-      return;
-    }
+    if (document.visibilityState === "hidden" || sharing) return;
     var h = {};
     h["X-Bashtransfer-Token"] = link.token;
-    connect(chosen, JSON.stringify({ resume: link.slug }), h);
+    connect(chosen, JSON.stringify({ resume: link.slug, rebind: true }), h);
     // Se la risposta non arriva (rete ancora assente) riprova: la richiesta non fallisce subito.
     retry = setTimeout(reconnect, 5000);
   }
@@ -365,11 +374,25 @@
       rows.append(row);
     });
     $("x-links").hidden = false;
+    $("x-share").hidden = typeof navigator.share !== "function";
   }
 
-  // L'esito arriva dallo stream. La risposta del PUT lo ripete, ma su HTTP/1 il browser la perde
-  // quando il server chiude prima di aver letto tutto il body (e può ripetere il PUT, che trova il
-  // link già usato): serve solo se lo stream tace, per esempio dietro un proxy che lo trattiene.
+  function foreground(visible) {
+    if (!busy || !link) return;
+    try {
+      var ctl = new AbortController(), timeout = setTimeout(function () { ctl.abort(); }, 5000);
+      fetch("/" + encodeURIComponent(link.slug), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Bashtransfer-Token": link.token },
+        body: JSON.stringify({ foreground: visible }),
+        keepalive: !visible,
+        signal: ctl.signal
+      }).catch(function () {}).then(function () { clearTimeout(timeout); });
+    } catch (e) {}
+  }
+
+  // L'esito arriva anche sul PUT se il browser può leggerne la risposta. Su HTTP/1
+  // una risposta troncata è un errore di rete: in quel caso decide lo stream.
   function send(file, res) {
     if (xhr) { var prev = xhr; xhr = null; prev.abort(); }
     var req = xhr = new XMLHttpRequest();
@@ -380,7 +403,7 @@
     req.onload = function () {
       var lines = req.responseText.split("\n").map(function (l) { return l.trim(); }).filter(Boolean), o = null;
       try { o = JSON.parse(lines[lines.length - 1]); } catch (e) { return; }
-      if (o && o.outcome) fallback = setTimeout(function () { outcome(o); }, 5000);
+      if (o && o.outcome && xhr === req && busy) { link = null; outcome(o); }
     };
     req.send(file);
   }
@@ -405,6 +428,26 @@
   input.addEventListener("change", function () { choose(input.files); input.value = ""; });
   $("x-cancel").addEventListener("click", function () { cancelLink(); finish(false, "Cancelled: the link no longer works."); });
   $("x-again").addEventListener("click", reset);
+  $("x-share").addEventListener("click", function () {
+    if (!busy || !link || sharing) return;
+    var shared = link, btn = $("x-share");
+    sharing = true;
+    btn.disabled = true;
+    $("x-share-status").textContent = "After sharing, return to this browser page and keep it in the foreground until the download is complete.";
+    foreground(false);
+    Promise.resolve().then(function () {
+      return navigator.share({ title: "Bashtransfer", text: "Download this file. The sender must stay on the sending page.", url: shared.url });
+    }).catch(function (e) {
+      if (busy && link === shared && e.name !== "AbortError") {
+        $("x-share-status").textContent = "Could not share the link. Use Copy, then return to this browser page after sharing.";
+      }
+    }).then(function () {
+      if (!busy || link !== shared) return;
+      sharing = false;
+      btn.disabled = false;
+      resume();
+    });
+  });
 
   var depth = 0;
   drop.addEventListener("dragenter", function (e) { e.preventDefault(); depth++; drop.classList.add("over"); });
@@ -424,8 +467,15 @@
   // link: al ritorno si riaggancia. Una chiusura vera lo annulla subito.
   window.addEventListener("pagehide", function (e) { if (busy && !(grace > 0 && e.persisted)) cancelLink(); });
   // Il telefono torna in primo piano o la rete ricompare: riprova subito senza attendere il timer.
-  function resume() { if (lostAt && document.visibilityState !== "hidden") reconnect(); }
-  document.addEventListener("visibilitychange", resume);
+  function resume() {
+    if (!busy || !link || document.visibilityState === "hidden" || sharing) return;
+    foreground(true);
+    if (grace > 0) { if (lostAt) reconnect(); else lost(); }
+  }
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") foreground(false);
+    else resume();
+  });
   window.addEventListener("online", resume);
   window.addEventListener("pageshow", resume);
 })();
