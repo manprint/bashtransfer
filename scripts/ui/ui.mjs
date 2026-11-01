@@ -112,26 +112,34 @@ function noErrors(page, what, allow) {
 const LOAD_4XX = /^Failed to load resource: the server responded with a status of 4(04|10) /;
 const PUT_FAILED = /^Failed to load resource: net::ERR_|^Failed to load resource: the server responded with a status of 404 /;
 
-// Controlli di allineamento: campo e pulsante della stessa riga alla stessa altezza, pulsanti di
-// copia della stessa larghezza, nessuno scroll orizzontale della pagina, comandi su una riga.
-async function layoutChecks(page, { oneLine }) {
-  return page.evaluate((oneLine) => {
+// Controlli di allineamento: su desktop campo e pulsante della stessa riga alla stessa altezza,
+// pulsanti di copia della stessa larghezza; su telefono il pulsante non schiaccia il comando: sta
+// sopra al campo negli elenchi e sotto nei comandi singoli, con un'area di tocco adeguata. I
+// comandi vanno a capo invece di scorrere in orizzontale, a ogni larghezza.
+async function layoutChecks(page) {
+  return page.evaluate(() => {
     const bad = [];
     const r = (el) => el.getBoundingClientRect();
     if (document.documentElement.scrollWidth > innerWidth) bad.push(`scroll orizzontale ${document.documentElement.scrollWidth} > ${innerWidth}`);
+    const narrow = matchMedia('(max-width: 40rem)').matches;
     const copies = [...document.querySelectorAll('.copy')].filter((b) => b.offsetParent);
     const widths = new Set(copies.map((b) => Math.round(r(b).width)));
     if (widths.size > 1) bad.push(`larghezze pulsanti copia ${[...widths]}`);
     for (const b of copies) {
       const f = document.getElementById(b.dataset.copy);
+      if (!f) continue;
       const a = r(f), c = r(b);
-      if (Math.abs(a.top - c.top) > 1 || Math.abs(a.height - c.height) > 1) bad.push(`riga ${b.dataset.copy}: campo ${a.top}/${a.height} pulsante ${c.top}/${c.height}`);
-      if (c.left < a.right) bad.push(`pulsante sovrapposto ${b.dataset.copy}`);
-    }
-    if (oneLine) {
-      for (const f of document.querySelectorAll('.field')) {
-        if (f.offsetParent && f.scrollWidth > f.clientWidth + 1) bad.push(`comando non su una riga: ${f.textContent} (${f.scrollWidth} > ${f.clientWidth})`);
+      if (narrow) {
+        // Su telefono i Copy sono compatti e centrati sotto o accanto al comando.
+        if (c.width < 43 || c.height < 34) bad.push(`pulsante copia troppo piccolo ${b.dataset.copy}: ${c.width}x${c.height}`);
+        if (!(c.bottom <= a.top + 1 || c.top >= a.bottom - 1)) bad.push(`pulsante sovrapposto ${b.dataset.copy}`);
+      } else {
+        if (Math.abs(a.top - c.top) > 1 || Math.abs(a.height - c.height) > 1) bad.push(`riga ${b.dataset.copy}: campo ${a.top}/${a.height} pulsante ${c.top}/${c.height}`);
+        if (c.left < a.right) bad.push(`pulsante sovrapposto ${b.dataset.copy}`);
       }
+    }
+    for (const f of document.querySelectorAll('.field')) {
+      if (f.offsetParent && f.scrollWidth > f.clientWidth + 1) bad.push(`comando non va a capo: ${f.textContent} (${f.scrollWidth} > ${f.clientWidth})`);
     }
     // Campi di ogni griglia allineati a sinistra.
     for (const g of document.querySelectorAll('.rows, .cmd')) {
@@ -139,7 +147,7 @@ async function layoutChecks(page, { oneLine }) {
       if (lefts.size > 1) bad.push(`campi non allineati in ${g.className}: ${[...lefts]}`);
     }
     return bad;
-  }, oneLine);
+  });
 }
 
 async function linkRows(page) {
@@ -172,7 +180,7 @@ async function waitResult(page, timeout = 30000) {
 
 // --- Test ---
 
-for (const [w, dark] of [[1280, false], [1280, true], [390, false], [390, true]]) {
+for (const [w, dark] of [[1280, false], [1280, true], [390, false], [390, true], [320, false]]) {
   await test(`home layout ${w} ${dark ? 'dark' : 'light'}`, async () => {
     const page = await newPage({ viewport: { width: w, height: 900 }, dark });
     const resp = await page.goto(BASE + '/');
@@ -184,7 +192,7 @@ for (const [w, dark] of [[1280, false], [1280, true], [390, false], [390, true]]
     assert(box.height >= 150 && box.height <= 280, `altezza riquadro ${box.height}`);
     const pick = await page.$eval('#pick', (b) => ({ ...b.getBoundingClientRect().toJSON(), text: b.textContent }));
     assert(pick.text === 'Upload' && pick.top > box.top && pick.bottom < box.bottom, `pulsante Upload ${JSON.stringify(pick)}`);
-    const bad = await layoutChecks(page, { oneLine: w >= 1000 });
+    const bad = await layoutChecks(page);
     assert(bad.length === 0, bad.join('; '));
     const roles = await page.$$eval('h2', (hs) => hs.map((h) => h.textContent.trim()));
     assert(roles.some((r) => r.startsWith('Sender') && r.includes('terminal')) && roles.some((r) => r.startsWith('Receiver')), `titoli ${roles}`);
@@ -206,6 +214,21 @@ await test('home copy button', async () => {
   await sleep(1700);
   assert((await page.textContent('[data-copy="c-send"]')) === 'Copy', 'etichetta non ripristinata');
   noErrors(page, 'home copy');
+  await page.context().close();
+});
+
+await test('home layout 390 after upload: link commands wrap', async () => {
+  const src = mkfile('mobile.bin', 1 << 20);
+  const page = await newPage({ viewport: { width: 390, height: 844 } });
+  await page.goto(BASE + '/');
+  await page.setInputFiles('#file', src);
+  await page.waitForSelector('#x-links:not([hidden])', { timeout: 10000 });
+  const bad = await layoutChecks(page);
+  assert(bad.length === 0, bad.join('; '));
+  await page.screenshot({ path: path.join(OUT, 'upload-390.png'), fullPage: true });
+  await page.click('#x-cancel');
+  await waitResult(page, 5000);
+  noErrors(page, 'upload 390', PUT_FAILED);
   await page.context().close();
 });
 
@@ -237,7 +260,7 @@ await test('upload button + curl receiver from the table', async () => {
   // Prima del ricevente nessun avanzamento: i byte nei buffer di rete non sono consegnati.
   const waitPct = await page.textContent('#x-pct');
   assert(waitPct === '0%', `avanzamento senza ricevente: ${waitPct}`);
-  const bad = await layoutChecks(page, { oneLine: true });
+  const bad = await layoutChecks(page);
   assert(bad.length === 0, bad.join('; '));
   await page.screenshot({ path: path.join(OUT, 'upload-waiting.png'), fullPage: true });
   // Ricevente: il comando curl della tabella, rallentato per osservare il progresso.
@@ -291,7 +314,7 @@ await test('drag and drop + browser receiver on the download page', async () => 
   const peek = await newPage({ viewport: { width: 390, height: 844 }, dark: true });
   await peek.goto(url);
   await peek.screenshot({ path: path.join(OUT, 'download-390-dark.png'), fullPage: true });
-  assert((await layoutChecks(peek, { oneLine: false })).length === 0, 'layout download 390');
+  assert((await layoutChecks(peek)).length === 0, 'layout download 390');
   noErrors(peek, 'download 390');
   await peek.context().close();
   const rp = await newPage();
@@ -301,7 +324,7 @@ await test('drag and drop + browser receiver on the download page', async () => 
   assert(info[0] === name && info[1] === '3.0 MiB (3,145,728 bytes)', `dati file ${info}`);
   const tools = await rp.$$eval('.rows.tools .label', (l) => l.map((x) => x.textContent));
   assert(tools.join(',') === 'curl,wget,aria2c', `comandi pagina download ${tools}`);
-  const bad = await layoutChecks(rp, { oneLine: true });
+  const bad = await layoutChecks(rp);
   assert(bad.length === 0, bad.join('; '));
   await rp.screenshot({ path: path.join(OUT, 'download-1280.png'), fullPage: true });
   const [dl] = await Promise.all([rp.waitForEvent('download', { timeout: 15000 }), rp.click('#dl button')]);

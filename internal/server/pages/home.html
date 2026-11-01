@@ -13,7 +13,7 @@
 .drop .primary{margin:.6rem 0 .35rem}
 .drop .muted{margin:0}
 .drop-error{margin:.25rem 0 0; color:var(--err); font-size:.9rem; font-weight:600}
-@media (max-width:40rem){ .drop{min-height:0; padding:1.25rem 1rem} }
+@media (max-width:40rem){ .drop{min-height:0; padding:1rem} }
 .xfer-head{display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:.25rem}
 .xfer-file{min-width:0}
 .xfer-file strong{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
@@ -82,7 +82,7 @@
   <p>Run one of the commands from the sender's table. Here <code>LINK</code> stands for the link:</p>
   <div class="rows nocopy">
     {{- range .Receive}}
-    <span class="label">{{.Label}}</span><code class="field">{{.Line}}</code>
+    <div class="row"><span class="label">{{.Label}}</span><code class="field">{{.Line}}</code></div>
     {{- end}}
   </div>
   <p class="muted">Each link works for one download only and expires if nobody uses it. These commands never overwrite an existing file.</p>
@@ -91,16 +91,16 @@
 <section class="card" aria-labelledby="install">
   <h2 id="install">Install the tools</h2>
   <p class="muted">The terminal sender needs curl; the receiver needs a browser, or one of curl, wget and aria2c. Most systems already have curl.</p>
-  <div class="rows">
-    <span class="label">Debian / Ubuntu</span><code class="field" id="i1">sudo apt install curl wget aria2</code><button class="copy" type="button" data-copy="i1">Copy</button>
-    <span class="label">Fedora / RHEL</span><code class="field" id="i2">sudo dnf install curl wget aria2</code><button class="copy" type="button" data-copy="i2">Copy</button>
-    <span class="label">Arch / Manjaro</span><code class="field" id="i3">sudo pacman -S curl wget aria2</code><button class="copy" type="button" data-copy="i3">Copy</button>
-    <span class="label">openSUSE</span><code class="field" id="i4">sudo zypper install curl wget aria2</code><button class="copy" type="button" data-copy="i4">Copy</button>
-    <span class="label">Alpine</span><code class="field" id="i5">apk add curl wget aria2</code><button class="copy" type="button" data-copy="i5">Copy</button>
-    <span class="label">macOS (Homebrew)</span><code class="field" id="i6">brew install curl wget aria2</code><button class="copy" type="button" data-copy="i6">Copy</button>
-    <span class="label">FreeBSD</span><code class="field" id="i7">sudo pkg install curl wget aria2</code><button class="copy" type="button" data-copy="i7">Copy</button>
-    <span class="label">Windows: wget</span><code class="field" id="i8">winget install JernejSimoncic.Wget</code><button class="copy" type="button" data-copy="i8">Copy</button>
-    <span class="label">Windows: aria2</span><code class="field" id="i9">winget install aria2.aria2</code><button class="copy" type="button" data-copy="i9">Copy</button>
+  <div class="rows install">
+    <div class="row"><span class="label">Debian / Ubuntu</span><code class="field" id="i1">sudo apt install curl wget aria2</code><button class="copy" type="button" data-copy="i1">Copy</button></div>
+    <div class="row"><span class="label">Fedora / RHEL</span><code class="field" id="i2">sudo dnf install curl wget aria2</code><button class="copy" type="button" data-copy="i2">Copy</button></div>
+    <div class="row"><span class="label">Arch / Manjaro</span><code class="field" id="i3">sudo pacman -S curl wget aria2</code><button class="copy" type="button" data-copy="i3">Copy</button></div>
+    <div class="row"><span class="label">openSUSE</span><code class="field" id="i4">sudo zypper install curl wget aria2</code><button class="copy" type="button" data-copy="i4">Copy</button></div>
+    <div class="row"><span class="label">Alpine</span><code class="field" id="i5">apk add curl wget aria2</code><button class="copy" type="button" data-copy="i5">Copy</button></div>
+    <div class="row"><span class="label">macOS (Homebrew)</span><code class="field" id="i6">brew install curl wget aria2</code><button class="copy" type="button" data-copy="i6">Copy</button></div>
+    <div class="row"><span class="label">FreeBSD</span><code class="field" id="i7">sudo pkg install curl wget aria2</code><button class="copy" type="button" data-copy="i7">Copy</button></div>
+    <div class="row"><span class="label">Windows: wget</span><code class="field" id="i8">winget install JernejSimoncic.Wget</code><button class="copy" type="button" data-copy="i8">Copy</button></div>
+    <div class="row"><span class="label">Windows: aria2</span><code class="field" id="i9">winget install aria2.aria2</code><button class="copy" type="button" data-copy="i9">Copy</button></div>
   </div>
   <p class="muted">Windows 10 and 11 already include <code>curl.exe</code>.</p>
 </section>
@@ -359,7 +359,10 @@
       btn.type = "button";
       btn.setAttribute("data-copy", code.id);
       btn.textContent = "Copy";
-      rows.append(label, code, btn);
+      var row = document.createElement("div");
+      row.className = "row";
+      row.append(label, code, btn);
+      rows.append(row);
     });
     $("x-links").hidden = false;
   }

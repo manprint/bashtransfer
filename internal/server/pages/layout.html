@@ -13,7 +13,7 @@
   --bg:#f5f7fa; --card:#fff; --fg:#0f172a; --muted:#5b6678; --line:#e2e8f0; --line-strong:#cbd5e1;
   --code:#f1f5f9; --accent:#0369a1; --accent-fg:#fff; --accent-soft:#e0f2fe;
   --ok:#15803d; --ok-soft:#dcfce7; --err:#b91c1c; --err-soft:#fee2e2; --send:#0369a1; --recv:#15803d;
-  --btn:6.5rem; --radius:10px;
+  --btn:6.5rem; --btn-sm:4.5rem; --tap:2.75rem; --radius:10px;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
   --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   --shadow:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06);
@@ -52,9 +52,11 @@ code{font-family:var(--mono); font-size:.88em; background:var(--code); border:1p
   font:.88rem/1.5 var(--mono);
 }
 .cmd{display:grid; grid-template-columns:minmax(0,1fr) var(--btn); gap:.5rem; margin:.5rem 0 1rem}
-.rows{display:grid; grid-template-columns:10.5rem minmax(0,1fr) var(--btn); gap:.5rem .75rem; margin:.75rem 0}
-.rows.tools{grid-template-columns:4.5rem minmax(0,1fr) var(--btn)}
-.rows.nocopy{grid-template-columns:4.5rem minmax(0,1fr)}
+.rows{display:grid; gap:.5rem; margin:.75rem 0}
+.rows.install{gap:.75rem}
+.row{display:grid; grid-template-columns:10.5rem minmax(0,1fr) var(--btn); gap:.5rem .75rem; align-items:center}
+.rows.tools .row{grid-template-columns:4.5rem minmax(0,1fr) var(--btn)}
+.rows.nocopy .row{grid-template-columns:4.5rem minmax(0,1fr)}
 .label{align-self:center; font-size:.9rem; font-weight:600}
 .rows.tools .label, .rows.nocopy .label{font-family:var(--mono); font-size:.85rem; font-weight:500; color:var(--muted)}
 button{font:600 .9rem/1.5 var(--sans); border-radius:var(--radius); cursor:pointer}
@@ -76,11 +78,24 @@ button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 .file dd{margin:0; font-weight:600; overflow-wrap:anywhere}
 footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
 @media (max-width:40rem){
-  main{padding-top:1.5rem}
-  .card{padding:1.1rem 1rem 1.2rem}
-  .rows, .rows.tools{grid-template-columns:minmax(0,1fr) var(--btn); row-gap:.3rem}
-  .rows.nocopy{grid-template-columns:minmax(0,1fr)}
-  .rows .label{grid-column:1/-1; margin-top:.45rem}
+  main{padding:1.25rem .75rem 2.5rem}
+  .card{padding:1rem .85rem 1.1rem}
+  /* Il pulsante copia lascia al comando tutta la larghezza: va a capo invece di scorrere. */
+  .cmd{grid-template-columns:minmax(0,1fr); gap:.4rem}
+  .cmd .copy{justify-self:center; width:var(--btn-sm); min-height:2.25rem; padding:.3rem 0}
+  .rows{gap:.35rem}
+  .rows.install{gap:.9rem}
+  .row, .rows.tools .row{
+    grid-template-columns:minmax(0,1fr) var(--btn-sm);
+    grid-template-areas:"label copy" "field field";
+    gap:.35rem .5rem;
+  }
+  .rows.nocopy .row{grid-template-columns:minmax(0,1fr); grid-template-areas:"label" "field"}
+  .row .label{grid-area:label; margin:0}
+  .row .copy{grid-area:copy; min-height:2.25rem; padding:.3rem 0}
+  .row .field{grid-area:field}
+  .field{white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:visible}
+  .ghost{min-height:var(--tap); padding:.5rem .9rem}
   .facts{grid-template-columns:1fr}
   .primary{width:100%}
 }

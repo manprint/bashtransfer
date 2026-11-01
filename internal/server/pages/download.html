@@ -18,7 +18,7 @@
   <p class="muted">Instead of the button, run one of these commands. Use only one: the link works once.</p>
   <div class="rows tools">
     {{- range $i, $c := .Commands}}
-    <span class="label">{{$c.Label}}</span><code class="field" id="c{{$i}}">{{$c.Line}}</code><button class="copy" type="button" data-copy="c{{$i}}">Copy</button>
+    <div class="row"><span class="label">{{$c.Label}}</span><code class="field" id="c{{$i}}">{{$c.Line}}</code><button class="copy" type="button" data-copy="c{{$i}}">Copy</button></div>
     {{- end}}
   </div>
 </section>
