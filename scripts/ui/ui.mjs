@@ -83,7 +83,31 @@ async function newPage(opts = {}) {
   page.errors = [];
   page.on('console', (m) => { if (m.type() === 'error') page.errors.push(m.text()); });
   page.on('pageerror', (e) => page.errors.push(e.message));
+  // Traccia di rete con orario ISO (come i log dei server): serve a diagnosticare i fallimenti.
+  page.net = [];
+  page.on('response', (r) => page.net.push(`${new Date().toISOString()} ${r.status()} ${r.request().method()} ${r.url()}`));
+  page.on('requestfailed', (r) => page.net.push(`${new Date().toISOString()} FAILED ${r.method()} ${r.url()} ${r.failure()?.errorText}`));
+  page.on('download', (d) => page.net.push(`${new Date().toISOString()} DOWNLOAD ${d.url()}`));
   return page;
+}
+
+// Stampa e salva in OUT lo stato della pagina e del mittente su un fallimento, per il runner (il
+// file <name>-fail.json e lo screenshot finiscono nell'artifact ui).
+async function diagnose(page, name, sender) {
+  const info = {
+    name,
+    at: new Date().toISOString(),
+    url: page.url(),
+    status: await page.textContent('#dl-status').catch((e) => `ERR ${e.message}`),
+    dlForm: await page.$eval('#dl', (f) => f.outerHTML).catch((e) => `ERR ${e.message}`),
+    body: (await page.evaluate(() => document.body.innerText).catch(() => '')).slice(0, 800),
+    net: page.net.slice(-60),
+    errors: page.errors,
+    sender: sender ? { exited: sender.exited(), out: sender.out().slice(-1500) } : null,
+  };
+  fs.writeFileSync(path.join(OUT, `${name}-fail.json`), JSON.stringify(info, null, 2));
+  await page.screenshot({ path: path.join(OUT, `${name}-fail.png`), fullPage: true }).catch(() => {});
+  console.log(`DIAG ${name} ${JSON.stringify(info, null, 1)}`);
 }
 // Proxy TCP davanti a target che taglia le connessioni su comando, come un telefono che perde la
 // rete: sever() chiude tutte le connessioni aperte, block impedisce di aprirne di nuove.
@@ -600,6 +624,9 @@ await test('unknown link page', async () => {
 
 await test('pipe upload landing shows unknown size', async () => {
   const up = sh(`bash -c 'head -c 100000 /dev/urandom | curl -sS -N -T - "${BASE}/stream.bin"'`);
+  let exited = null;
+  up.done.then((r) => { exited = r; });
+  const sender = { exited: () => exited, out: () => up.out };
   let url = '';
   for (let i = 0; i < 50 && !url; i++) {
     await sleep(100);
@@ -612,7 +639,13 @@ await test('pipe upload landing shows unknown size', async () => {
   assert(resp.status() === 200, `pagina ${resp.status()}`);
   const info = await page.$$eval('.file dd', (d) => d.map((x) => x.textContent));
   assert(info[0] === 'stream.bin' && info[1] === 'unknown (streamed by the sender)', `dati ${info}`);
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#dl button')]);
+  let dl;
+  try {
+    [dl] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }), page.click('#dl button')]);
+  } catch (e) {
+    await diagnose(page, 'pipe', sender);
+    throw e;
+  }
   const saved = path.join(OUT, 'recv-stream.bin');
   await dl.saveAs(saved);
   assert(fs.statSync(saved).size === 100000, `dimensione ${fs.statSync(saved).size}`);
