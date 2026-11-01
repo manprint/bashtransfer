@@ -204,12 +204,13 @@ async function waitResult(page, timeout = 30000) {
 
 // --- Test ---
 
-for (const [w, dark] of [[1280, false], [1280, true], [390, false], [390, true], [320, false]]) {
-  await test(`home layout ${w} ${dark ? 'dark' : 'light'}`, async () => {
+for (const [w, dark, font] of [[1280, false], [1280, true], [390, false], [390, true], [320, false], [320, false, 'Arial, sans-serif']]) {
+  await test(`home layout ${w} ${dark ? 'dark' : 'light'}${font ? ' fallback font' : ''}`, async () => {
     const page = await newPage({ viewport: { width: w, height: 900 }, dark });
     const resp = await page.goto(BASE + '/');
     assert(resp.status() === 200, `stato ${resp.status()}`);
-    await page.screenshot({ path: path.join(OUT, `home-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
+    if (font) await page.addStyleTag({ content: `body { font-family: ${font}; }` });
+    await page.screenshot({ path: path.join(OUT, `home-${w}-${dark ? 'dark' : 'light'}${font ? '-fallback-font' : ''}.png`), fullPage: true });
     const first = await page.$eval('main > section', (s) => ({ h2: s.querySelector('h2').textContent, drop: !!s.querySelector('#drop') }));
     assert(first.drop && /Send a file/.test(first.h2), `prima sezione ${JSON.stringify(first)}`);
     const box = await page.$eval('#drop', (d) => d.getBoundingClientRect().toJSON());
