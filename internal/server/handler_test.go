@@ -1756,8 +1756,8 @@ func TestHomeBrowser(t *testing.T) {
 		`curl -f -OJ &#34;LINK&#34;`,
 		`aria2c -x1 -s1 --allow-overwrite=false &#34;LINK&#34;`,
 		`rel="icon"`,
-		"sudo apt install curl wget aria2",
-		"brew install curl wget aria2",
+		"sudo apt install curl wget aria2 zip unzip",
+		"brew install curl wget aria2 zip unzip",
 		// Base http: la pagina non promette HTTPS.
 		"Not encrypted.",
 	} {

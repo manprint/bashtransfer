@@ -58,7 +58,7 @@ code{font-family:var(--mono); font-size:.88em; background:var(--code); border:1p
 .rows.tools .row{grid-template-columns:4.5rem minmax(0,1fr) var(--btn)}
 .rows.nocopy .row{grid-template-columns:4.5rem minmax(0,1fr)}
 .label{align-self:center; font-size:.9rem; font-weight:600}
-.rows.tools .label, .rows.nocopy .label{font-family:var(--mono); font-size:.85rem; font-weight:500; color:var(--muted)}
+.rows.tools .label, .rows.nocopy .label{font-family:var(--mono); font-size:.85rem; font-weight:700; color:var(--recv)}
 button{font:600 .9rem/1.5 var(--sans); border-radius:var(--radius); cursor:pointer}
 button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 .copy, .primary{background:var(--accent); color:var(--accent-fg); border:1px solid var(--accent)}
@@ -78,11 +78,20 @@ button:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 .file dd{margin:0; font-weight:600; overflow-wrap:anywhere}
 footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
 @media (max-width:40rem){
-  main{padding:1.25rem .75rem 2.5rem}
-  .card{padding:1rem .85rem 1.1rem}
+  :root{font-size:15px; --tap:44px}
+  body{font-size:1rem; line-height:1.5}
+  main{padding:1rem .7rem 2rem}
+  header{margin-bottom:1rem}
+  header a{gap:.7rem}
+  header svg{width:2.5rem; height:2.5rem}
+  h1{font-size:1.4rem}
+  .tag{font-size:.9rem}
+  .card{padding:.9rem .8rem 1rem; margin-bottom:1rem}
+  h2{font-size:1.05rem; margin-bottom:.8rem}
+  h3{margin:1rem 0 .3rem}
   /* Il pulsante copia lascia al comando tutta la larghezza: va a capo invece di scorrere. */
-  .cmd{grid-template-columns:minmax(0,1fr); gap:.4rem}
-  .cmd .copy{justify-self:center; width:var(--btn-sm); min-height:2.25rem; padding:.3rem 0}
+  .cmd{grid-template-columns:minmax(0,1fr); gap:.4rem; margin:.45rem 0 .8rem}
+  .cmd .copy{justify-self:center; width:var(--btn-sm); min-height:var(--tap); padding:.3rem 0}
   .rows{gap:.35rem}
   .rows.install{gap:.9rem}
   .row, .rows.tools .row{
@@ -92,12 +101,12 @@ footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
   }
   .rows.nocopy .row{grid-template-columns:minmax(0,1fr); grid-template-areas:"label" "field"}
   .row .label{grid-area:label; margin:0}
-  .row .copy{grid-area:copy; min-height:2.25rem; padding:.3rem 0}
+  .row .copy{grid-area:copy; min-height:var(--tap); padding:.3rem 0}
   .row .field{grid-area:field}
-  .field{white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:visible}
+  .field{white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word; overflow-x:visible; padding:.5rem .65rem}
   .ghost{min-height:var(--tap); padding:.5rem .9rem}
   .facts{grid-template-columns:1fr}
-  .primary{width:100%}
+  .primary{width:100%; min-height:var(--tap)}
 }
 {{block "style" .}}{{end}}
 </style>
@@ -124,6 +133,8 @@ footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
     t.setAttribute("readonly", "");
     t.style.position = "fixed";
     t.style.opacity = "0";
+    // Evita lo zoom automatico del campo temporaneo su iOS.
+    t.style.fontSize = "16px";
     document.body.appendChild(t);
     t.select();
     var ok = false;
@@ -143,7 +154,9 @@ footer{margin-top:2rem; color:var(--muted); font-size:.85rem; text-align:center}
     if (!btn) return;
     var el = document.getElementById(btn.getAttribute("data-copy"));
     if (!el) return;
-    copy(el.textContent).then(function (ok) {
+    var text = el.textContent;
+    copy(text).then(function (ok) {
+      if (!btn.isConnected || document.getElementById(btn.getAttribute("data-copy")) !== el || el.textContent !== text) return;
       var old = btn.getAttribute("data-label") || btn.textContent;
       btn.setAttribute("data-label", old);
       btn.textContent = ok ? "Copied" : "Error";

@@ -117,8 +117,9 @@ Un `GET /` da browser (header `Accept` con `text/html`) mostra la pagina di cort
 
 - **Sender, Send a file**: l'invio dal browser (vedi [Invio dal browser](#invio-dal-browser));
 - **Sender, Send from a terminal**: `curl URL -T FILE` e la variante da pipe per le cartelle, con il pulsante Copy, e cosa aspettarsi (tabella, terminale aperto, riga `OK`/`ERRORE`);
+- **Sender, Zip with password and send from a terminal**: ZIP con `-P 'PASSWORD'`, invio da file o pipe e TAR in pipe per preservare i permessi; istruzioni di estrazione, pulizia della history e avvisi sull'esposizione della password e sui limiti di ZipCrypto;
 - **Receiver, Receive a file**: il link nel browser (riga `direct`) oppure i comandi curl, wget e aria2c;
-- **Install the tools**: i comandi per installare curl, wget e aria2c (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, macOS, FreeBSD, Windows);
+- **Install the tools**: i comandi per installare curl, wget e aria2c, e zip/unzip per gli esempi Bash (Debian/Ubuntu, Fedora/RHEL, Arch, openSUSE, Alpine, macOS, FreeBSD; su Windows gli esempi ZIP/TAR richiedono WSL);
 - **Privacy and security**: nulla viene salvato; link casuali e monouso; con `BASHT_PUBLIC_URL` in `https://`, cifratura HTTPS in transito ma non end-to-end, con il consiglio di cifrare i file riservati prima di inviarli (vedi [Limiti e sicurezza](#limiti-e-sicurezza)).
 
 Le pagine sono incorporate nel binario (`internal/server/pages/`), non caricano risorse esterne (CSP restrittiva, `frame-ancestors 'none'`), seguono il tema chiaro o scuro del sistema e usano come base dei comandi `BASHT_PUBLIC_URL`. Gli altri client (curl, wget, aria2c) ricevono lo stesso `GET /` in testo semplice, con le istruzioni.
@@ -139,7 +140,7 @@ curl, wget e aria2c, che non chiedono `text/html`, ricevono il file direttamente
 
 Nella pagina di cortesia, sotto il titolo, un riquadro accetta un file trascinato o scelto con il pulsante **Upload** (uno solo: più file trascinati insieme vengono rifiutati). Il browser:
 
-1. chiede il link (`POST /` con `{"name": ..., "size": ..., "foreground": true}` in JSON) e mostra subito la tabella per il ricevente, con le righe curl, wget, aria2c e direct e i pulsanti Copy: la stessa del terminale. Dove il browser supporta Web Share, **Share link** apre la condivisione nativa del sistema (per esempio per scegliere WhatsApp su Android); condivide solo l'URL, mai il file o il token;
+1. chiede il link (`POST /` con `{"name": ..., "size": ..., "foreground": true}` in JSON) e mostra **Share:** separato dai comandi curl, wget e aria2c per il ricevente. Su mobile resta il solo pulsante **Link**, che apre la condivisione nativa del sistema (per esempio WhatsApp su Android), oppure **Copy link** se Web Share manca o fallisce; condivide solo l'URL, mai il file o il token. I comandi del ricevente sono in una sezione espandibile, chiusa inizialmente su mobile e aperta su desktop;
 2. invia il file (`PUT /<slug>`) solo quando il ricevente si collega, come `curl -T`;
 3. mostra la barra di avanzamento con percentuale, velocità, byte consegnati e tempo stimato, e alla fine l'esito: "Done: the receiver got the whole file", oppure il motivo (link scaduto, ricevente disconnesso, invio interrotto).
 

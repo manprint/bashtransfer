@@ -6,7 +6,7 @@
 // (eseguibile Chromium al posto di quello installato da Playwright), EXCLUDE_HOSTS (host raggiungibili
 // oltre a 127.0.0.1 e localhost, separati da virgola).
 import { chromium } from 'playwright-core';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -175,7 +175,10 @@ async function layoutChecks(page) {
 }
 
 async function linkRows(page) {
-  return page.$$eval('#x-rows .label', (ls) => ls.map((l) => ({ label: l.textContent, line: l.nextElementSibling.textContent })));
+  return page.$eval('#x-links', (s) => [
+    ...[...s.querySelectorAll('#x-rows .label')].map((l) => ({ label: l.textContent, line: l.nextElementSibling.textContent })),
+    { label: 'direct', line: s.querySelector('#x-c3').textContent },
+  ]);
 }
 
 // Pattern deterministico per i file creati nella pagina.
@@ -204,7 +207,7 @@ async function waitResult(page, timeout = 30000) {
 
 // --- Test ---
 
-for (const [w, dark, font] of [[1280, false], [1280, true], [390, false], [390, true], [320, false], [320, false, 'Arial, sans-serif']]) {
+for (const [w, dark, font] of [[1280, false], [1280, true], [390, false], [390, true], [320, false], [320, true], [320, false, 'Arial, sans-serif']]) {
   await test(`home layout ${w} ${dark ? 'dark' : 'light'}${font ? ' fallback font' : ''}`, async () => {
     const page = await newPage({ viewport: { width: w, height: 900 }, dark });
     const resp = await page.goto(BASE + '/');
@@ -221,6 +224,11 @@ for (const [w, dark, font] of [[1280, false], [1280, true], [390, false], [390, 
     assert(bad.length === 0, bad.join('; '));
     const roles = await page.$$eval('h2', (hs) => hs.map((h) => h.textContent.trim()));
     assert(roles.some((r) => r.startsWith('Sender') && r.includes('terminal')) && roles.some((r) => r.startsWith('Receiver')), `titoli ${roles}`);
+    const receiver = await page.$eval('section[aria-labelledby="receive"]', (s) => ({
+      color: getComputedStyle(s.querySelector('.role-recv')).color,
+      tools: [...s.querySelectorAll('.label')].map((l) => ({ color: getComputedStyle(l).color, weight: getComputedStyle(l).fontWeight })),
+    }));
+    assert(receiver.tools.length === 3 && receiver.tools.every((l) => l.color === receiver.color && l.weight === '700'), `stile strumenti ricevente ${JSON.stringify(receiver)}`);
     noErrors(page, 'home');
     await page.context().close();
   });
@@ -242,19 +250,126 @@ await test('home copy button', async () => {
   await page.context().close();
 });
 
-await test('home layout 390 after upload: link commands wrap', async () => {
-  const src = mkfile('mobile.bin', 1 << 20);
-  const page = await newPage({ viewport: { width: 390, height: 844 } });
+await test('copy feedback cannot mark a new sender link as copied', async () => {
+  const page = await newPage({ viewport: { width: 390, height: 844 }, clipboard: BASE });
+  try {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'share', { configurable: true, value: undefined });
+      Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: () => new Promise((resolve) => { window.__finishCopy = resolve; }) });
+    });
+    await page.goto(BASE + '/');
+    await page.setInputFiles('#file', mkfile('copy-old.bin', 100));
+    await page.waitForSelector('#x-links:not([hidden])');
+    const old = (await linkRows(page))[3].line;
+    await page.click('#x-copy');
+    await page.waitForFunction(() => typeof window.__finishCopy === 'function');
+    await page.click('#x-cancel');
+    await waitResult(page, 5000);
+    await page.click('#x-again');
+    await page.setInputFiles('#file', mkfile('copy-new.bin', 100));
+    await page.waitForSelector('#x-links:not([hidden])');
+    assert((await linkRows(page))[3].line !== old, 'il nuovo invio riusa il vecchio link');
+    await page.evaluate(async () => {
+      window.__finishCopy();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert((await page.textContent('#x-copy')) === 'Copy link', 'esito della vecchia copia applicato al nuovo link');
+    await page.click('#x-cancel');
+    noErrors(page, 'stale Copy feedback', PUT_FAILED);
+  } finally { await page.context().close(); }
+});
+
+await test('home password ZIP commands copy', async () => {
+  const page = await newPage({ clipboard: BASE });
   await page.goto(BASE + '/');
-  await page.setInputFiles('#file', src);
-  await page.waitForSelector('#x-links:not([hidden])', { timeout: 10000 });
-  const bad = await layoutChecks(page);
-  assert(bad.length === 0, bad.join('; '));
-  await page.screenshot({ path: path.join(OUT, 'upload-390.png'), fullPage: true });
-  await page.click('#x-cancel');
-  await waitResult(page, 5000);
-  noErrors(page, 'upload 390', PUT_FAILED);
+  const commands = await page.$$eval('section[aria-labelledby="send-zip"] .field', (cs) => cs.map((c) => ({ id: c.id, line: c.textContent })));
+  assert(commands.length === 6, `comandi ZIP/history mancanti: ${commands.length}`);
+  for (const { id, line } of commands) {
+    await page.click(`[data-copy="${id}"]`);
+    await page.waitForFunction((id) => document.querySelector(`[data-copy="${id}"]`).textContent === 'Copied', id, { timeout: 2000 });
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    assert(clip === line, `copia incompleta ${id}: ${clip}`);
+    const parsed = spawnSync('bash', ['-n', '-c', clip], { env, encoding: 'utf8' });
+    assert(parsed.status === 0, `sintassi Bash ${id}: ${parsed.stderr || parsed.error}`);
+  }
+  noErrors(page, 'home ZIP copy');
   await page.context().close();
+});
+
+for (const [w, dark] of [[320, false], [320, true], [390, false], [390, true]]) {
+  await test(`home layout ${w} ${dark ? 'dark' : 'light'} after upload: share and terminal commands`, async () => {
+    const src = mkfile(`mobile-${w}-${dark}.bin`, 1 << 20);
+    const page = await newPage({ viewport: { width: w, height: 844 }, dark, clipboard: BASE });
+    try {
+      await page.addInitScript(() => Object.defineProperty(navigator, 'share', { configurable: true, value: undefined }));
+      await page.goto(BASE + '/');
+      await page.setInputFiles('#file', src);
+      await page.waitForSelector('#x-links:not([hidden])', { timeout: 10000 });
+      const url = (await linkRows(page))[3].line;
+      const share = await page.$eval('#x-share-row', (s) => ({
+        text: s.querySelector('.share-label').textContent,
+        color: getComputedStyle(s.querySelector('.share-label')).color,
+        weight: getComputedStyle(s.querySelector('.share-label')).fontWeight,
+        senderColor: getComputedStyle(document.querySelector('.role-send')).color,
+        button: s.querySelector('#x-copy').getBoundingClientRect().toJSON(),
+        label: s.querySelector('.share-label').getBoundingClientRect().toJSON(),
+      }));
+      assert(share.text === 'Share:' && share.color === share.senderColor && share.weight === '700', `etichetta Share ${JSON.stringify(share)}`);
+      assert(share.button.left > share.label.right && share.button.height >= 44, `riga Share ${JSON.stringify(share)}`);
+      assert(await page.isVisible('#x-copy') && !(await page.isVisible('#x-c3')), 'sul telefono Share non è solo etichetta e pulsante');
+      assert(!(await page.isVisible('#x-c0')), 'comandi Bash aperti prima della richiesta');
+      assert((await layoutChecks(page)).length === 0, 'layout Share compatto');
+      await page.locator('main > section').first().screenshot({ path: path.join(OUT, `share-${w}-${dark ? 'dark' : 'light'}.png`) });
+      await page.click('#x-copy');
+      await page.waitForFunction(() => document.getElementById('x-copy').textContent === 'Copied');
+      assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'copia del link pubblico non valida');
+      await page.click('#x-terminal summary');
+      assert(await page.isVisible('#x-c0') && await page.isVisible('#x-copy'), 'i comandi Bash nascondono Share');
+      await page.click('[data-copy="x-c0"]');
+      await page.waitForFunction(() => document.querySelector('[data-copy="x-c0"]').textContent === 'Copied');
+      assert((await page.evaluate(() => navigator.clipboard.readText())) === `curl -f -OJ "${url}"`, 'copia del comando Bash non valida');
+      const bad = await layoutChecks(page);
+      assert(bad.length === 0, bad.join('; '));
+      await page.locator('main > section').first().screenshot({ path: path.join(OUT, `commands-${w}-${dark ? 'dark' : 'light'}.png`) });
+      await page.click('#x-cancel');
+      await waitResult(page, 5000);
+      assert((await layoutChecks(page)).length === 0, 'layout esito mobile');
+      noErrors(page, 'mobile sharing layout', PUT_FAILED);
+    } finally { await page.context().close(); }
+  });
+}
+
+await test('mobile download and error page layouts', async () => {
+  const sender = await newPage();
+  try {
+    await sender.goto(BASE + '/');
+    await sender.setInputFiles('#file', mkfile('mobile-download.bin', 1 << 18));
+    await sender.waitForSelector('#x-links:not([hidden])');
+    const url = (await linkRows(sender))[3].line;
+    for (const [w, dark] of [[320, false], [320, true], [390, false], [390, true]]) {
+      const page = await newPage({ viewport: { width: w, height: 844 }, dark });
+      try {
+        const response = await page.goto(url);
+        assert(response.status() === 200, `pagina download ${response.status()}`);
+        assert((await layoutChecks(page)).length === 0, `layout download ${w}/${dark}`);
+        const tools = await page.$eval('.rows.tools', (s) => ({
+          color: getComputedStyle(document.querySelector('.role-recv')).color,
+          labels: [...s.querySelectorAll('.label')].map((l) => ({ color: getComputedStyle(l).color, weight: getComputedStyle(l).fontWeight })),
+        }));
+        assert(tools.labels.length === 3 && tools.labels.every((l) => l.color === tools.color && l.weight === '700'), 'stili dei tool ricevente incoerenti');
+        await page.screenshot({ path: path.join(OUT, `download-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
+        const missing = await page.goto(BASE + '/AbC123xY9z');
+        assert(missing.status() === 404, `pagina errore ${missing.status()}`);
+        assert((await layoutChecks(page)).length === 0, `layout errore ${w}/${dark}`);
+        const font = await page.evaluate(() => parseFloat(getComputedStyle(document.body).fontSize));
+        assert(font >= 14 && font < 16, `carattere mobile ${font}`);
+        await page.screenshot({ path: path.join(OUT, `error-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
+        noErrors(page, 'mobile download/error', LOAD_4XX);
+      } finally { await page.context().close(); }
+    }
+    await sender.click('#x-cancel');
+    await waitResult(sender, 5000);
+  } finally { await sender.context().close(); }
 });
 
 await test('upload button + curl receiver from the table', async () => {
@@ -618,7 +733,7 @@ await test('sender grace: the link closes if the sender does not come back in ti
 });
 
 await test('native sharing: return guidance, cancellation and Copy fallback', async () => {
-  const page = await newPage({ viewport: { width: 390, height: 844 } });
+  const page = await newPage({ viewport: { width: 390, height: 844 }, clipboard: BASE_GRACE });
   const src = mkfile('share.bin', 1 << 20);
   try {
     await page.addInitScript(() => {
@@ -636,13 +751,25 @@ await test('native sharing: return guidance, cancellation and Copy fallback', as
     await page.waitForSelector('#x-links:not([hidden])');
     const url = (await linkRows(page))[3].line;
     assert(await page.isVisible('#x-share'), 'pulsante di condivisione nativa assente');
+    const shareBox = await page.locator('#x-share').boundingBox();
+    assert(shareBox.height >= 44 && shareBox.height <= 48, `pulsante Link su più righe: ${shareBox.height}`);
+    assert(!(await page.isVisible('#x-copy')), 'azioni di condivisione duplicate sul telefono');
     assert(/After sharing, return to this browser page/.test(await page.textContent('#x-share-hint')), 'istruzioni di ritorno assenti');
-    for (const mode of ['abort', 'fail', 'ok']) {
+    const bad = await layoutChecks(page);
+    assert(bad.length === 0, bad.join('; '));
+    await page.locator('main > section').first().screenshot({ path: path.join(OUT, 'share-native-390.png') });
+    for (const mode of ['abort', 'ok', 'fail']) {
       await page.evaluate((mode) => { window.__shareMode = mode; }, mode);
       await page.click('#x-share');
       await page.waitForFunction(() => !document.getElementById('x-share').disabled);
       assert(await page.isVisible('#x-links'), 'la condivisione ha annullato il link');
-      if (mode === 'fail') assert(/Use Copy/.test(await page.textContent('#x-share-status')), 'fallback Copy assente');
+      if (mode === 'fail') {
+        assert(/Use Copy/.test(await page.textContent('#x-share-status')), 'fallback Copy assente');
+        assert(await page.isVisible('#x-copy') && !(await page.isVisible('#x-share')), 'fallback Copy non sostituisce Share');
+        await page.click('#x-copy');
+        await page.waitForFunction(() => document.getElementById('x-copy').textContent === 'Copied');
+        assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'fallback Copy diverso dal link pubblico');
+      }
     }
     const shares = await page.evaluate(() => window.__shares);
     assert(shares.length === 3 && shares.every((s) => s.url === url && !s.files), `condivisione ${JSON.stringify(shares)}`);

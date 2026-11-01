@@ -18,6 +18,23 @@
 .xfer-file{min-width:0}
 .xfer-file strong{display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .xfer h3{margin:1.1rem 0 .1rem}
+.share-row{display:grid; grid-template-columns:4.5rem minmax(0,1fr) var(--btn); gap:.5rem .75rem; align-items:center; margin:1rem 0 .6rem}
+.share-row.has-native{grid-template-columns:4.5rem minmax(0,1fr) var(--btn) var(--btn)}
+.share-label{color:var(--send); font-weight:700}
+.share-row .primary{min-width:0; padding:.55rem 0; font-size:.9rem; align-self:stretch}
+.share-row .copy{align-self:stretch}
+.terminal-options{margin:.9rem 0 0; padding-top:.65rem; border-top:1px solid var(--line)}
+.terminal-options summary{cursor:pointer; color:var(--recv); font-size:.9rem; font-weight:700}
+.terminal-options summary:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+#x-grace:empty, #x-share-status:empty{display:none}
+@media (max-width:40rem){
+  .share-row, .share-row.has-native{grid-template-columns:max-content var(--btn-sm); justify-content:start; gap:.75rem}
+  .share-row .field, .share-row.has-native .copy{display:none}
+  .share-row .primary, .share-row .copy{min-height:var(--tap); padding:.3rem 0}
+  .terminal-options summary{min-height:var(--tap); display:flex; align-items:center; gap:.5rem}
+  .terminal-options summary::before{content:"+"}
+  .terminal-options[open] summary::before{content:"-"}
+}
 .bar{height:.55rem; margin:1.1rem 0 .5rem; border-radius:999px; background:var(--line); overflow:hidden}
 .bar span{display:block; width:0; height:100%; border-radius:inherit; background:var(--accent); transition:width .25s linear}
 .bar.ok span{background:var(--ok)}
@@ -49,12 +66,19 @@
       <button class="ghost" id="x-cancel" type="button">Cancel</button>
     </div>
     <div id="x-links" hidden>
-      <h3>Send this to the receiver</h3>
-      <button class="primary" id="x-share" type="button" hidden>Share link</button>
-      <div class="rows tools" id="x-rows"></div>
-      <p class="muted" id="x-share-hint">One receiver per link. <strong>After sharing, return to this browser page, where the sender is waiting.</strong> Keep this page open and in the foreground until the end: nothing is stored on the server, so the receiver needs this browser to send the file. To receive on the same phone, use split screen; otherwise open the link on another device.</p>
+      <div class="share-row" id="x-share-row">
+        <span class="share-label">Share:</span>
+        <code class="field" id="x-c3"></code>
+        <button class="primary" id="x-share" type="button" aria-label="Share link" hidden>Link</button>
+        <button class="copy" id="x-copy" type="button" data-copy="x-c3">Copy link</button>
+      </div>
+      <p class="muted" id="x-share-hint">One receiver per link. <strong>After sharing, return to this browser page, where the sender is waiting.</strong> Keep this page open and in the foreground until the end: nothing is stored on the server. On the same phone, use split screen; otherwise receive on another device.</p>
       <p class="muted" id="x-grace"></p>
       <p class="status" id="x-share-status" role="status"></p>
+      <details class="terminal-options" id="x-terminal" open>
+        <summary>Receiver terminal commands</summary>
+        <div class="rows tools" id="x-rows"></div>
+      </details>
     </div>
     <div class="bar" id="x-bar" role="progressbar" aria-label="Transfer" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
     <div class="stats"><span class="pct" id="x-pct">0%</span><span id="x-rate"></span><span id="x-amount"></span></div>
@@ -77,10 +101,42 @@
   <p class="muted">Windows: type <code>curl.exe</code>; in Windows PowerShell <code>curl</code> is an alias of <code>Invoke-WebRequest</code>.</p>
 </section>
 
+<section class="card" aria-labelledby="send-zip">
+  <h2 id="send-zip"><span class="role role-send">Sender</span>Zip with password and send from a terminal</h2>
+  <p>These examples use Bash. Replace <code>FILE</code> with a file, <code>FOLDER</code> with a folder, and choose an unused archive name.</p>
+  <p>Replace <code>PASSWORD</code> with your password, keeping the single quotes. The password option is <code>-P</code> (capital P). If the password contains a single quote, it must be escaped for Bash.</p>
+  <p class="muted"><strong>Password exposure:</strong> the password can remain in shell history and appear in process listings. Share it separately from the download link.</p>
+  <h3>Create a ZIP, then send it</h3>
+  <div class="cmd"><code class="field" id="c-zip-send-password">zip -P 'PASSWORD' archive.zip "FILE" &amp;&amp;
+  curl "{{.Base}}" -T archive.zip</code><button class="copy" type="button" data-copy="c-zip-send-password">Copy</button></div>
+  <p class="muted">This creates <code>archive.zip</code> on your computer before sending it. The server does not store it.</p>
+  <h3>ZIP and send through a pipe</h3>
+  <div class="cmd"><code class="field" id="c-zip-pipe-password">(set -o pipefail; zip -P 'PASSWORD' - "FILE" |
+  curl -N "{{.Base}}/archive.zip" -T -)</code><button class="copy" type="button" data-copy="c-zip-pipe-password">Copy</button></div>
+  <h3>Preserve folder permissions: TAR, ZIP and send through a pipe</h3>
+  <p>TAR records Unix permissions and symbolic links inside the password-protected ZIP.</p>
+  <div class="cmd"><code class="field" id="c-tar-zip-pipe-password">(set -o pipefail; tar -cf - "FOLDER" |
+  zip -P 'PASSWORD' - - |
+  curl -N "{{.Base}}/archive.tar.zip" -T -)</code><button class="copy" type="button" data-copy="c-tar-zip-pipe-password">Copy</button></div>
+  <p class="muted">Neither pipe example writes an archive to disk. <code>pipefail</code> reports failures from any stage. Keep the terminal open until the receiver finishes, and share the link printed by curl.</p>
+  <h3>Clear Bash history after sending</h3>
+  <p>This command clears the entire history of the current Bash session and overwrites its history file:</p>
+  <div class="cmd"><code class="field" id="c-clear-history">history -c &amp;&amp; history -w</code><button class="copy" type="button" data-copy="c-clear-history">Copy</button></div>
+  <p class="muted">Other open terminals can write their own history back later. This does not erase other history files, terminal recordings or system logs, and cannot undo password exposure in process listings.</p>
+  <h3>For the receiver</h3>
+  <p>Save the download first, then extract it in an empty folder. For either file ZIP example, save it as <code>archive.zip</code> and run:</p>
+  <div class="cmd"><code class="field" id="c-unzip">unzip -P 'PASSWORD' archive.zip</code><button class="copy" type="button" data-copy="c-unzip">Copy</button></div>
+  <p>For the TAR example, save it as <code>archive.tar.zip</code>. Extract with <code>tar -xpf</code> to restore the recorded Unix permissions (where the receiving filesystem supports them):</p>
+  <div class="cmd"><code class="field" id="c-unzip-tar">(set -o pipefail; unzip -P 'PASSWORD' -p archive.tar.zip |
+  tar -xpf -)</code><button class="copy" type="button" data-copy="c-unzip-tar">Copy</button></div>
+  <p class="muted">Use the same password for unzip. Its lowercase <code>-p</code> sends the extracted TAR to the pipe; it is not a password option.</p>
+  <p class="muted"><strong>Encryption limits:</strong> standard zip uses legacy ZipCrypto, not AES, and ZIP entry names remain visible. Do not rely on it for highly sensitive files.</p>
+</section>
+
 <section class="card" aria-labelledby="receive">
   <h2 id="receive"><span class="role role-recv">Receiver</span>Receive a file</h2>
   <h3>In a browser</h3>
-  <p>Open the link from the sender (the <code>direct</code> row of the table) and press <strong>Download</strong>.</p>
+  <p>Open the link shared by the sender and press <strong>Download</strong>. In the terminal sender's table, use the <code>direct</code> row.</p>
   <h3>From a terminal</h3>
   <p>Run one of the commands from the sender's table. Here <code>LINK</code> stands for the link:</p>
   <div class="rows nocopy">
@@ -93,19 +149,19 @@
 
 <section class="card" aria-labelledby="install">
   <h2 id="install">Install the tools</h2>
-  <p class="muted">The terminal sender needs curl; the receiver needs a browser, or one of curl, wget and aria2c. Most systems already have curl.</p>
+  <p class="muted">The terminal sender needs curl; the receiver needs a browser, or one of curl, wget and aria2c. The password ZIP examples also need zip and unzip; the folder examples need tar. Most systems already have curl and tar.</p>
   <div class="rows install">
-    <div class="row"><span class="label">Debian / Ubuntu</span><code class="field" id="i1">sudo apt install curl wget aria2</code><button class="copy" type="button" data-copy="i1">Copy</button></div>
-    <div class="row"><span class="label">Fedora / RHEL</span><code class="field" id="i2">sudo dnf install curl wget aria2</code><button class="copy" type="button" data-copy="i2">Copy</button></div>
-    <div class="row"><span class="label">Arch / Manjaro</span><code class="field" id="i3">sudo pacman -S curl wget aria2</code><button class="copy" type="button" data-copy="i3">Copy</button></div>
-    <div class="row"><span class="label">openSUSE</span><code class="field" id="i4">sudo zypper install curl wget aria2</code><button class="copy" type="button" data-copy="i4">Copy</button></div>
-    <div class="row"><span class="label">Alpine</span><code class="field" id="i5">apk add curl wget aria2</code><button class="copy" type="button" data-copy="i5">Copy</button></div>
-    <div class="row"><span class="label">macOS (Homebrew)</span><code class="field" id="i6">brew install curl wget aria2</code><button class="copy" type="button" data-copy="i6">Copy</button></div>
-    <div class="row"><span class="label">FreeBSD</span><code class="field" id="i7">sudo pkg install curl wget aria2</code><button class="copy" type="button" data-copy="i7">Copy</button></div>
+    <div class="row"><span class="label">Debian / Ubuntu</span><code class="field" id="i1">sudo apt install curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i1">Copy</button></div>
+    <div class="row"><span class="label">Fedora / RHEL</span><code class="field" id="i2">sudo dnf install curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i2">Copy</button></div>
+    <div class="row"><span class="label">Arch / Manjaro</span><code class="field" id="i3">sudo pacman -S curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i3">Copy</button></div>
+    <div class="row"><span class="label">openSUSE</span><code class="field" id="i4">sudo zypper install curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i4">Copy</button></div>
+    <div class="row"><span class="label">Alpine</span><code class="field" id="i5">apk add curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i5">Copy</button></div>
+    <div class="row"><span class="label">macOS (Homebrew)</span><code class="field" id="i6">brew install curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i6">Copy</button></div>
+    <div class="row"><span class="label">FreeBSD</span><code class="field" id="i7">sudo pkg install curl wget aria2 zip unzip</code><button class="copy" type="button" data-copy="i7">Copy</button></div>
     <div class="row"><span class="label">Windows: wget</span><code class="field" id="i8">winget install JernejSimoncic.Wget</code><button class="copy" type="button" data-copy="i8">Copy</button></div>
     <div class="row"><span class="label">Windows: aria2</span><code class="field" id="i9">winget install aria2.aria2</code><button class="copy" type="button" data-copy="i9">Copy</button></div>
   </div>
-  <p class="muted">Windows 10 and 11 already include <code>curl.exe</code>.</p>
+  <p class="muted">Windows 10 and 11 already include <code>curl.exe</code>. For the Bash ZIP/TAR examples, use WSL and the Debian / Ubuntu installation command above.</p>
 </section>
 
 <section class="card" aria-labelledby="privacy">
@@ -276,7 +332,7 @@
             grace = m.grace || 0;
             showLinks(m.commands);
             $("x-grace").textContent = grace > 0
-              ? "If the connection is lost before downloading starts, the link stays available for " + duration(grace) + ". Return here promptly after sharing. An interrupted download cannot be resumed."
+              ? "If disconnected before download, the link stays available for " + duration(grace) + ". Interrupted downloads cannot resume."
               : "Connection recovery is disabled on this server. Switching apps may close the link.";
             clearInterval(pulse);
             pulse = setInterval(function () { if (document.visibilityState !== "hidden" && !sharing) foreground(true); }, 5000);
@@ -356,6 +412,10 @@
     var rows = $("x-rows");
     rows.textContent = "";
     cmds.forEach(function (c, i) {
+      if (c.label === "direct") {
+        $("x-c3").textContent = c.line;
+        return;
+      }
       var label = document.createElement("span");
       label.className = "label";
       label.textContent = c.label;
@@ -373,8 +433,15 @@
       row.append(label, code, btn);
       rows.append(row);
     });
+    $("x-terminal").open = !window.matchMedia("(max-width:40rem)").matches;
+    var copy = $("x-copy");
+    clearTimeout(copy._t);
+    copy.textContent = "Copy link";
+    copy.classList.remove("done");
     $("x-links").hidden = false;
-    $("x-share").hidden = typeof navigator.share !== "function";
+    var native = typeof navigator.share === "function";
+    $("x-share").hidden = !native;
+    $("x-share-row").classList.toggle("has-native", native);
   }
 
   function foreground(visible) {
@@ -439,6 +506,8 @@
       return navigator.share({ title: "Bashtransfer", text: "Download this file. The sender must stay on the sending page.", url: shared.url });
     }).catch(function (e) {
       if (busy && link === shared && e.name !== "AbortError") {
+        btn.hidden = true;
+        $("x-share-row").classList.remove("has-native");
         $("x-share-status").textContent = "Could not share the link. Use Copy, then return to this browser page after sharing.";
       }
     }).then(function () {
