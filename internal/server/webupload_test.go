@@ -507,7 +507,13 @@ func TestWebUploadCancel(t *testing.T) {
 			if last, _ := res.outcome(t, 5*time.Second); last.Outcome != failSenderGone {
 				t.Fatalf("stream outcome %+v", last)
 			}
-			within(t, 5*time.Second, "end of PUT", func() webResult { return <-done })
+			r := within(t, 5*time.Second, "end of PUT", func() webResult { return <-done })
+			if r.err != nil || r.status != http.StatusOK {
+				t.Fatalf("PUT: status %d, err %v, %q", r.status, r.err, r.body)
+			}
+			if o, _ := lastOutcome(t, r.body); o != failSenderGone {
+				t.Fatalf("PUT outcome %q, want %q", o, failSenderGone)
+			}
 		})
 		t.Run(proto+" sending", func(t *testing.T) {
 			srv, reg := newWebServer(t, time.Hour)

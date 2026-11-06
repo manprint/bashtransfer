@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import net from 'node:net';
+import http from 'node:http';
 
 for (const k of ['BASE', 'BASE_SHORT', 'BASE_AUTH', 'BASE_GRACE', 'OUT']) {
   if (!process.env[k]) { console.error(`${k} not set: use scripts/ui/run.sh`); process.exit(2); }
@@ -592,8 +593,12 @@ await test('drag and drop + browser receiver on the download page', async () => 
   noErrors(peek, 'download 390');
   await peek.context().close();
   const rp = await newPage();
+  const polls = [];
+  rp.on('request', (r) => { if (r.url().endsWith('?status=1')) polls.push(r.url()); });
   const resp = await rp.goto(url);
   assert(resp.status() === 200, `download page ${resp.status()}`);
+  await sleep(1000);
+  assert(polls.length === 1, `status checks on load: ${polls.length}`);
   const info = await rp.$$eval('.file dd', (d) => d.map((x) => x.textContent));
   assert(info[0] === name && info[1] === '3.0 MiB (3,145,728 bytes)', `file details ${info}`);
   const tools = await rp.$$eval('.rows.tools .label', (l) => l.map((x) => x.textContent));
@@ -610,7 +615,9 @@ await test('drag and drop + browser receiver on the download page', async () => 
   assert(btn.dis && btn.t === 'Download requested', `button after click ${JSON.stringify(btn)}`);
   const res = await waitResult(page);
   assert(res.cls === 'result ok', `sender outcome ${JSON.stringify(res)}`);
-  noErrors(rp, 'download');
+  // The page that downloaded does not tell its user to ask for the file again.
+  await rp.waitForFunction(() => /^The link has been used\. Check your browser's downloads/.test(document.getElementById('dl-status').textContent), null, { timeout: 10000 });
+  noErrors(rp, 'download', LOAD_4XX);
   noErrors(page, 'upload drop');
   const again = await rp.goto(url);
   assert(again.status() === 410 && /Link already used or expired/.test(await rp.textContent('h2')), `used link ${again.status()}`);
@@ -994,6 +1001,30 @@ await test('foreground return recovers a silent stalled connection', async () =>
   } finally { px.close(); await page.context().close(); }
 });
 
+await test('sender grace: a late background notice that releases the PUT is recovered while visible', async () => {
+  const page = await newPage();
+  const src = mkfile('late-hidden.bin', 1 << 20);
+  try {
+    await page.goto(BASE_GRACE + '/');
+    const put = page.waitForRequest((r) => r.method() === 'PUT');
+    await page.setInputFiles('#file', src);
+    const first = await put;
+    const url = first.url(), token = first.headers()['x-bashtransfer-token'];
+    await page.waitForFunction((w) => document.getElementById('x-status').textContent === w, WAITING);
+    const again = page.waitForRequest((r) => r.method() === 'PUT' && r !== first, { timeout: 5000 });
+    // A foreground(false) sent before a return to the page, reaching the server after it.
+    const late = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bashtransfer-Token': token }, body: '{"foreground":false}' });
+    assert(late.status === 204, `late notice: ${late.status}`);
+    await again;
+    const recv = path.join(OUT, 'recv-late-hidden');
+    const r = await sh(`curl -sS -f -OJ "${url}"`, recv).done;
+    assert(r.code === 0, `download after the late notice: ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(recv, 'late-hidden.bin'))) === sha(fs.readFileSync(src)), 'file mismatch after the late notice');
+    assert((await waitResult(page)).cls === 'result ok', 'late notice left the sender detached');
+    noErrors(page, 'late notice', PUT_FAILED);
+  } finally { await page.context().close(); }
+});
+
 await test('native sharing unavailable keeps Copy usable', async () => {
   const page = await newPage({ clipboard: BASE });
   try {
@@ -1008,6 +1039,49 @@ await test('native sharing unavailable keeps Copy usable', async () => {
     assert((await page.evaluate(() => navigator.clipboard.readText())) === url, 'copy fallback not working');
     await page.click('#x-cancel');
   } finally { await page.context().close(); }
+});
+
+// HTTP proxy that serves the app under a path prefix and strips it, like a reverse proxy
+// with BASHT_PUBLIC_URL=https://host/prefix.
+async function prefixProxy(target, prefix) {
+  const t = new URL(target);
+  const srv = http.createServer((req, res) => {
+    if (!req.url.startsWith(prefix + '/')) { res.writeHead(404); res.end('outside the prefix'); return; }
+    const up = http.request({ host: t.hostname, port: t.port, method: req.method, path: req.url.slice(prefix.length), headers: req.headers }, (ur) => {
+      res.writeHead(ur.statusCode, ur.headers);
+      ur.pipe(res);
+    });
+    up.on('error', () => res.destroy());
+    req.pipe(up);
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { url: `http://127.0.0.1:${srv.address().port}${prefix}`, close: () => { srv.closeAllConnections(); srv.close(); } };
+}
+
+await test('browser sender and links behind a proxy path prefix', async () => {
+  const px = await prefixProxy(BASE, '/bt');
+  const page = await newPage();
+  const src = mkfile('prefix.bin', 1 << 20);
+  let lp;
+  try {
+    await page.goto(px.url + '/');
+    await page.setInputFiles('#file', src);
+    await page.waitForSelector('#x-links:not([hidden])', { timeout: 10000 });
+    const id = new URL((await linkRows(page))[3].line).pathname.slice(1);
+    assert(await page.$eval('header a', (a) => a.href) === px.url + '/', 'home link outside the prefix');
+    lp = await newPage();
+    await lp.goto(`${px.url}/${id}`);
+    assert(await lp.$eval('header a', (a) => a.href) === px.url + '/', 'download page home link outside the prefix');
+    const recv = path.join(OUT, 'recv-prefix');
+    const r = await sh(`curl -sS -f -OJ "${BASE}/${id}"`, recv).done;
+    assert(r.code === 0, `download: ${r.err}`);
+    assert(sha(fs.readFileSync(path.join(recv, 'prefix.bin'))) === sha(fs.readFileSync(src)), 'file mismatch behind the prefix');
+    assert((await waitResult(page)).cls === 'result ok', 'upload failed behind the prefix');
+    noErrors(page, 'prefix upload');
+  } finally {
+    px.close();
+    for (const p of [page, lp]) if (p) await p.context().close().catch(() => {});
+  }
 });
 
 await test('unknown link page', async () => {

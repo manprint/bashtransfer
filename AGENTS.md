@@ -33,6 +33,8 @@ Bashtransfer uses Go and the standard library for a streaming HTTP relay, usable
 - Keep the interface in English, the shared colors (`--send`, `--recv`, `--err`), the light/dark theme, and the consistency of Sender/Receiver and READY/UNREADY.
 - Preserve desktop and mobile layouts at 1280, 390 and 320 px, no horizontal scrolling, and touch controls of at least 44 px on mobile.
 - Handle Web Share/Clipboard fallbacks, visibility, network, timeouts and stale asynchronous responses. Sharing sends only the URL, never files or tokens.
+- Use paths relative to the app root in pages and scripts (`root` in `home.html`, `{{.Root}}` in templates): `BASHT_PUBLIC_URL` may carry a prefix that the proxy strips.
+- A bound browser `PUT` ends with the JSON outcome, except the `400` length mismatch. A `200` `PUT` without an outcome before the relay means the server released it: the visible page (grace > 0, not sharing) reattaches.
 - A template change requires rebuilding and restarting the binary. Node.js and Playwright are only needed for tests; there are no npm builds or servers for the app.
 
 ## Verification

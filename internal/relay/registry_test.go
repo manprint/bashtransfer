@@ -405,6 +405,38 @@ func TestRegistryCancel(t *testing.T) {
 	}
 }
 
+// TestRegistryBeginRelayAfterAbort: a receiver already claimed when the sender cancels (or a
+// receiver gone before the copy) must not start the relay, so the receiver gets the error page
+// instead of a truncated 200.
+func TestRegistryBeginRelayAfterAbort(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		abort func(r *Registry, s *Session)
+		want  error
+	}{
+		{"cancel", func(r *Registry, s *Session) { r.Cancel(s) }, ErrSenderGone},
+		{"receiver gone", func(_ *Registry, s *Session) { s.Abort(ErrReceiverGone) }, ErrReceiverGone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry(10, time.Hour)
+			s, binding := reservedBound(t, r)
+			if _, err := r.Claim(s.Slug, fakeRcv{}); err != nil {
+				t.Fatal(err)
+			}
+			tc.abort(r, s)
+			if err := r.BeginRelay(s, binding); !errors.Is(err, tc.want) {
+				t.Fatalf("BeginRelay after abort: %v, want %v", err, tc.want)
+			}
+			select {
+			case <-s.Started():
+				t.Fatal("relay started on an interrupted session")
+			default:
+			}
+			r.Finish(s)
+		})
+	}
+}
+
 // TestRegistryReserved: the reservation is found only with its token, attached or not; an upload
 // from curl (without a token) never.
 func TestRegistryReserved(t *testing.T) {
@@ -783,14 +815,14 @@ func TestRegistryForegroundLifecycle(t *testing.T) {
 	if _, started, err := r.Resume(s.Slug, s.Token, true); err != nil || started {
 		t.Fatalf("resume before relay: started=%v err=%v", started, err)
 	}
-	if r.BeginRelay(s, old) {
-		t.Fatal("the old PUT started the relay after resume")
+	if err := r.BeginRelay(s, old); !errors.Is(err, ErrReplaced) {
+		t.Fatalf("the old PUT after resume: %v", err)
 	}
 	_, fresh, err := r.BindDetachable(s.Slug, s.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); err != nil || !r.BeginRelay(s, fresh) {
+	if _, err := r.ClaimReady(s.Slug, fakeRcv{}); err != nil || r.BeginRelay(s, fresh) != nil {
 		t.Fatalf("start from the new PUT: %v", err)
 	}
 	if _, started, err := r.Resume(s.Slug, s.Token, true); err != nil || !started {
@@ -868,8 +900,8 @@ func TestRegistryPeerReadinessLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	observe(false)
-	if !r.BeginRelay(s, binding) {
-		t.Fatal("relay not started")
+	if err := r.BeginRelay(s, binding); err != nil {
+		t.Fatalf("relay not started: %v", err)
 	}
 	r.mu.Lock()
 	s.receiverSeen = time.Now().Add(-2 * ReceiverPresenceTimeout)

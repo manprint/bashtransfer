@@ -39,6 +39,8 @@ func parsePages(names ...string) map[string]*template.Template {
 type pageData struct {
 	Title   string
 	NoIndex bool
+	// Root is the relative link to the home: it also works behind a proxy that strips a path prefix.
+	Root string
 	// home
 	Base    string
 	HTTPS   bool
@@ -85,7 +87,11 @@ const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsa
 
 // servePage responds with page name and status status. The page is generated before the headers:
 // a template error becomes a 500 instead of a truncated page.
-func servePage(w http.ResponseWriter, status int, name, formAction, connect string, d pageData) {
+func servePage(w http.ResponseWriter, r *http.Request, status int, name, formAction, connect string, d pageData) {
+	d.Root = "./"
+	if n := strings.Count(r.URL.EscapedPath(), "/"); n > 1 {
+		d.Root = strings.Repeat("../", n-1)
+	}
 	var b bytes.Buffer
 	if err := pages[name].ExecuteTemplate(&b, "layout", d); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -104,8 +110,8 @@ func servePage(w http.ResponseWriter, status int, name, formAction, connect stri
 }
 
 // serveHome responds with the courtesy page; base is the public base of the commands.
-func serveHome(w http.ResponseWriter, base string) {
-	servePage(w, http.StatusOK, "home", "'none'", "'self'", pageData{
+func serveHome(w http.ResponseWriter, r *http.Request, base string) {
+	servePage(w, r, http.StatusOK, "home", "'none'", "'self'", pageData{
 		Title:   "Bashtransfer",
 		Base:    base,
 		HTTPS:   strings.HasPrefix(base, "https://"),
@@ -140,7 +146,7 @@ func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 	if base, ok := h.baseURL(r); ok {
 		d.Commands = receiverCommands(base + "/" + id)
 	}
-	servePage(w, http.StatusOK, "download", "'self'", "'self'", d)
+	servePage(w, r, http.StatusOK, "download", "'self'", "'self'", d)
 }
 
 func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) {
@@ -227,7 +233,7 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, reason, msg 
 	if !ok {
 		m.heading, m.text = http.StatusText(status), msg
 	}
-	servePage(w, status, "message", "'none'", "'none'", pageData{
+	servePage(w, r, status, "message", "'none'", "'none'", pageData{
 		Title: m.heading + " · Bashtransfer", NoIndex: true, Heading: m.heading, Text: m.text,
 	})
 }

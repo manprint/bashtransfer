@@ -187,6 +187,8 @@
   // Server grace for a disconnected sender (seconds; 0 disables it, BASHT_SENDER_GRACE):
   // reattach to the same reservation. lostAt marks disconnection time, or 0 while connected.
   var grace = 0, lostAt = 0, retry = 0, reserved = false, chosen = null, pulse = 0, sharing = false;
+  // The home is the root of the app, also behind a proxy that serves it under a path prefix.
+  var root = location.pathname.replace(/[^\/]*$/, "");
   var readyTimer = 0, readyTTL = 5000;
 
   function readiness(value) {
@@ -250,7 +252,7 @@
   function cancelLink() {
     if (!link) return;
     try {
-      fetch("/" + encodeURIComponent(link.slug), { method: "DELETE", headers: { "X-Bashtransfer-Token": link.token }, keepalive: true }).catch(function () {});
+      fetch(root + encodeURIComponent(link.slug), { method: "DELETE", headers: { "X-Bashtransfer-Token": link.token }, keepalive: true }).catch(function () {});
     } catch (e) {}
     link = null;
   }
@@ -326,7 +328,7 @@
     if (ctl) { var old = ctl; ctl = null; old.abort(); }
     var mine = ctl = new AbortController(), first = true;
     headers["Content-Type"] = "application/json";
-    fetch("/", { method: "POST", headers: headers, body: body, signal: mine.signal }).then(function (r) {
+    fetch(root, { method: "POST", headers: headers, body: body, signal: mine.signal }).then(function (r) {
       if (ctl !== mine) return;
       if (!r.ok) {
         throw shown(lostAt && r.status === 404 ? "The link no longer works: it closed while the connection was lost. Keep this page in the foreground and send the file again."
@@ -466,7 +468,7 @@
     if (!busy || !link) return;
     try {
       var ctl = new AbortController(), timeout = setTimeout(function () { ctl.abort(); }, 5000);
-      fetch("/" + encodeURIComponent(link.slug), {
+      fetch(root + encodeURIComponent(link.slug), {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Bashtransfer-Token": link.token },
         body: JSON.stringify({ foreground: visible }),
@@ -481,14 +483,18 @@
   function send(file, res) {
     if (xhr) { var prev = xhr; xhr = null; prev.abort(); }
     var req = xhr = new XMLHttpRequest();
-    req.open("PUT", "/" + encodeURIComponent(res.slug));
+    req.open("PUT", root + encodeURIComponent(res.slug));
     req.setRequestHeader("X-Bashtransfer-Token", res.token);
     // With grace, a PUT connection lost before the receiver is handled like a lost stream.
     req.onerror = function () { if (xhr === req && busy && !attached && grace > 0) lost(); };
     req.onload = function () {
       var lines = req.responseText.split("\n").map(function (l) { return l.trim(); }).filter(Boolean), o = null;
-      try { o = JSON.parse(lines[lines.length - 1]); } catch (e) { return; }
-      if (o && o.outcome && xhr === req && busy) { link = null; outcome(o); }
+      try { o = JSON.parse(lines[lines.length - 1]); } catch (e) {}
+      if (xhr !== req || !busy) return;
+      if (o && o.outcome) { link = null; outcome(o); return; }
+      // The server released this PUT without an outcome before the receiver (e.g. a late
+      // background notice): reattach now, or the link would wait for the grace to expire.
+      if (req.status === 200 && !attached && grace > 0 && !sharing && document.visibilityState !== "hidden") lost();
     };
     req.send(file);
   }

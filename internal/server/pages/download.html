@@ -87,7 +87,10 @@
           btn.disabled = true;
           btn.textContent = submitted ? "Download requested" : "Link unavailable";
           away.hidden = true;
-          status.textContent = m.message || "This link no longer works. Ask the sender to send the file again.";
+          // After this page's own download the link is used whether it completed or not.
+          status.textContent = submitted && m.state === "gone"
+            ? "The link has been used. Check your browser's downloads; if the file is missing or incomplete, ask the sender to send it again."
+            : m.message || "This link no longer works. Ask the sender to send the file again.";
         }
       }).catch(function () {
         if (pending === ctl) unknown();
@@ -104,7 +107,8 @@
   window.addEventListener("offline", invalidate);
   window.addEventListener("pagehide", invalidate);
   window.addEventListener("online", function () { invalidate(); poll(); });
-  window.addEventListener("pageshow", function () { invalidate(); poll(); });
+  // Only a page restored from the back/forward cache: the first load already polls.
+  window.addEventListener("pageshow", function (e) { if (e.persisted) { invalidate(); poll(); } });
   form.addEventListener("submit", function (e) {
     if (!ready || submitted) { e.preventDefault(); poll(); return; }
     submitted = true;

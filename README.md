@@ -219,7 +219,7 @@ All variables are optional. An empty value is the same as not setting it.
 | Variable | Default | Meaning |
 |-----------|---------|-------------|
 | `BASHT_LISTEN` | `:8080` | The server's HTTP listen address. |
-| `BASHT_PUBLIC_URL` | empty | Base of the URLs in the commands: `http(s)://host[/prefix]`, without query, credentials or characters the shell interprets (validated at startup). If empty, `X-Forwarded-Proto` and `Host` are used; a `Host` with characters the shell interprets (`$`, `!`, spaces, quotes, backtick, backslash) receives `400`. Required in compose. |
+| `BASHT_PUBLIC_URL` | empty | Base of the URLs in the commands: `http(s)://host[/prefix]` (with a prefix, the proxy strips it before forwarding to the app), without query, credentials or characters the shell interprets (validated at startup). If empty, `X-Forwarded-Proto` and `Host` are used; a `Host` with characters the shell interprets (`$`, `!`, spaces, quotes, backtick, backslash) receives `400`. Required in compose. |
 | `BASHT_AUTH_USER` | empty | User for uploads. Must be set together with `BASHT_AUTH_PASSWORD`. |
 | `BASHT_AUTH_PASSWORD` | empty | Password for uploads. |
 | `BASHT_WAIT_TIMEOUT` | `1h` | How long the sender can wait for a receiver before the slug expires. |

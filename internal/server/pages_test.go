@@ -245,12 +245,16 @@ func TestLandingDetails(t *testing.T) {
 // TestBrowserErrorPages: rejections are HTML pages for browsers and text for other clients.
 func TestBrowserErrorPages(t *testing.T) {
 	srv, _ := newTestServer(t)
-	for _, p := range []string{"/AbC123xY9z", "/x.bin"} {
+	// Links to the home are relative: they also work behind a proxy that strips a path prefix.
+	for p, home := range map[string]string{"/AbC123xY9z": "./", "/x.bin": "./", "/a/b": "../", "/a/b/": "../../"} {
 		resp, body := browserDo(t, http.MethodGet, srv.URL+p)
 		if resp.StatusCode != http.StatusNotFound || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
 			t.Errorf("GET %s: status %d, Content-Type %q", p, resp.StatusCode, resp.Header.Get("Content-Type"))
 		}
-		wantContains(t, "GET "+p, body, "Link not found", `<a href="/">`)
+		wantContains(t, "GET "+p, body, "Link not found", `<a href="`+home+`">`)
+		if strings.Contains(body, `href="/"`) {
+			t.Errorf("GET %s: absolute link to the home", p)
+		}
 	}
 	plain := get(t, context.Background(), srv.URL+"/AbC123xY9z")
 	b, _ := io.ReadAll(plain.Body)

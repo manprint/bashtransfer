@@ -28,6 +28,8 @@ var (
 	ErrExpired        = errors.New("wait timeout expired")
 	// ErrInterrupted is the body read error after the relay is interrupted (Stop).
 	ErrInterrupted = errors.New("relay interrupted")
+	// ErrReplaced: another PUT with the same token has taken the attachment (BeginRelay).
+	ErrReplaced = errors.New("attachment replaced")
 )
 
 // Reasons why a slug is terminal (GoneError): the receiver sees a different message for each,
@@ -327,15 +329,20 @@ func (r *Registry) ObserveReceiver(id string) (PeerStatus, error) {
 }
 
 // BeginRelay makes starting the copy and replacing the PUT atomic: an old
-// attachment cannot start reading the file after Resume has detached it.
-func (r *Registry) BeginRelay(s *Session, binding <-chan struct{}) bool {
+// attachment cannot start reading the file after Resume has detached it (ErrReplaced),
+// and a session interrupted before the relay (Cancel, receiver gone) never starts it:
+// the error recorded with Abort is returned.
+func (r *Registry) BeginRelay(s *Session, binding <-chan struct{}) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if s.Token != "" && (!s.bound || s.unbind != binding) {
-		return false
+		return ErrReplaced
+	}
+	if s.err != nil {
+		return s.err
 	}
 	s.Start()
-	return true
+	return nil
 }
 
 // Foreground registers the page's availability, without reading the file body.

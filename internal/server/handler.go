@@ -222,7 +222,7 @@ func (h *handler) usage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Content-Disposition")
 	w.Header().Add("Vary", "Accept")
 	if wantsHTML(r) {
-		serveHome(w, base)
+		serveHome(w, r, base)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -599,14 +599,33 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 		}
 	}
 
+	// interrupted ends an upload interrupted before the relay (Cancel, receiver gone). The browser also
+	// gets the outcome on the PUT: if the page sees the PUT end first, it must not wait for the stream.
+	interrupted := func(err error) {
+		drain = 0
+		if web {
+			res := webOutcome(failReason(err), s.Delivered(), 0)
+			s.SetResult(res)
+			writeWebOutcome(w, res)
+			return
+		}
+		tr.outcome = outcomeAborted
+		abortSender(w, r, failedMessage(err, 0, s.Length, h.opts.IdleTimeout))
+	}
+
 	for {
 		select {
 		case rcv := <-s.Attached():
-			// A replacement attach has already taken this one's place: the receiver goes to the new handler.
-			if !h.reg.BeginRelay(s, binding) {
+			if err := h.reg.BeginRelay(s, binding); errors.Is(err, relay.ErrReplaced) {
+				// A replacement attach has already taken this one's place: the receiver goes to the new handler.
 				s.Requeue(rcv)
 				detached = true
 				drain = 0
+				return
+			} else if err != nil {
+				// Interrupted while the receiver was attaching: no response has started, the receiver
+				// gets the error page.
+				interrupted(err)
 				return
 			}
 			rr := rcv.(*responseReceiver)
@@ -658,8 +677,8 @@ func (h *handler) upload(w http.ResponseWriter, r *http.Request, seg string) {
 			return
 		case <-cancelled:
 			// The sender in the browser closed the page or cancelled (Cancel from the reservation's
-			// stream): the unread body must no longer be awaited. The outcome is written by the stream.
-			drain = 0
+			// stream), or the receiver dropped before the copy: the unread body must no longer be awaited.
+			interrupted(s.Err())
 			return
 		case <-binding:
 			// A new PUT with the same token has taken this one's place (the sender came back before the
