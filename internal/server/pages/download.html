@@ -28,6 +28,8 @@
   var status = document.getElementById("dl-status"), away = document.getElementById("dl-away");
   var badge = document.getElementById("dl-ready");
   var ready = false, submitted = false, closed = false, pending = null, timer = 0, freshTimer = 0;
+  // After Download the relay takes a moment to start: until then the state is not a warning.
+  var submittedAt = 0, next = 2000;
   var statusURL = new URL(window.location.href);
   statusURL.searchParams.set("status", "1");
   function readiness(value, ttl) {
@@ -57,6 +59,7 @@
     clearTimeout(timer);
     if (closed || pending || document.visibilityState === "hidden" || navigator.onLine === false) return;
     var ctl = pending = new AbortController(), began = Date.now();
+    next = 2000;
     var timeout = setTimeout(function () { ctl.abort(); }, 5000);
     fetch(statusURL.href, { headers: { Accept: "application/json", "X-Bashtransfer-Readiness": "1" }, cache: "no-store", signal: ctl.signal })
       .then(function (r) {
@@ -68,13 +71,18 @@
           var ttl = (m.ready_ttl || 5) * 1000 - (Date.now() - began);
           var confirmed = m.ready === true && ttl > 0 && (submitted ? m.state === "active" : m.state === "ready");
           readiness(confirmed, ttl);
+          var starting = submitted && m.state !== "active" && Date.now() - submittedAt < 10000;
+          // Fast until the relay starts, slow while it runs (the server then confirms for longer).
+          next = starting ? 500 : submitted && ready ? 5000 : 2000;
           away.hidden = m.state !== "away";
           btn.disabled = submitted || !ready;
           btn.textContent = submitted ? "Download requested" : ready ? "Download" : m.state === "away" ? "Waiting for sender…" : "Checking connection…";
           status.textContent = submitted
             ? ready
               ? "Check your browser's downloads. Keep both devices connected; the sender sees OK when the download is complete."
-              : "Connections are UNREADY. Check your browser's downloads; keep both devices connected and ask the sender to return to their page."
+              : starting
+                ? "Starting the download… Check your browser's downloads and keep both devices connected."
+                : "Connections are UNREADY. Check your browser's downloads; keep both devices connected and ask the sender to return to their page."
             : ready
               ? "Both connections are READY. Press Download once; both devices must stay connected until it finishes."
               : m.state === "away"
@@ -98,7 +106,7 @@
         clearTimeout(timeout);
         if (pending !== ctl) return;
         pending = null;
-        if (!closed) timer = setTimeout(poll, 2000);
+        if (!closed) timer = setTimeout(poll, next);
       });
   }
   unknown();
@@ -112,6 +120,7 @@
   form.addEventListener("submit", function (e) {
     if (!ready || submitted) { e.preventDefault(); poll(); return; }
     submitted = true;
+    submittedAt = Date.now();
     clearTimeout(timer);
     if (pending) { var old = pending; pending = null; old.abort(); }
     readiness(false);

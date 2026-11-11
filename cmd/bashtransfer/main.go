@@ -82,6 +82,7 @@ func run() error {
 		// sends the whole body before reading the response and blocks the sender, which would not see
 		// the commands. With h2c (Apache: ProxyPass h2c://) request and response flow together.
 		Protocols: protocols(),
+		HTTP2:     http2Config(),
 	}
 	// On shutdown the listener closes: no receiver can arrive anymore, so waiting senders are
 	// closed immediately and the grace period is kept for transfers in progress.
@@ -170,6 +171,28 @@ func checkHealth(listen string) error {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// HTTP/2 flow control. A sender waiting for its receiver leaves its body unread: up to one stream
+// window stays buffered and is charged to the connection window, which all streams of the
+// connection share. With net/http defaults (1 MiB for both) a single waiting sender exhausts the
+// connection window and stalls every other upload multiplexed on the same connection (a proxy
+// that reuses h2c connections). The connection window cannot exceed 4 MiB in net/http, so the
+// stream window and the concurrent streams are bounded instead:
+// h2MaxStreams * h2StreamBuffer < h2ConnBuffer, and waiting senders can never fill it.
+// A smaller stream window also bounds the memory held per waiting sender.
+const (
+	h2StreamBuffer = 64 << 10
+	h2MaxStreams   = 60
+	h2ConnBuffer   = 4<<20 - 1
+)
+
+func http2Config() *http.HTTP2Config {
+	return &http.HTTP2Config{
+		MaxConcurrentStreams:          h2MaxStreams,
+		MaxReceiveBufferPerStream:     h2StreamBuffer,
+		MaxReceiveBufferPerConnection: h2ConnBuffer,
+	}
 }
 
 // protocols enables HTTP/1.1 and HTTP/2 without TLS on the same port.

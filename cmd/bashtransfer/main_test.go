@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	"bashtransfer/internal/config"
+	"bashtransfer/internal/relay"
+	"bashtransfer/internal/server"
 )
 
 func TestHealthURL(t *testing.T) {
@@ -256,5 +259,108 @@ func TestNewLogger(t *testing.T) {
 	newLogger(&buf, config.LogText, slog.LevelWarn).Warn("visibile", "k", "v")
 	if out := buf.String(); strings.Contains(out, "nascosto") || !strings.Contains(out, "msg=visibile k=v") {
 		t.Fatalf("text: %q", out)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// h2Upload starts a PUT on c and returns the direct link from the commands table.
+func h2Upload(t *testing.T, ctx context.Context, c *http.Client, url string, size int64) string {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, io.LimitReader(zeroReader{}, size))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.ContentLength = size
+	link := make(chan string, 1)
+	go func() {
+		defer close(link)
+		resp, err := c.Do(req)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+		sc := bufio.NewScanner(resp.Body)
+		for sc.Scan() {
+			if f := strings.Fields(sc.Text()); len(f) >= 4 && f[1] == "direct" {
+				link <- f[3]
+			}
+		}
+	}()
+	select {
+	case u := <-link:
+		if u == "" {
+			t.Fatal("upload ended without a link")
+		}
+		return u
+	case <-time.After(5 * time.Second):
+		t.Fatal("no link from the upload")
+		return ""
+	}
+}
+
+// A sender waiting for its receiver must not stall the other uploads multiplexed on the same
+// HTTP/2 connection: its unread body must not exhaust the connection's flow control window.
+func TestHTTP2WaitingSenderDoesNotStallConnection(t *testing.T) {
+	reg := relay.NewRegistry(10, time.Minute)
+	srv := &http.Server{
+		Handler:     server.New(reg, relay.NewCopier(262144), server.Options{}),
+		ConnContext: server.ConnContext,
+		Protocols:   protocols(),
+		HTTP2:       http2Config(),
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(ln)
+	defer srv.Close()
+	base := "http://" + ln.Addr().String()
+
+	p := new(http.Protocols)
+	p.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{Protocols: p}
+	defer tr.CloseIdleConnections()
+	h2 := &http.Client{Transport: tr}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Several waiting senders, none with a receiver, then one that is downloaded.
+	for i := range 8 {
+		h2Upload(t, ctx, h2, fmt.Sprintf("%s/wait%d.bin", base, i), 8<<20)
+	}
+	time.Sleep(300 * time.Millisecond)
+	const size = 4 << 20
+	u := h2Upload(t, ctx, h2, base+"/served.bin", size)
+
+	got := make(chan int64, 1)
+	go func() {
+		resp, err := http.Get(u)
+		if err != nil {
+			got <- -1
+			return
+		}
+		defer resp.Body.Close()
+		n, _ := io.Copy(io.Discard, resp.Body)
+		got <- n
+	}()
+	select {
+	case n := <-got:
+		if n != size {
+			t.Fatalf("received %d bytes, want %d", n, size)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("upload stalled behind waiting senders on the same HTTP/2 connection")
+	}
+}
+
+func TestHTTP2ConfigBoundsWaitingBodies(t *testing.T) {
+	if h2MaxStreams*h2StreamBuffer >= h2ConnBuffer {
+		t.Fatalf("%d streams of %d bytes can fill the connection window (%d)", h2MaxStreams, h2StreamBuffer, h2ConnBuffer)
 	}
 }

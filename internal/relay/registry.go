@@ -635,6 +635,9 @@ func (r *Registry) Finish(s *Session) {
 		delete(r.sessions, s.Slug)
 		r.bury(s.Slug, finishReason(s))
 		s.timer.Stop()
+		if s.bindTimer != nil {
+			s.bindTimer.Stop()
+		}
 		if s.presenceTimer != nil {
 			s.presenceTimer.Stop()
 		}

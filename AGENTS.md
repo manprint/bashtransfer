@@ -25,6 +25,7 @@ Bashtransfer uses Go and the standard library for a streaming HTTP relay, usable
 - READY derives from the server's confirmation and expires; do not infer it from the initial HTML, `navigator.onLine`, bytes accepted by the browser or upload callbacks. Share remains available before pairing; Download requires confirmation and must not restart after submit.
 - Preserve older clients: presence and readiness are negotiated. Do not add NDJSON events or change the semantics of the legacy check for clients that do not request them.
 - Do not alter the source: preserve quoting, sanitization, download commands and the `Content-Disposition` header. Do not replace the commands with outputs that overwrite the original file.
+- Keep HTTP/2 flow control bounded (`http2Config` in `cmd/bashtransfer/main.go`): streams × per-stream buffer must stay below the connection window, or waiting bodies stall every transfer multiplexed on a shared h2c connection.
 - Do not log slugs, file names, tokens or credentials; use the session's random ID instead. Preserve tokens in headers, Basic auth on upload, and a CSP with no external resources.
 
 ## Frontend

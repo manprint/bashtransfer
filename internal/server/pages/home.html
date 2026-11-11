@@ -190,6 +190,9 @@
   // The home is the root of the app, also behind a proxy that serves it under a path prefix.
   var root = location.pathname.replace(/[^\/]*$/, "");
   var readyTimer = 0, readyTTL = 5000;
+  // putAt is the start of the current PUT; fails counts consecutive PUTs that ended early.
+  var putAt = 0, fails = 0;
+  var LOST = "Connection lost. Return to this page and keep it in the foreground: reconnecting…";
 
   function readiness(value) {
     clearTimeout(readyTimer);
@@ -286,7 +289,7 @@
     $("x-again").focus();
   }
   // shown marks an error whose message is intended for the user.
-  function shown(msg) { var e = new Error(msg); e.shown = true; return e; }
+  function shown(msg, late) { var e = new Error(msg); e.shown = true; e.late = !!late; return e; }
   function outcome(o) {
     sample(o.bytes);
     if (o.outcome === "ok") finish(true, "Done: the receiver got the whole file (" + size(o.bytes) + " in " + duration(o.seconds) + ").");
@@ -316,6 +319,7 @@
     lostAt = 0;
     chosen = file;
     sharing = false;
+    fails = 0;
     $("x-share").disabled = false;
     $("x-share-status").textContent = "";
     connect(file, JSON.stringify({ name: file.name, size: file.size, foreground: document.visibilityState !== "hidden", readiness: true }), {});
@@ -331,10 +335,12 @@
     fetch(root, { method: "POST", headers: headers, body: body, signal: mine.signal }).then(function (r) {
       if (ctl !== mine) return;
       if (!r.ok) {
+        // The relay may have just ended: its outcome on the PUT, still in flight, wins.
+        var late = lostAt && r.status === 404 && attached && xhr && xhr.readyState !== 4;
         throw shown(lostAt && r.status === 404 ? "The link no longer works: it closed while the connection was lost. Keep this page in the foreground and send the file again."
           : r.status === 503 ? "The server is busy: try again in a moment."
           : r.status === 401 ? "This server requires a login to send files."
-          : "Could not create the link (HTTP " + r.status + ").");
+          : "Could not create the link (HTTP " + r.status + ").", late);
       }
       var reader = r.body.getReader(), dec = new TextDecoder(), buf = "";
       function line(l) {
@@ -354,7 +360,7 @@
               ? "If disconnected before download, the link stays available for " + duration(grace) + ". Interrupted downloads cannot resume."
               : "Connection recovery is disabled on this server. Switching apps may close the link.";
             clearInterval(pulse);
-            pulse = setInterval(function () { if (document.visibilityState !== "hidden" && !sharing) foreground(true); }, 5000);
+            pulse = setInterval(function () { if (document.visibilityState !== "hidden" && !sharing) foreground(true); }, 7000);
           }
           attached = !!m.started;
           if (attached) {
@@ -396,7 +402,12 @@
     }).catch(function (e) {
       if (!busy || ctl !== mine) return;
       // Already reconnecting: this attempt failed, retry after one second.
-      if (!e.shown && lostAt) { clearTimeout(retry); retry = setTimeout(reconnect, 1000); return; }
+      if (!e.shown && lostAt) { status(LOST); clearTimeout(retry); retry = setTimeout(reconnect, 1000); return; }
+      if (e.late) {
+        clearTimeout(retry);
+        retry = setTimeout(function () { if (busy && ctl === mine) { cancelLink(); finish(false, e.message); } }, 2000);
+        return;
+      }
       // Even during copying, the progress stream alone can be recovered.
       if (!e.shown && reserved && grace > 0) { lost(); return; }
       if (busy) cancelLink();
@@ -408,24 +419,45 @@
 
   // Do not stop the PUT here: the server may have started relaying before this page
   // received attached.
-  function lost() {
+  // quiet: a planned reattach (return to the page, PUT released by the server), not a loss.
+  // delay postpones the attempt after PUTs that keep ending early.
+  function lost(quiet, delay) {
     if (!busy || lostAt || !link) return;
     lostAt = Date.now();
     readiness(false);
     clearInterval(ticker);
     if (ctl) { var c = ctl; ctl = null; c.abort(); }
-    status("Connection lost. Return to this page and keep it in the foreground: reconnecting…");
-    reconnect();
+    status(quiet ? "Reattaching this page to the link…" : LOST);
+    if (delay) { clearTimeout(retry); retry = setTimeout(reconnect, delay); }
+    else reconnect();
   }
   function reconnect() {
     clearTimeout(retry);
     if (!busy || !lostAt || !link) return;
     if (document.visibilityState === "hidden" || sharing) return;
+    // Past the grace the server has closed the link. A relay still uploading decides on its own.
+    if (Date.now() - lostAt > (grace + 15) * 1000 && !(attached && xhr && xhr.readyState !== 4)) {
+      cancelLink();
+      finish(false, "The connection could not be restored in time: the link no longer works. Keep this page in the foreground and send the file again.");
+      return;
+    }
     var h = {};
     h["X-Bashtransfer-Token"] = link.token;
     connect(chosen, JSON.stringify({ resume: link.slug, rebind: true, readiness: true }), h);
     // Retry if no response arrives (network still unavailable): requests do not fail immediately.
-    retry = setTimeout(reconnect, 5000);
+    retry = setTimeout(function () { status(LOST); reconnect(); }, 5000);
+  }
+  // A PUT that ended before the receiver without an outcome: reattach, more slowly if it keeps
+  // happening, and give up instead of repeating requests forever.
+  function putEnded(req, quiet) {
+    if (xhr !== req || !busy || attached || grace <= 0) return;
+    fails = Date.now() - putAt < 5000 ? fails + 1 : 1;
+    if (fails > 6) {
+      cancelLink();
+      finish(false, "The upload keeps stopping before the receiver connects. Check the connection and send the file again.");
+      return;
+    }
+    lost(quiet, fails > 1 ? Math.min(30000, 500 << (fails - 1)) : 0);
   }
 
   function showLinks(cmds) {
@@ -485,17 +517,29 @@
     var req = xhr = new XMLHttpRequest();
     req.open("PUT", root + encodeURIComponent(res.slug));
     req.setRequestHeader("X-Bashtransfer-Token", res.token);
-    // With grace, a PUT connection lost before the receiver is handled like a lost stream.
-    req.onerror = function () { if (xhr === req && busy && !attached && grace > 0) lost(); };
+    // With grace, a PUT connection lost before the receiver is handled like a lost stream. A file
+    // changed, moved or deleted after it was chosen fails every PUT: it ends the upload instead.
+    req.onerror = function () {
+      if (xhr !== req || !busy || attached) return;
+      var probe;
+      try { probe = file.slice(0, 1).arrayBuffer(); } catch (e) { probe = Promise.resolve(); }
+      probe.then(function () { putEnded(req, false); }, function () {
+        if (xhr !== req || !busy) return;
+        cancelLink();
+        finish(false, "The file can no longer be read: it was changed, moved or deleted. Choose it again.");
+      });
+    };
     req.onload = function () {
       var lines = req.responseText.split("\n").map(function (l) { return l.trim(); }).filter(Boolean), o = null;
       try { o = JSON.parse(lines[lines.length - 1]); } catch (e) {}
       if (xhr !== req || !busy) return;
       if (o && o.outcome) { link = null; outcome(o); return; }
       // The server released this PUT without an outcome before the receiver (e.g. a late
-      // background notice): reattach now, or the link would wait for the grace to expire.
-      if (req.status === 200 && !attached && grace > 0 && !sharing && document.visibilityState !== "hidden") lost();
+      // background notice), or a proxy answered for it (5xx): reattach now, or the link would
+      // wait for the grace to expire.
+      if ((req.status === 200 || req.status >= 500) && !sharing && document.visibilityState !== "hidden") putEnded(req, req.status === 200);
     };
+    putAt = Date.now();
     req.send(file);
   }
 
@@ -564,7 +608,9 @@
   function resume() {
     if (!busy || !link || document.visibilityState === "hidden" || sharing) return;
     foreground(true);
-    if (grace > 0) { if (lostAt) reconnect(); else lost(); }
+    // The server releases the PUT while the page is away, and a connection can stall silently:
+    // every return reattaches. The time allowed to reconnect restarts from the return.
+    if (grace > 0) { if (lostAt) { lostAt = Date.now(); reconnect(); } else lost(true); }
   }
   document.addEventListener("visibilitychange", function () {
     if (document.visibilityState === "hidden") { readiness(false); foreground(false); }

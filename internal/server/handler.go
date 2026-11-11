@@ -95,6 +95,20 @@ const (
 	keepaliveTicks   = 2
 )
 
+// bodyReadTimeout limits reading the small JSON body of a reservation or a presence notice:
+// ReadHeaderTimeout covers only the headers.
+const bodyReadTimeout = 10 * time.Second
+
+// readJSONBody reads at most 4096 bytes of body within bodyReadTimeout and then removes the
+// deadline: the reservation's stream stays open for the whole transfer.
+func readJSONBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	_ = rc.SetReadDeadline(time.Time{})
+	return body, err
+}
+
 // bindTimeout is the time within which the browser must start the PUT after the reservation: it does so
 // immediately, and a reservation without an upload must not occupy a session. A variable for the tests.
 var bindTimeout = 30 * time.Second
@@ -166,7 +180,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodDelete && seg != "" && r.Header.Get(tokenHeader) != "":
 		h.cancel(w, r, seg)
 	default:
-		w.Header().Set("Allow", "GET, POST, PUT")
+		w.Header().Set("Allow", "GET, POST, PUT, DELETE")
 		h.reject(w, r, slog.LevelDebug, http.StatusMethodNotAllowed, reasonMethod, "method not allowed")
 	}
 }
@@ -305,7 +319,7 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 	}
 	// The body must be read to the end: only then net/http detects the connection close and
 	// cancels the request context.
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	body, err := readJSONBody(w, r)
 	if err != nil || json.Unmarshal(body, &req) != nil || (req.Resume == "" && (req.Size == nil || *req.Size < 0)) {
 		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
 		return
@@ -407,23 +421,24 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		case <-tick.C:
 			// Progress when it changes; without news one line every keepaliveTicks: a failed write
 			// reveals the dropped sender even if the close does not reach the server (proxy).
+			// With readiness negotiated, the confirmation travels on the same line: one write per tick.
 			ticks++
+			var ready *bool
+			changed := false
 			if req.Readiness {
 				value := s.PeerReady()
-				if value != lastReady || ticks%keepaliveTicks == 0 {
-					if !send(event{Event: "readiness", Ready: &value}) {
-						return
-					}
-					lastReady = value
-				}
+				ready, changed = &value, value != lastReady
+				lastReady = value
 			}
 			ok := true
 			switch n := s.Delivered(); {
 			case attached && (n != last || ticks%keepaliveTicks == 0):
 				last = n
-				ok = send(event{Event: "progress", Bytes: &n})
+				ok = send(event{Event: "progress", Bytes: &n, Ready: ready})
 			case !attached && ticks%keepaliveTicks == 0:
-				ok = send(event{Event: "waiting"})
+				ok = send(event{Event: "waiting", Ready: ready})
+			case changed:
+				ok = send(event{Event: "readiness", Ready: ready})
 			}
 			if !ok {
 				return
@@ -442,7 +457,7 @@ func (h *handler) foreground(w http.ResponseWriter, r *http.Request, id string) 
 	var req struct {
 		Foreground *bool `json:"foreground"`
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4096))
+	body, err := readJSONBody(w, r)
 	if err != nil || json.Unmarshal(body, &req) != nil || req.Foreground == nil {
 		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
 		return

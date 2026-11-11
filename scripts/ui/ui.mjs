@@ -1011,6 +1011,11 @@ await test('sender grace: a late background notice that releases the PUT is reco
     const first = await put;
     const url = first.url(), token = first.headers()['x-bashtransfer-token'];
     await page.waitForFunction((w) => document.getElementById('x-status').textContent === w, WAITING);
+    await page.evaluate(() => {
+      window.__st = [];
+      new MutationObserver(() => window.__st.push(document.getElementById('x-status').textContent))
+        .observe(document.getElementById('x-status'), { childList: true, characterData: true, subtree: true });
+    });
     const again = page.waitForRequest((r) => r.method() === 'PUT' && r !== first, { timeout: 5000 });
     // A foreground(false) sent before a return to the page, reaching the server after it.
     const late = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bashtransfer-Token': token }, body: '{"foreground":false}' });
@@ -1021,7 +1026,62 @@ await test('sender grace: a late background notice that releases the PUT is reco
     assert(r.code === 0, `download after the late notice: ${r.err}`);
     assert(sha(fs.readFileSync(path.join(recv, 'late-hidden.bin'))) === sha(fs.readFileSync(src)), 'file mismatch after the late notice');
     assert((await waitResult(page)).cls === 'result ok', 'late notice left the sender detached');
+    const seen = await page.evaluate(() => window.__st);
+    assert(seen.some((x) => /^Reattaching this page/.test(x)) && !seen.some((x) => /Connection lost/.test(x)), `planned reattach shown as a loss: ${JSON.stringify(seen)}`);
     noErrors(page, 'late notice', PUT_FAILED);
+  } finally { await page.context().close(); }
+});
+
+await test('sender grace: the page gives up when the connection cannot be restored', async () => {
+  const px = await severProxy(BASE_GRACE);
+  let s;
+  try {
+    s = await graceSender(px, 'grace-deadline.bin', 1 << 20);
+    await sleep(1000);
+    px.block = true;
+    px.sever();
+    const res = await waitResult(s.page, 45000);
+    assert(res.cls === 'result err' && /could not be restored in time: the link no longer works/.test(res.text), `outcome ${JSON.stringify(res)}`);
+  } finally { px.close(); if (s) await s.page.context().close().catch(() => {}); }
+});
+
+await test('sender grace: a file that can no longer be read ends the upload', async () => {
+  const px = await severProxy(BASE_GRACE);
+  let s;
+  try {
+    s = await graceSender(px, 'grace-unreadable.bin', 1 << 20);
+    await sleep(1000);
+    await s.page.evaluate(() => {
+      Blob.prototype.slice = () => ({ arrayBuffer: () => Promise.reject(new DOMException('gone', 'NotReadableError')) });
+    });
+    px.sever();
+    const res = await waitResult(s.page, 15000);
+    assert(res.cls === 'result err' && /^The file can no longer be read/.test(res.text), `outcome ${JSON.stringify(res)}`);
+    assert((await waitGone(s.direct, 15000)) >= 0, 'link left open after the unreadable file');
+  } finally { px.close(); if (s) await s.page.context().close().catch(() => {}); }
+});
+
+await test('sender: an upload that keeps stopping before the receiver gives up', async () => {
+  const page = await newPage();
+  const src = mkfile('put-loop.bin', 1 << 20);
+  try {
+    // The first PUT binds the link; the next ones end at once with a 200 without an outcome.
+    let puts = 0;
+    await page.route('**/*', (route) => {
+      if (route.request().method() !== 'PUT') return route.continue();
+      return ++puts === 1 ? route.continue() : route.fulfill({ status: 200, body: '' });
+    });
+    await page.goto(BASE + '/');
+    const put = page.waitForRequest((r) => r.method() === 'PUT');
+    await page.setInputFiles('#file', src);
+    const first = await put;
+    await page.waitForFunction((w) => document.getElementById('x-status').textContent === w, WAITING);
+    const late = await fetch(first.url(), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Bashtransfer-Token': first.headers()['x-bashtransfer-token'] }, body: '{"foreground":false}' });
+    assert(late.status === 204, `late notice: ${late.status}`);
+    const res = await waitResult(page, 60000);
+    assert(res.cls === 'result err' && /^The upload keeps stopping before the receiver connects/.test(res.text), `outcome ${JSON.stringify(res)}`);
+    assert(puts === 7, `PUT attempts: ${puts}`);
+    assert((await waitGone(first.url(), 15000)) >= 0, 'link left open after giving up');
   } finally { await page.context().close(); }
 });
 

@@ -56,20 +56,34 @@ func (r *responseReceiver) start(name string, length int64) {
 	r.Flush()
 }
 
+// writeChunk is the largest single write to the receiver. writeTimeout applies to each one, so the
+// slowest receiver tolerated does not depend on BASHT_BUF_SIZE.
+const writeChunk = 64 << 10
+
 func (r *responseReceiver) Write(p []byte) (int, error) {
 	if r.flushErr != nil {
 		return 0, r.flushErr
 	}
-	if r.stopped.Load() {
-		return 0, relay.ErrReceiverGone
+	done := 0
+	for {
+		if r.stopped.Load() {
+			return done, relay.ErrReceiverGone
+		}
+		c := p[done:]
+		if len(c) > writeChunk {
+			c = c[:writeChunk]
+		}
+		r.armWriteDeadline()
+		n, err := r.w.Write(c)
+		done += n
+		if err != nil {
+			// A failed write always depends on the receiver: disconnected, or stalled beyond writeTimeout.
+			return done, fmt.Errorf("%w: %w", relay.ErrReceiverGone, err)
+		}
+		if done >= len(p) {
+			return done, nil
+		}
 	}
-	r.armWriteDeadline()
-	n, err := r.w.Write(p)
-	if err != nil {
-		// A failed write always depends on the receiver: disconnected, or stalled beyond writeTimeout.
-		err = fmt.Errorf("%w: %w", relay.ErrReceiverGone, err)
-	}
-	return n, err
 }
 
 func (r *responseReceiver) Flush() {

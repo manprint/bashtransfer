@@ -269,10 +269,10 @@ func TestBrowserErrorPages(t *testing.T) {
 func TestMethodsAllow(t *testing.T) {
 	srv, _ := newTestServer(t)
 	for _, c := range []struct{ method, path, allow string }{
-		{http.MethodDelete, "/", "GET, POST, PUT"},
-		{http.MethodPatch, "/", "GET, POST, PUT"},
-		{http.MethodDelete, "/AbC123xY9z", "GET, POST, PUT"},
-		{http.MethodHead, "/AbC123xY9z", "GET, POST, PUT"},
+		{http.MethodDelete, "/", "GET, POST, PUT, DELETE"},
+		{http.MethodPatch, "/", "GET, POST, PUT, DELETE"},
+		{http.MethodDelete, "/AbC123xY9z", "GET, POST, PUT, DELETE"},
+		{http.MethodHead, "/AbC123xY9z", "GET, POST, PUT, DELETE"},
 	} {
 		req, _ := http.NewRequest(c.method, srv.URL+c.path, nil)
 		resp, err := http.DefaultClient.Do(req)

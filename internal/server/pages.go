@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -105,8 +106,20 @@ func servePage(w http.ResponseWriter, r *http.Request, status int, name, formAct
 	if d.NoIndex {
 		h.Set("X-Robots-Tag", "noindex, nofollow")
 	}
+	// Pages only: the relay and the NDJSON stream are never compressed.
+	h.Add("Vary", "Accept-Encoding")
+	body := b.Bytes()
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		var z bytes.Buffer
+		zw, _ := gzip.NewWriterLevel(&z, gzip.BestCompression)
+		if _, err := zw.Write(body); err == nil && zw.Close() == nil {
+			body = z.Bytes()
+			h.Set("Content-Encoding", "gzip")
+		}
+	}
+	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(status)
-	_, _ = w.Write(b.Bytes())
+	_, _ = w.Write(body)
 }
 
 // serveHome responds with the courtesy page; base is the public base of the commands.
@@ -149,6 +162,10 @@ func (h *handler) landing(w http.ResponseWriter, r *http.Request, id string) {
 	servePage(w, r, http.StatusOK, "download", "'self'", "'self'", d)
 }
 
+// activeReadyTTL is the validity of the confirmation once the relay has started: the receiver page
+// then polls less often.
+const activeReadyTTL = 15 * time.Second
+
 func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) {
 	state, message, code := "ready", "", http.StatusOK
 	var ready *bool
@@ -160,6 +177,10 @@ func (h *handler) linkStatus(w http.ResponseWriter, r *http.Request, id string) 
 		peer, err = h.reg.ObserveReceiver(id)
 		ready, away, claimed, started = &peer.Ready, peer.Away, peer.Claimed, peer.Started
 		readyTTL = int64(relay.ReceiverPresenceTimeout / time.Second)
+		if peer.Started {
+			// During the relay the confirmation no longer depends on the receiver page's presence.
+			readyTTL = int64(activeReadyTTL / time.Second)
+		}
 	} else {
 		var s *relay.Session
 		s, err = h.reg.Peek(id)
