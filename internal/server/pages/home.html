@@ -56,7 +56,7 @@
     <p class="drop-title">Drag a file here</p>
     <p class="muted">or</p>
     <button class="primary" id="pick" type="button">Upload</button>
-    <p class="muted">One file at a time. Keep this page open until done; on a phone, in the foreground.</p>
+    <p class="muted">One file at a time. Keep this page open until done; on iPhone and iPad, in the foreground.</p>
     <p class="drop-error" id="drop-error" role="alert" hidden></p>
     <input type="file" id="file" hidden>
   </div>
@@ -72,7 +72,7 @@
         <button class="primary" id="x-share" type="button" aria-label="Share link" hidden>Link</button>
         <button class="copy" id="x-copy" type="button" data-copy="x-c3">Copy link</button>
       </div>
-      <p class="muted" id="x-share-hint">Share the link first: WAITING turns READY when the receiver opens it. One receiver per link. <strong>After sharing, return to this browser page, where the sender is waiting.</strong> Keep this page open until the end: nothing is stored on the server. On a computer you can switch tabs or minimize the window. On a phone, keep it in the foreground: use split screen to receive on the same phone, or receive on another device.</p>
+      <p class="muted" id="x-share-hint">Share the link first: WAITING turns READY when the receiver opens it. One receiver per link. <strong>This browser page is the sender: keep it open until the end.</strong> Nothing is stored on the server. On a computer or an Android phone you can switch tabs or apps while the browser keeps running in the background; if the system stops it, return to this page. On iPhone and iPad, keep it in the foreground: use split screen to receive on the same device, or receive on another one.</p>
       <p class="muted" id="x-grace"></p>
       <p class="status" id="x-share-status" role="status"></p>
       <details class="terminal-options" id="x-terminal" open>
@@ -192,19 +192,19 @@
   var readyTimer = 0, readyTTL = 5000;
   // putAt is the start of the current PUT; fails counts consecutive PUTs that ended early.
   var putAt = 0, fails = 0;
-  var LOST = "Connection lost. Return to this page and keep it in the foreground: reconnecting…";
-  // A desktop browser keeps uploading while the page is hidden (another tab, minimized window):
-  // there the page stays available and tells the server it is in the background. A phone or
-  // tablet may suspend a hidden page: leaving it detaches the body. Any mobile hint wins.
-  var desktop = (function () {
-    var ua = navigator.userAgent, d = navigator.userAgentData;
-    if (d && (d.mobile || d.platform === "Android")) return false;
-    if (/Android|iPhone|iPad|iPod|Mobi/i.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return false;
-    return !!window.matchMedia && window.matchMedia("(pointer: fine)").matches;
+  var LOST = "Connection lost. Return to this page: reconnecting…";
+  // A desktop or Android browser keeps running a hidden page (another tab or app, minimized
+  // window, home screen) unless the system stops it: there the page stays available and tells
+  // the server it is in the background. iOS suspends a hidden page: leaving it detaches the body.
+  var suspends = (function () {
+    var ua = navigator.userAgent;
+    return /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
   })();
-  // away: the page is hidden where the system may stop its upload.
-  function away() { return !desktop && document.visibilityState === "hidden"; }
-  // Presence fields: background marks a present page that is hidden (desktop only).
+  // frozen: the browser announced that it stops the page (freeze event, Chrome) until resume.
+  var frozen = false;
+  // away: the page is stopped, or hidden where the system suspends it, so its upload may stop.
+  function away() { return frozen || (suspends && document.visibilityState === "hidden"); }
+  // Presence fields: background marks a present page that is hidden.
   function presence(o, visible) {
     o.foreground = visible;
     if (visible && document.visibilityState === "hidden") o.background = true;
@@ -449,7 +449,7 @@
       if (!e.shown && reserved && grace > 0) { lost(); return; }
       if (busy) cancelLink();
       finish(false, e.shown ? e.message : (reserved
-        ? "The connection to the server was lost: the link no longer works. If you switched to another app, the phone may have stopped the page: keep it in the foreground and send the file again."
+        ? "The connection to the server was lost: the link no longer works. If you switched to another app, the phone may have stopped the browser: let it run in the background, or keep this page in the foreground, and send the file again."
         : "Could not reach the server."));
     });
   }
@@ -608,7 +608,7 @@
     sharing = true;
     readiness(null);
     btn.disabled = true;
-    $("x-share-status").textContent = "After sharing, return to this browser page and keep it in the foreground until the download is complete.";
+    $("x-share-status").textContent = "After sharing, keep this browser page open until the download is complete; on iPhone and iPad, return to it and keep it in the foreground.";
     foreground(false);
     Promise.resolve().then(function () {
       return navigator.share({ title: "Bashtransfer", text: "Download this file. The sender must stay on the sending page.", url: shared.url });
@@ -653,16 +653,30 @@
   }
   document.addEventListener("visibilitychange", function () {
     var hidden = document.visibilityState === "hidden";
-    if (!desktop) {
+    if (suspends) {
       if (hidden) { readiness(null); foreground(false); }
       else resume();
       return;
     }
-    // Desktop: the hidden page keeps its body attached and only switches presence mode. A
-    // reconnection already under way retries at once on return, with the full time.
-    if (!busy || !link || sharing) return;
+    // Desktop and Android: the hidden page keeps its body attached and only switches presence
+    // mode. A reconnection already under way retries at once on return, with the full time.
+    if (!busy || !link || sharing || frozen) return;
     foreground(true);
     if (!hidden && lostAt) { lostAt = Date.now(); reconnect(); }
+  });
+  // A browser that stops a hidden page (Chrome freezes it, for example to save battery) says so
+  // first: the server learns at once that the sender is away, instead of when the background
+  // presence expires. Resuming reattaches like a return to the foreground, even while hidden.
+  document.addEventListener("freeze", function () {
+    if (!busy || !link || sharing || frozen) return;
+    frozen = true;
+    readiness(null);
+    foreground(false);
+  });
+  document.addEventListener("resume", function () {
+    if (!frozen) return;
+    frozen = false;
+    resume();
   });
   window.addEventListener("offline", function () { readiness(null); });
   window.addEventListener("online", resume);

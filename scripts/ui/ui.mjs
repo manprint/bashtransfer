@@ -72,10 +72,17 @@ const browser = await chromium.launch({
     '--host-resolver-rules=MAP * ~NOTFOUND, ' + allowed.map((h) => 'EXCLUDE ' + h).join(', ')],
 });
 
-// A phone browser: the sender page treats a hidden page as suspended (mobile presence).
-const PHONE = {
-  viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
-  userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+// Phone browsers: iOS suspends a hidden page (the sender detaches its body), Android keeps it
+// running like a desktop browser unless the system freezes it.
+const PHONES = {
+  android: {
+    viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+    userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+  },
+  ios: {
+    viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
+  },
 };
 
 async function newPage(opts = {}) {
@@ -84,7 +91,7 @@ async function newPage(opts = {}) {
     colorScheme: opts.dark ? 'dark' : 'light',
     acceptDownloads: true,
     ...(opts.creds ? { httpCredentials: opts.creds } : {}),
-    ...(opts.phone ? PHONE : {}),
+    ...(opts.phone ? PHONES[opts.phone] : {}),
   });
   if (opts.clipboard) await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: opts.clipboard });
   const page = await ctx.newPage();
@@ -542,9 +549,9 @@ await test('upload button + curl receiver from the table', async () => {
   assert(rows[1].line === `wget --content-disposition "${url}"`, `wget row ${rows[1].line}`);
   assert(rows[2].line === `aria2c -x1 -s1 --allow-overwrite=false "${url}"`, `aria2c row ${rows[2].line}`);
   assert((await page.textContent('#x-name')) === 'upload.bin' && (await page.textContent('#x-size')) === '24.0 MiB', 'filename/size');
-  // Switching apps on a phone stops uploading, a desktop tab keeps it: show both beside the links.
+  // iOS stops a hidden page, a desktop tab or Android app switch keeps it: show both beside the links.
   const hint = await page.textContent('#x-links');
-  assert(/Keep this page open until the end/.test(hint) && /switch tabs/.test(hint) && /keep it in the foreground/.test(hint) && /split screen/.test(hint), `foreground warning: ${hint}`);
+  assert(/keep it open until the end/.test(hint) && /switch tabs or apps/.test(hint) && /Android/.test(hint) && /iPhone and iPad, keep it in the foreground/.test(hint) && /split screen/.test(hint), `foreground warning: ${hint}`);
   // Copy the direct link.
   await page.click('[data-copy="x-c3"]');
   await page.waitForFunction(() => document.querySelector('[data-copy="x-c3"]').textContent === 'Copied', null, { timeout: 2000 });
@@ -819,8 +826,8 @@ async function setVisible(page, visible) {
   }, visible);
 }
 
-await test('peer readiness follows phone sender foreground loss and recovery', async () => {
-  const s = await graceSender({ url: BASE_GRACE }, 'ready-foreground.bin', 24 << 20, { phone: true });
+await test('peer readiness follows iPhone sender foreground loss and recovery', async () => {
+  const s = await graceSender({ url: BASE_GRACE }, 'ready-foreground.bin', 24 << 20, { phone: 'ios' });
   const receiver = await newPage();
   try {
     await receiver.goto(s.url);
@@ -828,7 +835,7 @@ await test('peer readiness follows phone sender foreground loss and recovery', a
     await peerBadge(s.page, 'x-ready', true);
     const notice = s.page.waitForRequest((r) => r.method() === 'POST' && r.url() === s.url && r.postData() !== '{"foreground":true}');
     await setVisible(s.page, false);
-    assert((await notice).postData() === '{"foreground":false}', 'phone page did not report the background');
+    assert((await notice).postData() === '{"foreground":false}', 'iPhone page did not report the background');
     await peerBadge(s.page, 'x-ready', false);
     await peerBadge(receiver, 'dl-ready', false);
     assert(await receiver.isDisabled('#dl button'), 'sender absent but Download enabled');
@@ -845,8 +852,8 @@ await test('peer readiness follows phone sender foreground loss and recovery', a
   }
 });
 
-await test('peer readiness: a desktop sender stays available in the background', async () => {
-  const s = await graceSender({ url: BASE_GRACE }, 'ready-background.bin', 24 << 20);
+for (const [kind, opts] of [['desktop', {}], ['Android', { phone: 'android' }]]) await test(`peer readiness: ${kind === 'Android' ? 'an' : 'a'} ${kind} sender stays available in the background`, async () => {
+  const s = await graceSender({ url: BASE_GRACE }, `ready-background-${kind}.bin`, 24 << 20, opts);
   const receiver = await newPage();
   try {
     // The first PUT left with the link: count only the uploads started afterwards.
@@ -860,12 +867,12 @@ await test('peer readiness: a desktop sender stays available in the background',
     await peerBadge(s.page, 'x-ready', true);
     const notice = s.page.waitForRequest((r) => r.method() === 'POST' && r.url() === s.url && r.postData() !== '{"foreground":true}');
     await setVisible(s.page, false);
-    assert((await notice).postData() === '{"foreground":true,"background":true}', 'desktop page did not keep its presence');
+    assert((await notice).postData() === '{"foreground":true,"background":true}', `${kind} page did not keep its presence`);
     // Past several readiness lifetimes: the confirmations keep both sides READY.
     await sleep(6000);
     await peerBadge(receiver, 'dl-ready', true);
     await peerBadge(s.page, 'x-ready', true);
-    assert(!(await receiver.isDisabled('#dl button')), 'hidden desktop sender disables Download');
+    assert(!(await receiver.isDisabled('#dl button')), `hidden ${kind} sender disables Download`);
     // Returning to the page does not reattach the body.
     await setVisible(s.page, true);
     await sleep(1000);
@@ -873,12 +880,47 @@ await test('peer readiness: a desktop sender stays available in the background',
     const puts = await s.page.evaluate(() => window.__puts);
     assert(puts === 0, `the hidden or returning page sent the file again: ${puts} PUT`);
     const [dl] = await Promise.all([receiver.waitForEvent('download'), receiver.click('#dl button')]);
-    const saved = path.join(OUT, 'ready-background-received.bin');
+    const saved = path.join(OUT, `ready-background-${kind}-received.bin`);
     await dl.saveAs(saved);
     assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file mismatch from a hidden sender');
     const res = await waitResult(s.page, 20000);
     assert(res.cls === 'result ok', `outcome ${JSON.stringify(res)}`);
-    noErrors(s.page, 'background sender', PUT_FAILED);
+    noErrors(s.page, `${kind} background sender`, PUT_FAILED);
+  } finally {
+    await s.page.context().close();
+    await receiver.context().close();
+  }
+});
+
+await test('peer readiness: a frozen Android sender is away until it resumes in the background', async () => {
+  const s = await graceSender({ url: BASE_GRACE }, 'ready-frozen.bin', 24 << 20, { phone: 'android' });
+  const receiver = await newPage();
+  try {
+    await receiver.goto(s.url);
+    await peerBadge(receiver, 'dl-ready', true);
+    await setVisible(s.page, false);
+    await peerBadge(receiver, 'dl-ready', true);
+    // Chrome announces that it stops the page: the server detaches the body at once.
+    const notice = s.page.waitForRequest((r) => r.method() === 'POST' && r.url() === s.url && r.postData() === '{"foreground":false}');
+    await s.page.evaluate(() => document.dispatchEvent(new Event('freeze')));
+    await notice;
+    await peerBadge(s.page, 'x-ready', false);
+    await peerBadge(receiver, 'dl-ready', false);
+    assert(await receiver.isDisabled('#dl button'), 'frozen sender but Download enabled');
+    // Still stopped: nothing marks it present again (within the 8 s grace of BASE_GRACE).
+    await sleep(3000);
+    await peerBadge(receiver, 'dl-ready', false);
+    // Resuming while still hidden reattaches the body and the file arrives.
+    await s.page.evaluate(() => document.dispatchEvent(new Event('resume')));
+    await peerBadge(receiver, 'dl-ready', true);
+    await peerBadge(s.page, 'x-ready', true);
+    const [dl] = await Promise.all([receiver.waitForEvent('download'), receiver.click('#dl button')]);
+    const saved = path.join(OUT, 'ready-frozen-received.bin');
+    await dl.saveAs(saved);
+    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file mismatch after resume');
+    const res = await waitResult(s.page, 20000);
+    assert(res.cls === 'result ok', `outcome ${JSON.stringify(res)}`);
+    noErrors(s.page, 'resumed sender', PUT_FAILED);
   } finally {
     await s.page.context().close();
     await receiver.context().close();
@@ -990,7 +1032,7 @@ await test('native sharing: return guidance, cancellation and Copy fallback', as
     const shareBox = await page.locator('#x-share').boundingBox();
     assert(shareBox.height >= 44 && shareBox.height <= 48, `Link button wraps: ${shareBox.height}`);
     assert(!(await page.isVisible('#x-copy')), 'duplicate sharing actions on mobile');
-    assert(/After sharing, return to this browser page/.test(await page.textContent('#x-share-hint')), 'return instructions missing');
+    assert(/This browser page is the sender/.test(await page.textContent('#x-share-hint')), 'sender instructions missing');
     const bad = await layoutChecks(page);
     assert(bad.length === 0, bad.join('; '));
     await page.locator('main > section').first().screenshot({ path: path.join(OUT, 'share-native-390.png') });

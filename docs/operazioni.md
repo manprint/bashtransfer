@@ -204,8 +204,8 @@ HTML, CSS and JavaScript are templates embedded in the Go binary. Node.js, npm, 
 After an update, verify from the workstation and from a phone:
 
 1. Open the HTTPS page, choose a file and share the link with **Link** or **Copy link**. Before a file is chosen no label is shown: the page is ready to upload. WAITING on the sender before the receiver arrives is normal and does not prevent Share.
-2. Return to the same page in the sender's browser and keep it in the foreground; open the link on another device. After the server confirms, both pages show a green READY and the Download button is enabled. Opening the link and polling do not consume it.
-3. Before starting the download, move the phone sender to the background and then back: verify UNREADY and the subsequent reconnection within `BASHT_SENDER_GRACE`. The grace period does not keep the file and does not allow resuming interrupted downloads. On a computer, switch the sender to another tab or minimize the window instead: the receiver must stay READY, and Download must work with the sender still hidden.
+2. Keep the same page open in the sender's browser (on iPhone and iPad, return to it and keep it in the foreground); open the link on another device. After the server confirms, both pages show a green READY and the Download button is enabled. Opening the link and polling do not consume it.
+3. Before starting the download, move an iPhone or iPad sender to the background and then back: verify UNREADY and the subsequent reconnection within `BASHT_SENDER_GRACE`. The grace period does not keep the file and does not allow resuming interrupted downloads. On a computer, switch the sender to another tab or minimize the window; on Android, switch to another app or go to the home screen: the receiver must stay READY, and Download must work with the sender still hidden. On Android this needs the browser allowed to run in the background (battery: unrestricted); if the system stops it anyway, the receiver turns UNREADY and the sender reattaches when it runs again.
 4. Press Download only once and keep both devices connected. Check the received file and the outcome on the sender. After the session has ended the labels disappear: the outcome is shown on the sender.
 
 The Playwright checks simulate mobile viewports and some native APIs; they do not replace this check of real behavior on Android/iOS and in the in-app browsers of chat apps.
@@ -280,7 +280,7 @@ docker compose logs --no-log-prefix app | jq -c 'select(.msg=="request_rejected"
 | transfer interrupted after a sender pause | `BASHT_IDLE_TIMEOUT` (2 min) | raise it if the sender's command can stay idle for a long time (for example `tar` over many small, slow files) |
 | the sender waits and the slug expires | no receiver within `BASHT_WAIT_TIMEOUT` (1 h) | raise it; it must stay below nginx's `proxy_timeout` (24 h) |
 | WAITING on the sender | no receiver page has opened the link yet, or it was closed | share the link; Share remains available |
-| Download stays waiting after sharing on WhatsApp | sender's browser in the background or body detached | return to the same sender page within `BASHT_SENDER_GRACE` and keep it in the foreground; if the download was already interrupted, send again |
+| Download stays waiting after sharing on WhatsApp | iPhone/iPad sender in the background, Android browser stopped by the system, or body detached | return to the same sender page within `BASHT_SENDER_GRACE` (iPhone/iPad: keep it in the foreground; Android: allow the browser to run in the background); if the download was already interrupted, send again |
 | UNREADY with both pages visible | confirmations missing or expired, failed requests, or the control stream blocked by the proxy | check the `?status=1` requests and the `POST /` stream in the browser; verify the network, the proxy configuration and the running image, without sharing tokens or credentials |
 
 ## Verification and measurement scripts
