@@ -72,12 +72,19 @@ const browser = await chromium.launch({
     '--host-resolver-rules=MAP * ~NOTFOUND, ' + allowed.map((h) => 'EXCLUDE ' + h).join(', ')],
 });
 
+// A phone browser: the sender page treats a hidden page as suspended (mobile presence).
+const PHONE = {
+  viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true,
+  userAgent: 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36',
+};
+
 async function newPage(opts = {}) {
   const ctx = await browser.newContext({
     viewport: opts.viewport || { width: 1280, height: 900 },
     colorScheme: opts.dark ? 'dark' : 'light',
     acceptDownloads: true,
     ...(opts.creds ? { httpCredentials: opts.creds } : {}),
+    ...(opts.phone ? PHONE : {}),
   });
   if (opts.clipboard) await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: opts.clipboard });
   const page = await ctx.newPage();
@@ -206,18 +213,25 @@ async function waitResult(page, timeout = 30000) {
   return page.evaluate(() => ({ cls: document.getElementById('x-result').className, text: document.getElementById('x-result-text').textContent }));
 }
 
-async function peerBadge(page, id, ready) {
-  await page.waitForFunction(({ id, ready }) => document.getElementById(id)?.textContent === (ready ? 'READY' : 'UNREADY'), { id, ready }, { timeout: 10000 });
-  const style = await page.evaluate(({ id, ready }) => {
+// Pairing badge state: true READY, false UNREADY, 'waiting' WAITING (sender only), null hidden.
+const BADGES = new Map([[true, ['READY', 'var(--recv)']], [false, ['UNREADY', 'var(--err)']], ['waiting', ['WAITING', 'var(--muted)']], [null, ['', '']]]);
+async function peerBadge(page, id, state) {
+  const [text, color] = BADGES.get(state);
+  await page.waitForFunction(({ id, text }) => {
+    const b = document.getElementById(id);
+    return b && b.textContent === text && b.hidden === !text;
+  }, { id, text }, { timeout: 10000 });
+  if (!text) return;
+  const style = await page.evaluate(({ id, color }) => {
     const badge = document.getElementById(id), css = getComputedStyle(badge);
     const probe = document.createElement('span');
-    probe.style.color = ready ? 'var(--recv)' : 'var(--err)';
+    probe.style.color = color;
     document.body.appendChild(probe);
     const expected = getComputedStyle(probe).color;
     probe.remove();
-    return { color: css.color, expected, weight: css.fontWeight, border: css.borderTopColor };
-  }, { id, ready });
-  assert(style.color === style.expected && style.border === style.color && style.weight === '700', `badge ${id}: ${JSON.stringify(style)}`);
+    return { color: css.color, expected, weight: css.fontWeight, border: css.borderTopColor, title: badge.title };
+  }, { id, color });
+  assert(style.color === style.expected && style.border === style.color && style.weight === '700' && style.title, `badge ${id}: ${JSON.stringify(style)}`);
 }
 
 // --- Test ---
@@ -228,11 +242,13 @@ for (const w of [320, 390]) for (const dark of [false, true]) {
     const receiver = await newPage({ viewport: { width: w, height: 844 }, dark });
     try {
       await sender.goto(BASE + '/');
+      // Nothing to pair before a file is chosen: the page is ready to upload, not UNREADY.
+      await peerBadge(sender, 'x-ready', null);
       await sender.setInputFiles('#file', mkfile(`ready-${w}-${dark}.bin`, 1 << 20));
       await sender.waitForSelector('#x-links:not([hidden])');
       const url = (await linkRows(sender))[3].line;
-      await peerBadge(sender, 'x-ready', false);
-      assert(await sender.isEnabled('#x-copy'), 'UNREADY prevents link sharing');
+      await peerBadge(sender, 'x-ready', 'waiting');
+      assert(await sender.isEnabled('#x-copy'), 'WAITING prevents link sharing');
       let confirm = false;
       await receiver.route('**/*?status=1', (route) => confirm
         ? route.continue()
@@ -240,7 +256,7 @@ for (const w of [320, 390]) for (const dark of [false, true]) {
       await receiver.goto(url);
       await peerBadge(receiver, 'dl-ready', false);
       assert(await receiver.isDisabled('#dl button'), 'state without server confirmation enables Download');
-      await peerBadge(sender, 'x-ready', false);
+      await peerBadge(sender, 'x-ready', 'waiting');
       confirm = true;
       await receiver.evaluate(() => window.dispatchEvent(new Event('online')));
       await peerBadge(receiver, 'dl-ready', true);
@@ -252,8 +268,9 @@ for (const w of [320, 390]) for (const dark of [false, true]) {
         await page.screenshot({ path: path.join(OUT, `ready-${role}-${w}-${dark ? 'dark' : 'light'}.png`), fullPage: true });
       }
       await sender.click('#x-cancel');
-      await peerBadge(sender, 'x-ready', false);
-      await peerBadge(receiver, 'dl-ready', false);
+      // Ended session: the outcome is in the page, the badge leaves.
+      await peerBadge(sender, 'x-ready', null);
+      await peerBadge(receiver, 'dl-ready', null);
       assert(await receiver.isDisabled('#dl button'), 'cancelled session still downloadable');
     } finally {
       await sender.context().close();
@@ -291,9 +308,11 @@ await test('peer readiness expires and ignores a late response after backgroundi
       window.__releaseStatus();
     });
     await sleep(100);
-    await peerBadge(receiver, 'dl-ready', false);
+    // Hidden page: the state is checked again on return, the stale answer is ignored.
+    await peerBadge(receiver, 'dl-ready', null);
     assert(await receiver.isDisabled('#dl button'), 'stale response re-enables Download');
-    await peerBadge(sender, 'x-ready', false);
+    // No receiver confirmation: the sender waits, its own connection is fine.
+    await peerBadge(sender, 'x-ready', 'waiting');
     assert((await fetch(url, { headers: { Accept: 'text/html' } })).status === 200, 'presence expiry consumed the link');
     await receiver.evaluate(() => {
       window.__holdStatus = false;
@@ -307,8 +326,9 @@ await test('peer readiness expires and ignores a late response after backgroundi
     await dl.saveAs(saved);
     assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(path.join(OUT, 'src', 'ready-lease.bin'))), 'confirmations changed the content');
     assert((await waitResult(sender)).cls === 'result ok', 'relay outcome');
-    await peerBadge(sender, 'x-ready', false);
-    await peerBadge(receiver, 'dl-ready', false);
+    // Completed: no UNREADY after a successful transfer.
+    await peerBadge(sender, 'x-ready', null);
+    await peerBadge(receiver, 'dl-ready', null);
   } finally {
     await sender.context().close();
     await receiver.context().close();
@@ -522,9 +542,9 @@ await test('upload button + curl receiver from the table', async () => {
   assert(rows[1].line === `wget --content-disposition "${url}"`, `wget row ${rows[1].line}`);
   assert(rows[2].line === `aria2c -x1 -s1 --allow-overwrite=false "${url}"`, `aria2c row ${rows[2].line}`);
   assert((await page.textContent('#x-name')) === 'upload.bin' && (await page.textContent('#x-size')) === '24.0 MiB', 'filename/size');
-  // Switching apps on a phone stops uploading: show the warning beside the links.
+  // Switching apps on a phone stops uploading, a desktop tab keeps it: show both beside the links.
   const hint = await page.textContent('#x-links');
-  assert(/Keep this page open and in the foreground until the end/.test(hint) && /split screen/.test(hint), `foreground warning: ${hint}`);
+  assert(/Keep this page open until the end/.test(hint) && /switch tabs/.test(hint) && /keep it in the foreground/.test(hint) && /split screen/.test(hint), `foreground warning: ${hint}`);
   // Copy the direct link.
   await page.click('[data-copy="x-c3"]');
   await page.waitForFunction(() => document.querySelector('[data-copy="x-c3"]').textContent === 'Copied', null, { timeout: 2000 });
@@ -773,9 +793,9 @@ await test('receiver gone reported to the browser sender', async () => {
 
 // Sender grace (BASHT_SENDER_GRACE=8 on BASE_GRACE). Route the sender page through a proxy
 // that cuts connections, like a phone losing its network in the background.
-async function graceSender(px, name, size) {
+async function graceSender(px, name, size, opts) {
   const src = mkfile(name, size);
-  const page = await newPage();
+  const page = await newPage(opts);
   await page.goto(px.url + '/');
   await page.setInputFiles('#file', src);
   await page.waitForSelector('#x-links:not([hidden])');
@@ -790,30 +810,75 @@ async function graceSender(px, name, size) {
 }
 const WAITING = 'Waiting for the receiver to start the download…';
 
-await test('peer readiness follows sender foreground loss and recovery', async () => {
-  const s = await graceSender({ url: BASE_GRACE }, 'ready-foreground.bin', 24 << 20);
+// Simulates the page moving to the background (visible false) or back.
+async function setVisible(page, visible) {
+  await page.evaluate((visible) => {
+    window.__visible = visible;
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => window.__visible ? 'visible' : 'hidden' });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, visible);
+}
+
+await test('peer readiness follows phone sender foreground loss and recovery', async () => {
+  const s = await graceSender({ url: BASE_GRACE }, 'ready-foreground.bin', 24 << 20, { phone: true });
   const receiver = await newPage();
   try {
     await receiver.goto(s.url);
     await peerBadge(receiver, 'dl-ready', true);
     await peerBadge(s.page, 'x-ready', true);
-    await s.page.evaluate(() => {
-      window.__visible = false;
-      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => window.__visible ? 'visible' : 'hidden' });
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+    const notice = s.page.waitForRequest((r) => r.method() === 'POST' && r.url() === s.url && r.postData() !== '{"foreground":true}');
+    await setVisible(s.page, false);
+    assert((await notice).postData() === '{"foreground":false}', 'phone page did not report the background');
     await peerBadge(s.page, 'x-ready', false);
     await peerBadge(receiver, 'dl-ready', false);
     assert(await receiver.isDisabled('#dl button'), 'sender absent but Download enabled');
-    await s.page.evaluate(() => {
-      window.__visible = true;
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
+    await setVisible(s.page, true);
     await peerBadge(receiver, 'dl-ready', true);
     await peerBadge(s.page, 'x-ready', true);
     await s.page.click('#x-cancel');
     await waitResult(s.page);
-    await peerBadge(receiver, 'dl-ready', false);
+    await peerBadge(s.page, 'x-ready', null);
+    await peerBadge(receiver, 'dl-ready', null);
+  } finally {
+    await s.page.context().close();
+    await receiver.context().close();
+  }
+});
+
+await test('peer readiness: a desktop sender stays available in the background', async () => {
+  const s = await graceSender({ url: BASE_GRACE }, 'ready-background.bin', 24 << 20);
+  const receiver = await newPage();
+  try {
+    // The first PUT left with the link: count only the uploads started afterwards.
+    await s.page.evaluate(() => {
+      const send = XMLHttpRequest.prototype.send;
+      window.__puts = 0;
+      XMLHttpRequest.prototype.send = function (b) { window.__puts++; return send.call(this, b); };
+    });
+    await receiver.goto(s.url);
+    await peerBadge(receiver, 'dl-ready', true);
+    await peerBadge(s.page, 'x-ready', true);
+    const notice = s.page.waitForRequest((r) => r.method() === 'POST' && r.url() === s.url && r.postData() !== '{"foreground":true}');
+    await setVisible(s.page, false);
+    assert((await notice).postData() === '{"foreground":true,"background":true}', 'desktop page did not keep its presence');
+    // Past several readiness lifetimes: the confirmations keep both sides READY.
+    await sleep(6000);
+    await peerBadge(receiver, 'dl-ready', true);
+    await peerBadge(s.page, 'x-ready', true);
+    assert(!(await receiver.isDisabled('#dl button')), 'hidden desktop sender disables Download');
+    // Returning to the page does not reattach the body.
+    await setVisible(s.page, true);
+    await sleep(1000);
+    await setVisible(s.page, false);
+    const puts = await s.page.evaluate(() => window.__puts);
+    assert(puts === 0, `the hidden or returning page sent the file again: ${puts} PUT`);
+    const [dl] = await Promise.all([receiver.waitForEvent('download'), receiver.click('#dl button')]);
+    const saved = path.join(OUT, 'ready-background-received.bin');
+    await dl.saveAs(saved);
+    assert(sha(fs.readFileSync(saved)) === sha(fs.readFileSync(s.src)), 'file mismatch from a hidden sender');
+    const res = await waitResult(s.page, 20000);
+    assert(res.cls === 'result ok', `outcome ${JSON.stringify(res)}`);
+    noErrors(s.page, 'background sender', PUT_FAILED);
   } finally {
     await s.page.context().close();
     await receiver.context().close();

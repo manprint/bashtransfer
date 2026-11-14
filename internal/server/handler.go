@@ -315,6 +315,7 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		Resume     string `json:"resume"`
 		Rebind     bool   `json:"rebind"`
 		Foreground *bool  `json:"foreground"`
+		Background bool   `json:"background"`
 		Readiness  bool   `json:"readiness"`
 	}
 	// The body must be read to the end: only then net/http detects the connection close and
@@ -335,6 +336,10 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.opts.Logger.LogAttrs(r.Context(), slog.LevelInfo, "upload_resumed", slog.String("id", s.ID))
+		// A page reconnecting while hidden on desktop: keep the longer background presence.
+		if req.Background {
+			_ = h.reg.Background(s.Slug, s.Token)
+		}
 	} else {
 		if s, err = h.reg.Reserve(SanitizeName(req.Name), *req.Size, bindTimeout); err != nil {
 			h.rejectCreate(w, r, err)
@@ -343,7 +348,7 @@ func (h *handler) reserve(w http.ResponseWriter, r *http.Request) {
 		h.opts.Logger.LogAttrs(r.Context(), slog.LevelDebug, "upload_reserved",
 			slog.String("id", s.ID), slog.Int64("length", s.Length))
 		if req.Foreground != nil {
-			_ = h.reg.Foreground(s.Slug, s.Token, *req.Foreground)
+			_ = h.presence(s.Slug, s.Token, *req.Foreground, req.Background)
 		}
 	}
 	// On exit from the stream (page closed, network dropped, Cancel, session finished): without tolerance
@@ -456,17 +461,27 @@ func (h *handler) foreground(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	var req struct {
 		Foreground *bool `json:"foreground"`
+		Background bool  `json:"background"`
 	}
 	body, err := readJSONBody(w, r)
 	if err != nil || json.Unmarshal(body, &req) != nil || req.Foreground == nil {
 		h.reject(w, r, slog.LevelDebug, http.StatusBadRequest, reasonBadRequest, "bad request")
 		return
 	}
-	if h.reg.Foreground(id, r.Header.Get(tokenHeader), *req.Foreground) != nil {
+	if h.presence(id, r.Header.Get(tokenHeader), *req.Foreground, req.Background) != nil {
 		h.reject(w, r, slog.LevelDebug, http.StatusNotFound, reasonNotFound, "404 page not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// presence applies a sender page's notice. background, with visible, marks a page hidden in a
+// desktop browser, which keeps uploading: it stays present and confirms itself less often.
+func (h *handler) presence(id, token string, visible, background bool) error {
+	if visible && background {
+		return h.reg.Background(id, token)
+	}
+	return h.reg.Foreground(id, token, visible)
 }
 
 // cancel cancels an upload from the browser: DELETE /<slug> with the reservation's token. The page sends

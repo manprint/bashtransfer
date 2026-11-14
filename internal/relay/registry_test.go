@@ -857,6 +857,50 @@ func TestRegistryForegroundHeartbeatExpires(t *testing.T) {
 	}
 }
 
+func TestRegistryBackgroundKeepsSender(t *testing.T) {
+	if senderBackgroundTimeout < 75*time.Second {
+		t.Fatalf("background presence %v: a hidden page may confirm only once a minute", senderBackgroundTimeout)
+	}
+	r := NewRegistry(10, time.Hour)
+	r.SetSenderGrace(time.Minute)
+	s, binding := reservedBound(t, r)
+	t.Cleanup(func() { r.Cancel(s); r.Finish(s) })
+	if err := r.Background(s.Slug, "wrong"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("background with wrong token: %v", err)
+	}
+	if err := r.Foreground(s.Slug, s.Token, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Background(s.Slug, s.Token); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-binding:
+		t.Fatal("a hidden desktop page lost its body")
+	default:
+	}
+	if peer, err := r.ObserveReceiver(s.Slug); err != nil || peer.Away || !peer.Ready {
+		t.Fatalf("hidden desktop page not available: %+v, err=%v", peer, err)
+	}
+	// The longer confirmation still expires, and then detaches the body as for a visible page.
+	r.mu.Lock()
+	s.presenceTimer.Reset(20 * time.Millisecond)
+	r.mu.Unlock()
+	for deadline := time.Now().Add(time.Second); !s.Away(); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("background presence expired without putting the sender in grace")
+		}
+	}
+	select {
+	case <-binding:
+	default:
+		t.Fatal("background presence expired but the body is still attached")
+	}
+	if _, err := r.Peek(s.Slug); err != nil {
+		t.Fatalf("background presence expiry closed the link instead of entering grace: %v", err)
+	}
+}
+
 func TestRegistryPeerReadinessLifecycle(t *testing.T) {
 	r := NewRegistry(10, time.Hour)
 	r.SetSenderGrace(time.Minute)

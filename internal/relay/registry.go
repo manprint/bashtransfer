@@ -50,6 +50,10 @@ func (e *GoneError) Is(target error) bool { return target == ErrGone }
 const (
 	slugAttempts          = 5
 	senderPresenceTimeout = 15 * time.Second
+	// senderBackgroundTimeout bounds the presence of a page hidden in a desktop browser
+	// (Background): the upload goes on, but the browser may run the page's timers only once a
+	// minute (Chrome, after five minutes hidden), so its confirmations arrive more slowly.
+	senderBackgroundTimeout = 90 * time.Second
 	// tombstoneTTL: how long a terminal slug keeps answering 410 (D17).
 	tombstoneTTL = 24 * time.Hour
 	// maxTombstones bounds the tombstone memory (about 100 bytes each): beyond the limit the oldest
@@ -347,17 +351,30 @@ func (r *Registry) BeginRelay(s *Session, binding <-chan struct{}) error {
 
 // Foreground registers the page's availability, without reading the file body.
 func (r *Registry) Foreground(id, token string, visible bool) error {
+	return r.presence(id, token, visible, senderPresenceTimeout)
+}
+
+// Background registers a page hidden in a browser that keeps uploading (desktop: another tab or
+// a minimized window). Unlike Foreground(false) the body stays attached and the sender present;
+// the confirmation lasts senderBackgroundTimeout, because a hidden page renews it less often.
+func (r *Registry) Background(id, token string) error {
+	return r.presence(id, token, true, senderBackgroundTimeout)
+}
+
+func (r *Registry) presence(id, token string, visible bool, ttl time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.sessions[id]
 	if !ok || s.Token == "" || subtle.ConstantTimeCompare([]byte(s.Token), []byte(token)) != 1 {
 		return ErrNotFound
 	}
-	r.foregroundLocked(s, visible)
+	r.foregroundLocked(s, visible, ttl)
 	return nil
 }
 
-func (r *Registry) foregroundLocked(s *Session, visible bool) {
+// foregroundLocked records the page's presence: absent detaches the body; present lasts ttl
+// unless renewed.
+func (r *Registry) foregroundLocked(s *Session, visible bool, ttl time.Duration) {
 	s.monitored, s.foreground = true, visible
 	s.presenceGeneration++
 	if s.presenceTimer != nil {
@@ -368,7 +385,7 @@ func (r *Registry) foregroundLocked(s *Session, visible bool) {
 		return
 	}
 	generation := s.presenceGeneration
-	s.presenceTimer = time.AfterFunc(senderPresenceTimeout, func() {
+	s.presenceTimer = time.AfterFunc(ttl, func() {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		if r.sessions[s.Slug] == s && s.presenceGeneration == generation {
@@ -392,7 +409,7 @@ func (r *Registry) Resume(id, token string, rebind bool) (*Session, bool, error)
 		r.detachLocked(s, s.unbind)
 	}
 	if s.monitored {
-		r.foregroundLocked(s, true)
+		r.foregroundLocked(s, true, senderPresenceTimeout)
 	}
 	return s, started, nil
 }

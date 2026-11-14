@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -282,6 +283,43 @@ func TestMethodsAllow(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != c.allow {
 			t.Errorf("%s %s: status %d, Allow %q; expected 405, %q", c.method, c.path, resp.StatusCode, resp.Header.Get("Allow"), c.allow)
+		}
+	}
+}
+
+// TestPagesShowVersion: every page (home, download, message) shows the build version in the footer.
+func TestPagesShowVersion(t *testing.T) {
+	srv, reg := newTestServer(t)
+	s, err := reg.Reserve("a.bin", 3, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	footer := `<span class="version" title="Deployed release">` + CurrentVersion() + `</span>`
+	for _, p := range []string{"/", "/" + s.Slug, "/AbC123xY9z"} {
+		_, body := browserDo(t, http.MethodGet, srv.URL+p)
+		wantContains(t, "GET "+p, body, footer)
+	}
+}
+
+// TestResolveVersion: the tag set at build time wins; without it the version stamped by go build,
+// then "dev", never an empty or "(devel)" footer.
+func TestResolveVersion(t *testing.T) {
+	stamped := &debug.BuildInfo{Main: debug.Module{Version: "v0.1.3-0.20261114100000-a0a6ecd1e2f3+dirty"}}
+	devel := &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}
+	for _, c := range []struct {
+		tag  string
+		bi   *debug.BuildInfo
+		want string
+	}{
+		{"v1.2.3", stamped, "v1.2.3"},
+		{" v1.2.3\n", nil, "v1.2.3"},
+		{"", stamped, stamped.Main.Version},
+		{"", devel, "dev"},
+		{"", nil, "dev"},
+		{"  ", &debug.BuildInfo{}, "dev"},
+	} {
+		if got := resolveVersion(c.tag, c.bi); got != c.want {
+			t.Errorf("resolveVersion(%q, %v) = %q, want %q", c.tag, c.bi, got, c.want)
 		}
 	}
 }

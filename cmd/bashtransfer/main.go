@@ -48,6 +48,7 @@ func run() error {
 	}
 	logger := newLogger(os.Stderr, cfg.LogFormat, cfg.LogLevel)
 	logger.Info("server_start",
+		"version", server.CurrentVersion(),
 		"listen", cfg.Listen,
 		"public_url", cfg.PublicURL,
 		"auth", cfg.AuthUser != "",

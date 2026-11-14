@@ -1,5 +1,9 @@
 # Override to build the app image from source instead of using the published image:
 #   BASHT_IMAGE=bashtransfer:local docker compose -f compose.yaml -f compose.build.yaml up -d --build
+# BASHT_VERSION sets the release shown in the page footer, e.g. BASHT_VERSION=$(git describe --tags).
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${BASHT_VERSION:-dev}

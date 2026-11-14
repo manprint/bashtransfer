@@ -1,6 +1,6 @@
 {{define "content"}}
 <section class="card" aria-labelledby="dl-title">
-  <h2 id="dl-title"><span class="role role-recv">Receiver</span>Download a file<span class="role peer-state is-unready" id="dl-ready" role="status" aria-live="polite" aria-atomic="true" title="READY means both connections were recently confirmed by the server.">UNREADY</span></h2>
+  <h2 id="dl-title"><span class="role role-recv">Receiver</span>Download a file<span class="role peer-state" id="dl-ready" role="status" aria-live="polite" aria-atomic="true" hidden></span></h2>
   <dl class="file">
     <dt>File</dt><dd>{{.Name}}</dd>
     <dt>Size</dt><dd>{{.Size}}</dd>
@@ -32,28 +32,38 @@
   var submittedAt = 0, next = 2000;
   var statusURL = new URL(window.location.href);
   statusURL.searchParams.set("status", "1");
-  function readiness(value, ttl) {
+  // Pairing badge: READY while the server confirms both pages; UNREADY when it does not (sender
+  // away, failed or expired check, no network). Hidden (quiet) while the state is being checked,
+  // while the requested download starts, and once the link no longer works.
+  var badgeTitles = {
+    ready: "Both connections were recently confirmed by the server.",
+    unready: "The connections are not confirmed right now."
+  };
+  function readiness(value, ttl, quiet) {
     clearTimeout(freshTimer);
     ready = !!value;
-    var text = ready ? "READY" : "UNREADY";
+    var state = ready ? "ready" : quiet ? "" : "unready", text = state.toUpperCase();
     if (badge.textContent !== text) {
       badge.textContent = text;
-      badge.className = "role peer-state " + (ready ? "is-ready" : "is-unready");
+      badge.className = "role peer-state" + (state ? " is-" + state : "");
+      badge.title = badgeTitles[state] || "";
+      badge.hidden = !state;
     }
     if (ready) freshTimer = setTimeout(function () { unknown(); }, ttl);
   }
-  function unknown() {
-    readiness(false);
+  // checking: the state is about to be read again (first load, return to the page, network back).
+  function unknown(checking) {
+    readiness(false, 0, checking);
     btn.disabled = true;
     btn.textContent = submitted ? "Download requested" : "Checking connection…";
     status.textContent = submitted
       ? "Check your browser's downloads. The connections are not confirmed; keep both devices connected."
       : "Checking both connections. No download has started and the link has not been used.";
   }
-  function invalidate() {
+  function invalidate(checking) {
     clearTimeout(timer);
     if (pending) { var old = pending; pending = null; old.abort(); }
-    unknown();
+    unknown(checking);
   }
   function poll() {
     clearTimeout(timer);
@@ -70,8 +80,8 @@
         if (m.state === "ready" || m.state === "away" || ((m.state === "active" || m.state === "starting") && submitted)) {
           var ttl = (m.ready_ttl || 5) * 1000 - (Date.now() - began);
           var confirmed = m.ready === true && ttl > 0 && (submitted ? m.state === "active" : m.state === "ready");
-          readiness(confirmed, ttl);
           var starting = submitted && m.state !== "active" && Date.now() - submittedAt < 10000;
+          readiness(confirmed, ttl, starting);
           // Fast until the relay starts, slow while it runs (the server then confirms for longer).
           next = starting ? 500 : submitted && ready ? 5000 : 2000;
           away.hidden = m.state !== "away";
@@ -91,7 +101,7 @@
         }
         else {
           closed = true;
-          readiness(false);
+          readiness(false, 0, true);
           btn.disabled = true;
           btn.textContent = submitted ? "Download requested" : "Link unavailable";
           away.hidden = true;
@@ -109,21 +119,21 @@
         if (!closed) timer = setTimeout(poll, next);
       });
   }
-  unknown();
+  unknown(true);
   poll();
-  document.addEventListener("visibilitychange", function () { invalidate(); poll(); });
-  window.addEventListener("offline", invalidate);
-  window.addEventListener("pagehide", invalidate);
-  window.addEventListener("online", function () { invalidate(); poll(); });
+  document.addEventListener("visibilitychange", function () { invalidate(true); poll(); });
+  window.addEventListener("offline", function () { invalidate(false); });
+  window.addEventListener("pagehide", function () { invalidate(true); });
+  window.addEventListener("online", function () { invalidate(true); poll(); });
   // Only a page restored from the back/forward cache: the first load already polls.
-  window.addEventListener("pageshow", function (e) { if (e.persisted) { invalidate(); poll(); } });
+  window.addEventListener("pageshow", function (e) { if (e.persisted) { invalidate(true); poll(); } });
   form.addEventListener("submit", function (e) {
     if (!ready || submitted) { e.preventDefault(); poll(); return; }
     submitted = true;
     submittedAt = Date.now();
     clearTimeout(timer);
     if (pending) { var old = pending; pending = null; old.abort(); }
-    readiness(false);
+    readiness(false, 0, true);
     // Let the form submit before disabling the button.
     setTimeout(function () {
       btn.disabled = true;

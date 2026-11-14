@@ -10,8 +10,10 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"bashtransfer/internal/relay"
@@ -36,12 +38,42 @@ func parsePages(names ...string) map[string]*template.Template {
 	return m
 }
 
+// Version is the release of the build, shown in the footer of every page and logged at startup:
+// the deployed git tag (vX.Y.Z). The image build sets it from the tag (Dockerfile, ARG VERSION):
+//
+//	go build -ldflags "-X bashtransfer/internal/server.Version=v1.2.3" ./cmd/bashtransfer
+//
+// Empty, CurrentVersion falls back to the version go build stamps from git (a pseudo-version on an
+// untagged or modified checkout), then to "dev": a build without a tag never looks like a release.
+var Version string
+
+// CurrentVersion returns the version of the build; see Version.
+func CurrentVersion() string { return currentVersion() }
+
+var currentVersion = sync.OnceValue(func() string {
+	bi, _ := debug.ReadBuildInfo()
+	return resolveVersion(Version, bi)
+})
+
+// resolveVersion picks the version from the value set at build time, then from the build info.
+func resolveVersion(tag string, bi *debug.BuildInfo) string {
+	if v := strings.TrimSpace(tag); v != "" {
+		return v
+	}
+	if bi != nil && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return "dev"
+}
+
 // pageData holds the page data: each page uses only its own fields.
 type pageData struct {
 	Title   string
 	NoIndex bool
 	// Root is the relative link to the home: it also works behind a proxy that strips a path prefix.
 	Root string
+	// Version is the build version for the footer (CurrentVersion).
+	Version string
 	// home
 	Base    string
 	HTTPS   bool
@@ -90,6 +122,7 @@ const pageCSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsa
 // a template error becomes a 500 instead of a truncated page.
 func servePage(w http.ResponseWriter, r *http.Request, status int, name, formAction, connect string, d pageData) {
 	d.Root = "./"
+	d.Version = CurrentVersion()
 	if n := strings.Count(r.URL.EscapedPath(), "/"); n > 1 {
 		d.Root = strings.Repeat("../", n-1)
 	}

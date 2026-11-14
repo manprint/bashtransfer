@@ -339,17 +339,24 @@ func TestSenderGraceLiveStatus(t *testing.T) {
 	}
 	check("ready", http.StatusOK)
 	check("ready", http.StatusOK)
-	req, _ := http.NewRequest(http.MethodPost, base+"/"+res.Slug, strings.NewReader(`{"foreground":false}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(tokenHeader, res.Token)
-	r, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	notice := func(body string) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, base+"/"+res.Slug, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(tokenHeader, res.Token)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		if r.StatusCode != http.StatusNoContent {
+			t.Fatalf("presence %s: status %d", body, r.StatusCode)
+		}
 	}
-	r.Body.Close()
-	if r.StatusCode != http.StatusNoContent {
-		t.Fatalf("presence: status %d", r.StatusCode)
-	}
+	// A page hidden in a desktop browser keeps uploading: it stays available.
+	notice(`{"foreground":true,"background":true}`)
+	check("ready", http.StatusOK)
+	notice(`{"foreground":false,"background":true}`)
 	check("away", http.StatusOK)
 	if _, err := reg.Peek(res.Slug); err != nil {
 		t.Fatalf("status check consumed the link: %v", err)
