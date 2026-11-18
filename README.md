@@ -248,7 +248,7 @@ If the variables are not set, the upload is anonymous.
 
 ## Image
 
-The workflow `.github/workflows/image.yml` runs `gofmt`, `go vet`, `go test -race`, `scripts/e2e.sh` (with `aria2c`) and the frontend tests `scripts/ui/run.sh` (Playwright, direct servers and Apache) on every pull request and push, and publishes the image to GitHub Container Registry (`ghcr.io/<owner>/<repo>`, with the workflow token, no secret):
+The workflow `.github/workflows/image.yml` runs `gofmt`, `go vet`, `go test -race`, `scripts/e2e.sh` (with `aria2c`) and the frontend tests `scripts/ui/run.sh` (Playwright, direct servers and Apache) on every pull request and push, scans the built image with Trivy (it fails on HIGH or CRITICAL vulnerabilities that have a fix), and publishes the image to GitHub Container Registry (`ghcr.io/<owner>/<repo>`, with the workflow token, no secret):
 
 | Event | Published tags |
 |---|---|
@@ -417,7 +417,7 @@ How it behaves:
   The condition leaves the download names intact. It protects a sender who mistakenly adds `-OJ` to the upload and, with older curl versions, from the `503`: curl 8.18 ignores the header on `4xx`/`5xx` responses (verified with Apache 2.4.59, curl 8.18 and 8.5).
 - Upload from the browser: the page closes the link with an explicit `DELETE` (Cancel, closing the page), which passes immediately. If it does not go through and the browser drops the connection, Apache signals the NDJSON stream's closure to the backend only after several failed writes to the browser: the link closes in about 3.5 seconds.
 - Apache's `combined` access log records the request line (including the slug, query and terminal-upload file name), authenticated user and Referer. Whoever reads a live slug can download the file. The private format above records only timestamp, method, status, response bytes and duration (`%D`, microseconds), not IP, path, query, user or headers. Apply it to the site's port-80 vhost too. Other access logs, Apache's error log, debug/trace logging and any upstream proxy need a separate review; the custom format does not redact them. Restrict and handle existing logs according to the retention policy.
-- The h2c relay and web UI were verified with Apache 2.4.69 (image `httpd:2.4`) over plain HTTP towards the client (Playwright with Chromium). This is not a verification of your production vhost or Certbot include. Repeat step 7 and the [Apache deployment checks](docs/operazioni.md#apache-deployment) with your server's package and TLS.
+- The h2c relay and web UI were verified with Apache 2.4.71 (image `httpd:2.4`) over plain HTTP towards the client (Playwright with Chromium). This is not a verification of your production vhost or Certbot include. Repeat step 7 and the [Apache deployment checks](docs/operazioni.md#apache-deployment) with your server's package and TLS.
 
 ## Log
 

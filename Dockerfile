@@ -1,7 +1,7 @@
 # Static build (CGO_ENABLED=0) and shell-free runtime. Images pinned by tag and digest (D14).
 # Builder runs on the build platform and cross-compiles for TARGETOS/TARGETARCH:
 # the multi-architecture image (amd64, arm64) needs no emulation.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS builder
 ARG TARGETOS
 ARG TARGETARCH
 # Release shown in the page footer and logged at startup: the CI passes the git tag (vX.Y.Z).

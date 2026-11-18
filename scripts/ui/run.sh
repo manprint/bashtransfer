@@ -23,8 +23,8 @@ else
 	OUT="$TMP/out"
 fi
 PIDS=()
-# Image pinned by digest (2.4.69); container names match httpd.conf.
-HTTPD_IMAGE="httpd:2.4.69@sha256:d3accb516506c05ae0068bb54ba6798a10b249b64db91268fca692326cb02b4b"
+# Image pinned by digest (2.4.71); container names match httpd.conf.
+HTTPD_IMAGE="httpd:2.4.71@sha256:32e9403360ab2f1047523e72f256527fb9aee68b342abf6ad03f0d629157f3d9"
 CONTAINERS=(bt-ui-apache bt-ui-app bt-ui-app-short bt-ui-app-auth bt-ui-app-grace)
 NET=bt-ui-net
 

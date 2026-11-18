@@ -1,9 +1,11 @@
 # Test and publish the image to GitHub Container Registry (ghcr.io/<owner>/<repo>).
-#   pull request:   test (vet, race, e2e) and ui (Playwright); build but do not publish the image.
-#   push to main:   test, then image tagged main and sha-<commit>.
-#   tag vX.Y.Z:     test, then image tagged X.Y.Z, X.Y and latest.
+#   pull request:   test (vet, race, e2e), ui (Playwright) and scan (Trivy); build but do not publish the image.
+#   push to main:   test and scan, then image tagged main and sha-<commit>.
+#   tag vX.Y.Z:     test and scan, then image tagged X.Y.Z, X.Y and latest.
 # Multi-architecture image (linux/amd64, linux/arm64) with Go cross-compilation, SBOM and
 # provenance. Uses GITHUB_TOKEN: no secrets to configure.
+# The scan job fails on HIGH or CRITICAL vulnerabilities with a fix available: a base image or
+# Go standard library advisory is cleared by a version bump, not by muting the finding.
 # Actions are pinned to commit SHAs (version in comments): update SHA and comment together.
 name: image
 
@@ -24,7 +26,7 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   # Matches the Dockerfile builder.
-  GO_VERSION: "1.27.3"
+  GO_VERSION: "1.27.4"
 
 jobs:
   test:
@@ -33,7 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ env.GO_VERSION }}
           # No external dependencies (no go.sum): module caching is unnecessary.
@@ -69,14 +71,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
 
-      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "26"
 
       - name: playwright
         working-directory: scripts/ui
@@ -96,14 +98,47 @@ jobs:
 
       - name: artifact
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui
           path: ${{ runner.temp }}/ui
           retention-days: 7
 
+  # Vulnerability gate on the same Dockerfile: amd64 image built locally, scanned with Trivy.
+  # ignore-unfixed keeps release availability (Debian findings without a fix cannot be acted on);
+  # any HIGH or CRITICAL with a fix fails the run, so the bump lands before publishing.
+  scan:
+    needs: [test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: build (amd64)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: bashtransfer:scan
+          cache-from: type=gha
+
+      - name: trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: bashtransfer:scan
+          # Pinned scanner, updated with the action (version in the comment).
+          version: v0.76.2
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
   image:
-    needs: [test, ui]
+    needs: [test, ui, scan]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -116,7 +151,7 @@ jobs:
 
       - name: login ghcr.io
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
